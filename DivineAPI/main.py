@@ -60,6 +60,14 @@ _cust_service = serviceCustomer(_cust_persistence, secret_key=os.getenv("SECRET_
 _broker_service = serviceBroker(_broker_persistence, secret_key=os.getenv("SECRET_KEY"))
 
 
+@app.get("/health")
+def health():
+    db_ok = PersistenceDB().test_connection()
+    if not db_ok:
+        return JSONResponse({"status": "error", "database": "unreachable"}, status_code=503)
+    return {"status": "ok", "database": "connected"}
+
+
 @app.post("/customer/signup", response_model=UserOutDTO)
 def customer_signup(request: Request, dto: UserCreateDTO):
     try:
