@@ -4,6 +4,7 @@ SQLAlchemy
 psycopg2-binary
 python-dotenv
 passlib[bcrypt]
+bcrypt<4.1.0
 PyJWT
 pydantic
 PyYAML
