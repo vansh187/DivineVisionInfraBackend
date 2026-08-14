@@ -26,15 +26,14 @@ class BrokerModel(Base):
 class persistenceBroker:
     def __init__(self, session_factory=SessionLocal):
         self._session_factory = session_factory
-        # load queries with fallback
+        # load queries from the broker YAML file with safe fallback
         root = os.path.dirname(os.path.dirname(__file__))
-        qpath = os.path.join(root, "queries.yaml")
+        qpath = os.path.join(root, "DivineDatabasequeries", "broker_queries.yaml")
         queries = {}
         try:
             if os.path.exists(qpath):
                 with open(qpath, "r", encoding="utf-8") as f:
-                    data = yaml.safe_load(f) or {}
-                queries = data.get("broker", {})
+                    queries = yaml.safe_load(f) or {}
         except Exception:
             queries = {}
         queries.setdefault("create_broker", (

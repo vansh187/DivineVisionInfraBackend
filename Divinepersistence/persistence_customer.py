@@ -32,15 +32,14 @@ class CustomerModel(Base):
 class persistenceCustomer:
     def __init__(self, session_factory=SessionLocal):
         self._session_factory = session_factory
-        # load queries from YAML with safe fallback
+        # load queries from the customer YAML file with safe fallback
         root = os.path.dirname(os.path.dirname(__file__))
-        qpath = os.path.join(root, "queries.yaml")
+        qpath = os.path.join(root, "DivineDatabasequeries", "customer_queries.yaml")
         queries = {}
         try:
             if os.path.exists(qpath):
                 with open(qpath, "r", encoding="utf-8") as f:
-                    data = yaml.safe_load(f) or {}
-                queries = data.get("customer", {})
+                    queries = yaml.safe_load(f) or {}
         except Exception:
             queries = {}
         queries.setdefault("create_customer", (
