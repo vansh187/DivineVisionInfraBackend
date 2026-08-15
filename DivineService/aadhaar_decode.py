@@ -127,7 +127,10 @@ class AadhaarOfflineXML:
         try:
             zf = zipfile.ZipFile(file, "r")
             zf.setpassword(str(self.share_code).encode("utf-8"))
-            filedata = zf.open(zf.namelist()[0]).read()
+            names = zf.namelist()
+            if not names:
+                raise AadhaarQrParseError("invalid_zip_or_share_code: zip has no entries")
+            filedata = zf.open(names[0]).read()
         except (zipfile.BadZipFile, RuntimeError, KeyError) as e:
             # RuntimeError covers wrong-password ("Bad password for file") from zipfile
             raise AadhaarQrParseError(f"invalid_zip_or_share_code: {e}") from e

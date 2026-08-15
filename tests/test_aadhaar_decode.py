@@ -179,6 +179,18 @@ def test_corrupt_zip_raises_parse_error():
         AadhaarOfflineXML(io.BytesIO(b"this is not a zip file at all"), "1234")
 
 
+def test_empty_zip_raises_parse_error_not_index_error():
+    # A well-formed zip with zero entries used to hit zf.namelist()[0], raising an
+    # uncaught IndexError instead of AadhaarQrParseError - that bypassed
+    # verify_offline_xml's error handling and surfaced as a raw 500 instead of the
+    # intended 400 xml_parse_failed response.
+    empty_zip = io.BytesIO()
+    with zipfile.ZipFile(empty_zip, "w"):
+        pass
+    with pytest.raises(AadhaarQrParseError):
+        AadhaarOfflineXML(io.BytesIO(empty_zip.getvalue()), "1234")
+
+
 def test_malformed_xml_inside_valid_zip_raises_parse_error():
     with pytest.raises(AadhaarQrParseError):
         AadhaarOfflineXML(io.BytesIO(_build_zip(b"<not><valid xml")), "1234")
