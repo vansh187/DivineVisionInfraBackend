@@ -16,6 +16,7 @@ from DivineAPI.customer_api import router as customer_router
 from DivineAPI.broker_api import router as broker_router
 from DivineAPI.documents_api import router as documents_router
 from DivineAPI.kyc_api import router as kyc_router
+from DivineAPI.payment_api import router as payment_router
 from DivineService import serviceHealth
 
 
@@ -96,3 +97,4 @@ app.include_router(customer_router)
 app.include_router(broker_router)
 app.include_router(documents_router)
 app.include_router(kyc_router)
+app.include_router(payment_router)

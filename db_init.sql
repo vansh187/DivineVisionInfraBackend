@@ -59,3 +59,21 @@ CREATE TABLE IF NOT EXISTS divine_kyc_verifications (
 -- masked_aadhaar), never the full number, so there is nothing further to redact.
 
 CREATE INDEX IF NOT EXISTS idx_divine_kyc_verifications_owner_id ON divine_kyc_verifications (owner_id);
+
+CREATE TABLE IF NOT EXISTS divine_payments (
+  id varchar(36) PRIMARY KEY,
+  owner_id varchar(6) NOT NULL,
+  owner_role varchar(10) NOT NULL CHECK (owner_role IN ('customer', 'broker')),
+  amount numeric(12,2) NOT NULL,
+  currency varchar(3) NOT NULL DEFAULT 'INR',
+  status varchar(20) NOT NULL DEFAULT 'created' CHECK (status IN ('created', 'paid', 'failed')),
+  razorpay_order_id varchar(64) NOT NULL,
+  razorpay_payment_id varchar(64),
+  razorpay_signature varchar(255),
+  notes jsonb,
+  created_date timestamptz DEFAULT now(),
+  last_updated_date timestamptz DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_divine_payments_owner_id ON divine_payments (owner_id);
+CREATE INDEX IF NOT EXISTS idx_divine_payments_razorpay_order_id ON divine_payments (razorpay_order_id);

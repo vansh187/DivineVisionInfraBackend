@@ -64,3 +64,36 @@ class KycVerificationOutDTO(BaseModel):
     extracted_data: Dict[str, Any]
     failure_reason: Optional[str]
     created_date: Optional[datetime]
+
+
+class PaymentOrderRequestDTO(BaseModel):
+    amount: float = Field(..., gt=0, description="Amount in INR (rupees), e.g. 50000.00")
+
+
+class PaymentOrderOutDTO(BaseModel):
+    payment_id: str
+    razorpay_order_id: str
+    razorpay_key_id: str
+    amount: float
+    amount_paise: int
+    currency: str
+    status: str
+
+
+class PaymentVerifyRequestDTO(BaseModel):
+    razorpay_order_id: str
+    razorpay_payment_id: str
+    razorpay_signature: str
+
+
+class PaymentOutDTO(BaseModel):
+    id: str
+    owner_id: str
+    owner_role: str
+    amount: float
+    currency: str
+    status: str
+    verified: bool
+    razorpay_order_id: str
+    razorpay_payment_id: Optional[str]
+    created_date: Optional[datetime]

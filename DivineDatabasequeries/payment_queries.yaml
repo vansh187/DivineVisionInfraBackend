@@ -1,0 +1,13 @@
+# SQL queries for the payments API
+create_payment: |
+  INSERT INTO divine_payments(id, owner_id, owner_role, amount, currency, status, razorpay_order_id, notes, created_date, last_updated_date)
+  VALUES (:id, :owner_id, :owner_role, :amount, :currency, :status, :razorpay_order_id, :notes, :created_date, :last_updated_date)
+  RETURNING *;
+get_by_id: |
+  SELECT * FROM divine_payments WHERE id = :id LIMIT 1;
+get_by_razorpay_order_id: |
+  SELECT * FROM divine_payments WHERE razorpay_order_id = :razorpay_order_id LIMIT 1;
+update_payment_status: |
+  UPDATE divine_payments SET status = :status, razorpay_payment_id = :razorpay_payment_id,
+  razorpay_signature = :razorpay_signature, last_updated_date = :last_updated_date
+  WHERE id = :id RETURNING *;

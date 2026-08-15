@@ -17,3 +17,4 @@ cryptography
 signxml
 python-multipart
 defusedxml
+razorpay
