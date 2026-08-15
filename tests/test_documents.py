@@ -1,7 +1,7 @@
 import os
 import jwt
 from datetime import datetime, timedelta, timezone
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 from fastapi.testclient import TestClient
 
 # Ensure test env before importing app/persistence
@@ -16,8 +16,13 @@ client = TestClient(app)
 
 FAKE_SIGNED_URL = "https://fake.supabase.co/storage/v1/object/sign/documents/fake.pdf?token=abc"
 
+_TOKEN = None  # set in setup_module - shared across most tests to stay within the rate limiter
+_OTHER_TOKEN = None  # a second, distinct identity - only for the cross-owner test
+_SHARED_DOCUMENT_ID = None  # one pre-generated document, reused by GET-focused tests
+
 
 def setup_module(module):
+    global _TOKEN, _OTHER_TOKEN, _SHARED_DOCUMENT_ID
     db_file = os.path.join(os.getcwd(), "test_db.sqlite")
     try:
         if os.path.exists(db_file):
@@ -26,14 +31,37 @@ def setup_module(module):
         pass
     PersistenceDB().create_tables()
 
-
-def _signup_and_login_customer(username="dockust1"):
-    client.post("/customer/signup", json={
-        "username": username, "password": "strongpassword", "email": f"{username}@example.com",
-    })
-    lr = client.post("/customer/login", json={"username": username, "password": "strongpassword"})
+    # Two real signups total for this whole file (plus test_auth.py's own one signup),
+    # instead of one per test - the global rate limiter (10 req/60s per client+path)
+    # applies across the whole test session, and blowing through it here previously
+    # caused unrelated tests in other files to fail with spurious 429s.
+    client.post("/customer/signup", json={"username": "dockust_shared", "password": "strongpassword"})
+    lr = client.post("/customer/login", json={"username": "dockust_shared", "password": "strongpassword"})
     assert lr.status_code == 200, lr.text
-    return lr.json()["access_token"]
+    _TOKEN = lr.json()["access_token"]
+
+    client.post("/customer/signup", json={"username": "dockust_other", "password": "strongpassword"})
+    lr2 = client.post("/customer/login", json={"username": "dockust_other", "password": "strongpassword"})
+    assert lr2.status_code == 200, lr2.text
+    _OTHER_TOKEN = lr2.json()["access_token"]
+
+    # /documents/generate is itself rate-limited (10 req/60s, path-wide) same as every other
+    # route, and several tests below only need GET /documents/{id} against an existing
+    # document - generating one here and reusing its id keeps the file's total POST count
+    # for that path comfortably under the limit instead of one generate call per GET test.
+    with patch("DivineService.service_document.serviceDocument._sign_url", return_value=FAKE_SIGNED_URL), \
+         patch("DivineService.service_document.serviceDocument._upload_to_storage", return_value=None):
+        create_resp = client.post(
+            "/documents/generate",
+            json={"document_type": "kyc", "form_data": {"full_name": "Shared Doc Owner"}},
+            headers={"Authorization": f"Bearer {_TOKEN}"},
+        )
+    assert create_resp.status_code == 200, create_resp.text
+    _SHARED_DOCUMENT_ID = create_resp.json()["id"]
+
+
+def _auth_headers():
+    return {"Authorization": f"Bearer {_TOKEN}"}
 
 
 def test_generate_document_requires_auth():
@@ -67,13 +95,12 @@ def test_generate_document_rejects_expired_token():
 
 
 @patch("DivineService.service_document.serviceDocument._sign_url", return_value=FAKE_SIGNED_URL)
-@patch("DivineService.service_document.serviceDocument._upload_to_storage", return_value="C00001/kyc_123.pdf")
+@patch("DivineService.service_document.serviceDocument._upload_to_storage", return_value=None)
 def test_generate_document_happy_path(mock_upload, mock_sign):
-    token = _signup_and_login_customer("dockust_happy")
     r = client.post(
         "/documents/generate",
         json={"document_type": "kyc", "form_data": {"full_name": "Jane Doe", "pan": "ABCDE1234F"}},
-        headers={"Authorization": f"Bearer {token}"},
+        headers=_auth_headers(),
     )
     assert r.status_code == 200, r.text
     data = r.json()
@@ -86,25 +113,72 @@ def test_generate_document_happy_path(mock_upload, mock_sign):
     mock_sign.assert_called_once()
 
 
-@patch("DivineService.service_document.serviceDocument._sign_url", return_value=FAKE_SIGNED_URL)
-@patch("DivineService.service_document.serviceDocument._upload_to_storage", return_value="C00002/kyc_123.pdf")
-def test_get_document_forbidden_for_other_owner(mock_upload, mock_sign):
-    owner_token = _signup_and_login_customer("dockust_owner")
-    other_token = _signup_and_login_customer("dockust_other")
-
-    create_resp = client.post(
-        "/documents/generate",
-        json={"document_type": "kyc", "form_data": {"full_name": "Owner"}},
-        headers={"Authorization": f"Bearer {owner_token}"},
-    )
-    assert create_resp.status_code == 200, create_resp.text
-    document_id = create_resp.json()["id"]
-
-    r = client.get(f"/documents/{document_id}", headers={"Authorization": f"Bearer {other_token}"})
+def test_get_document_forbidden_for_other_owner():
+    r = client.get(f"/documents/{_SHARED_DOCUMENT_ID}", headers={"Authorization": f"Bearer {_OTHER_TOKEN}"})
     assert r.status_code == 403
 
 
 def test_get_document_not_found():
-    token = _signup_and_login_customer("dockust_notfound")
-    r = client.get("/documents/does-not-exist", headers={"Authorization": f"Bearer {token}"})
+    r = client.get("/documents/does-not-exist", headers=_auth_headers())
     assert r.status_code == 404
+
+
+def test_generate_document_missing_document_type_is_422():
+    r = client.post(
+        "/documents/generate",
+        json={"form_data": {"name": "A"}},
+        headers=_auth_headers(),
+    )
+    assert r.status_code == 422
+
+
+def test_generate_document_missing_form_data_is_422():
+    r = client.post(
+        "/documents/generate",
+        json={"document_type": "kyc"},
+        headers=_auth_headers(),
+    )
+    assert r.status_code == 422
+
+
+@patch("DivineService.service_document.serviceDocument._upload_to_storage", side_effect=RuntimeError("storage_not_configured"))
+def test_generate_document_returns_502_when_storage_not_configured(mock_upload):
+    # Reproduces the real production incident: SUPABASE_URL missing on the deployed
+    # environment surfaces here as a clean 502, not a 500/crash.
+    r = client.post(
+        "/documents/generate",
+        json={"document_type": "kyc", "form_data": {"name": "A"}},
+        headers=_auth_headers(),
+    )
+    assert r.status_code == 502
+    assert r.json()["detail"] == "storage_not_configured"
+
+
+@patch("DivineService.service_document.serviceDocument._upload_to_storage", side_effect=RuntimeError("storage_upload_failed:500"))
+def test_generate_document_returns_502_on_upload_failure(mock_upload):
+    r = client.post(
+        "/documents/generate",
+        json={"document_type": "kyc", "form_data": {"name": "A"}},
+        headers=_auth_headers(),
+    )
+    assert r.status_code == 502
+    assert r.json()["detail"] == "storage_upload_failed:500"
+
+
+@patch("DivineService.service_document.serviceDocument._sign_url", side_effect=RuntimeError("storage_sign_failed:500"))
+@patch("DivineService.service_document.serviceDocument._upload_to_storage", return_value=None)
+def test_generate_document_returns_502_on_sign_failure(mock_upload, mock_sign):
+    r = client.post(
+        "/documents/generate",
+        json={"document_type": "kyc", "form_data": {"name": "A"}},
+        headers=_auth_headers(),
+    )
+    assert r.status_code == 502
+    assert r.json()["detail"] == "storage_sign_failed:500"
+
+
+@patch("DivineService.service_document.serviceDocument._sign_url", side_effect=RuntimeError("storage_sign_failed:503"))
+def test_get_document_returns_502_when_refresh_sign_fails(mock_sign):
+    r = client.get(f"/documents/{_SHARED_DOCUMENT_ID}", headers=_auth_headers())
+    assert r.status_code == 502
+    assert r.json()["detail"] == "storage_sign_failed:503"
