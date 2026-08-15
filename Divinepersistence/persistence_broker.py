@@ -1,11 +1,9 @@
-import os
 import random
-import yaml
 from sqlalchemy import Column, String, DateTime, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from datetime import datetime, timezone
-from .persistence_db import Base, SessionLocal, engine
+from .persistence_db import Base, SessionLocal, engine, RowWrapper, load_queries
 
 
 class BrokerModel(Base):
@@ -26,16 +24,7 @@ class BrokerModel(Base):
 class persistenceBroker:
     def __init__(self, session_factory=SessionLocal):
         self._session_factory = session_factory
-        # load queries from the broker YAML file with safe fallback
-        root = os.path.dirname(os.path.dirname(__file__))
-        qpath = os.path.join(root, "DivineDatabasequeries", "broker_queries.yaml")
-        queries = {}
-        try:
-            if os.path.exists(qpath):
-                with open(qpath, "r", encoding="utf-8") as f:
-                    queries = yaml.safe_load(f) or {}
-        except Exception:
-            queries = {}
+        queries = load_queries("broker_queries.yaml")
         queries.setdefault("create_broker", (
             'INSERT INTO divine_broker_users(id, username, first_name, last_name, email, phone, password_hash, created_by, created_date, last_updated_by, last_updated_date) '
             'VALUES (:id, :username, :first_name, :last_name, :email, :phone, :password_hash, :created_by, :created_date, :last_updated_by, :last_updated_date) RETURNING *;'
@@ -44,11 +33,6 @@ class persistenceBroker:
         queries.setdefault("get_by_id", 'SELECT * FROM divine_broker_users WHERE id = :id LIMIT 1;')
         self._queries = queries
         self._engine = engine
-
-    class _RowWrapper:
-        def __init__(self, mapping):
-            if mapping:
-                self.__dict__.update(mapping)
 
     def _generate_unique_id(self, db: Session) -> str:
         for _ in range(50):
@@ -79,7 +63,7 @@ class persistenceBroker:
                 result = db.execute(text(query), params)
                 row = result.mappings().first()
                 db.commit()
-                return persistenceBroker._RowWrapper(row)
+                return RowWrapper(row)
             except IntegrityError:
                 db.rollback()
                 raise
@@ -94,7 +78,7 @@ class persistenceBroker:
             row = result.mappings().first()
             if not row:
                 return None
-            return persistenceBroker._RowWrapper(row)
+            return RowWrapper(row)
 
     def get_by_id(self, id: str):
         with self._session_factory() as db:
@@ -103,4 +87,4 @@ class persistenceBroker:
             row = result.mappings().first()
             if not row:
                 return None
-            return persistenceBroker._RowWrapper(row)
+            return RowWrapper(row)

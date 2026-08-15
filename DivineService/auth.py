@@ -1,0 +1,32 @@
+import os
+import jwt
+from fastapi import Header, HTTPException
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+def _get_secret() -> str:
+    secret = os.getenv("JWT_SECRET_KEY")
+    if not secret:
+        raise RuntimeError("JWT_SECRET_KEY environment variable must be set")
+    return secret
+
+
+def get_current_user(authorization: str = Header(None)) -> dict:
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="missing_token")
+    token = authorization.split(" ", 1)[1].strip()
+    try:
+        payload = jwt.decode(token, _get_secret(), algorithms=["HS256"])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="token_expired")
+    except jwt.PyJWTError:
+        raise HTTPException(status_code=401, detail="invalid_token")
+    except RuntimeError:
+        raise HTTPException(status_code=500, detail="server_misconfigured")
+    sub = payload.get("sub")
+    role = payload.get("role")
+    if not sub or role not in ("customer", "broker"):
+        raise HTTPException(status_code=401, detail="invalid_token")
+    return {"sub": sub, "username": payload.get("username"), "role": role}

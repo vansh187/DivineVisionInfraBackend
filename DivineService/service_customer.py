@@ -14,8 +14,9 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 class serviceCustomer:
     def __init__(self, persistence: persistenceCustomer, secret_key: str = None):
         self._persistence = persistence
-        # fallback to a dev secret to avoid runtime errors in dev
-        self._secret = secret_key or os.getenv("SECRET_KEY") or "dev_secret_change_me_please"
+        self._secret = secret_key or os.getenv("JWT_SECRET_KEY")
+        if not self._secret:
+            raise RuntimeError("JWT_SECRET_KEY environment variable must be set")
 
     def _hash_password(self, raw: str) -> str:
         return pwd_context.hash(raw)

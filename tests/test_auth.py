@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 
 # Ensure test env before importing app/persistence
 os.environ["DATABASE_URL"] = "sqlite:///./test_db.sqlite"
-os.environ["SECRET_KEY"] = "testsecret"
+os.environ["JWT_SECRET_KEY"] = "testsecret"
 
 from Divinepersistence.persistence_db import PersistenceDB
 from DivineAPI.main import app

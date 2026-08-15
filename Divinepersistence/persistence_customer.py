@@ -1,17 +1,9 @@
 import random
-import os
-import yaml
 from sqlalchemy import Column, String, DateTime, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from datetime import datetime, timezone
-from .persistence_db import Base, SessionLocal, engine
-
-class _RowWrapper:
-    def __init__(self, mapping):
-        if mapping:
-            self.__dict__.update(mapping)
-
+from .persistence_db import Base, SessionLocal, engine, RowWrapper, load_queries
 
 
 class CustomerModel(Base):
@@ -32,16 +24,7 @@ class CustomerModel(Base):
 class persistenceCustomer:
     def __init__(self, session_factory=SessionLocal):
         self._session_factory = session_factory
-        # load queries from the customer YAML file with safe fallback
-        root = os.path.dirname(os.path.dirname(__file__))
-        qpath = os.path.join(root, "DivineDatabasequeries", "customer_queries.yaml")
-        queries = {}
-        try:
-            if os.path.exists(qpath):
-                with open(qpath, "r", encoding="utf-8") as f:
-                    queries = yaml.safe_load(f) or {}
-        except Exception:
-            queries = {}
+        queries = load_queries("customer_queries.yaml")
         queries.setdefault("create_customer", (
             'INSERT INTO divine_customer_users(id, username, first_name, last_name, email, phone, password_hash, created_by, created_date, last_updated_by, last_updated_date) '
             'VALUES (:id, :username, :first_name, :last_name, :email, :phone, :password_hash, :created_by, :created_date, :last_updated_by, :last_updated_date) RETURNING *;'
@@ -80,7 +63,7 @@ class persistenceCustomer:
                 result = db.execute(text(query), params)
                 row = result.mappings().first()
                 db.commit()
-                return _RowWrapper(row)
+                return RowWrapper(row)
             except IntegrityError:
                 db.rollback()
                 raise
@@ -95,7 +78,7 @@ class persistenceCustomer:
             row = result.mappings().first()
             if not row:
                 return None
-            return _RowWrapper(row)
+            return RowWrapper(row)
 
     def get_by_id(self, id: str):
         with self._session_factory() as db:
@@ -104,4 +87,4 @@ class persistenceCustomer:
             row = result.mappings().first()
             if not row:
                 return None
-            return _RowWrapper(row)
+            return RowWrapper(row)

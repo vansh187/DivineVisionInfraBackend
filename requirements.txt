@@ -10,3 +10,4 @@ pydantic
 PyYAML
 pytest
 requests
+fpdf2

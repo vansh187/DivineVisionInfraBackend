@@ -4,7 +4,7 @@ This workspace provides database init script and a FastAPI app implementing sign
 
 Quick setup:
 
-1. Copy `.env.example` to `.env` and set `SECRET_KEY` and `DATABASE_URL`.
+1. Copy `.env.example` to `.env` and set `JWT_SECRET_KEY` and `DATABASE_URL`.
 2. Initialize the database (Postgres):
 
 ```bash
@@ -31,7 +31,7 @@ Endpoints:
 
 Notes:
 - Tables are `DIVINE_CUSTOMER_USERS` and `DIVINE_BROKER_USERS` and the SQL script targets PostgreSQL.
-- Tokens are JWT signed with `SECRET_KEY` from `.env`.
+- Tokens are JWT signed with `JWT_SECRET_KEY` from `.env`.
 - Passwords are bcrypt-hashed using passlib.
 - A basic in-memory rate limiter is applied (10 requests per minute per IP per path).
 # DivineVisionInfraBackend

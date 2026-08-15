@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, Dict, Any
 from datetime import datetime
 
 
@@ -34,3 +34,19 @@ class UserOutDTO(BaseModel):
 class TokenDTO(BaseModel):
     access_token: str
     token_type: str = "bearer"
+
+
+class DocumentGenerateRequestDTO(BaseModel):
+    document_type: str = Field(..., min_length=1, max_length=100)
+    form_data: Dict[str, Any] = Field(...)
+
+
+class DocumentOutDTO(BaseModel):
+    id: str
+    owner_id: str
+    owner_role: str
+    document_type: str
+    status: str
+    created_date: Optional[datetime]
+    signed_url: str
+    signed_url_expires_in: int

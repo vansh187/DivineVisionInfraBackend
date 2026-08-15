@@ -1,4 +1,5 @@
 import os
+import yaml
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, declarative_base
 from dotenv import load_dotenv
@@ -30,3 +31,22 @@ class PersistenceDB:
             return True
         except Exception:
             return False
+
+
+class RowWrapper:
+    def __init__(self, mapping):
+        if mapping:
+            self.__dict__.update(mapping)
+
+
+def load_queries(filename: str) -> dict:
+    """Load a flat query-name -> SQL dict from DivineDatabasequeries/<filename>, safely defaulting to {} on any error."""
+    root = os.path.dirname(os.path.dirname(__file__))
+    qpath = os.path.join(root, "DivineDatabasequeries", filename)
+    try:
+        if os.path.exists(qpath):
+            with open(qpath, "r", encoding="utf-8") as f:
+                return yaml.safe_load(f) or {}
+    except Exception:
+        pass
+    return {}

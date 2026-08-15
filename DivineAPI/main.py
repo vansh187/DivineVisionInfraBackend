@@ -1,5 +1,5 @@
 import os
-from fastapi import FastAPI, HTTPException, Request, status
+from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -8,10 +8,18 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from DivineDTO.models import UserCreateDTO, UserLoginDTO, TokenDTO, UserOutDTO
+from DivineDTO.models import (
+    UserCreateDTO,
+    UserLoginDTO,
+    TokenDTO,
+    UserOutDTO,
+    DocumentGenerateRequestDTO,
+    DocumentOutDTO,
+)
 from Divinepersistence.persistence_db import PersistenceDB
-from Divinepersistence import persistenceCustomer, persistenceBroker
-from DivineService import serviceCustomer, serviceBroker
+from Divinepersistence import persistenceCustomer, persistenceBroker, persistenceDocument
+from DivineService import serviceCustomer, serviceBroker, serviceDocument
+from DivineService.auth import get_current_user
 from sqlalchemy.exc import IntegrityError
 
 
@@ -23,7 +31,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         self.storage = {}
 
     async def dispatch(self, request: Request, call_next):
-        client = request.client.host or "unknown"
+        client = request.client.host if request.client else "unknown"
         key = f"{client}:{request.url.path}"
         now = time()
         bucket = self.storage.get(key, [])
@@ -47,6 +55,14 @@ app.add_middleware(
 )
 
 
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    # Last-resort safety net: any exception not already caught and translated by a
+    # route/dependency (middleware included) still returns a clean JSON 500 instead
+    # of leaking a raw traceback or crashing the request.
+    return JSONResponse({"detail": "internal_error"}, status_code=500)
+
+
 @app.on_event("startup")
 def startup():
     db = PersistenceDB()
@@ -56,8 +72,10 @@ def startup():
 # Initialize persistence and services
 _cust_persistence = persistenceCustomer()
 _broker_persistence = persistenceBroker()
-_cust_service = serviceCustomer(_cust_persistence, secret_key=os.getenv("SECRET_KEY"))
-_broker_service = serviceBroker(_broker_persistence, secret_key=os.getenv("SECRET_KEY"))
+_doc_persistence = persistenceDocument()
+_cust_service = serviceCustomer(_cust_persistence, secret_key=os.getenv("JWT_SECRET_KEY"))
+_broker_service = serviceBroker(_broker_persistence, secret_key=os.getenv("JWT_SECRET_KEY"))
+_doc_service = serviceDocument(_doc_persistence)
 
 
 @app.get("/health")
@@ -136,5 +154,53 @@ def broker_login(dto: UserLoginDTO):
         return TokenDTO(access_token=token)
     except ValueError:
         raise HTTPException(status_code=401, detail="invalid_credentials")
+    except Exception:
+        raise HTTPException(status_code=500, detail="internal_error")
+
+
+@app.post("/documents/generate", response_model=DocumentOutDTO)
+def generate_document(dto: DocumentGenerateRequestDTO, current_user: dict = Depends(get_current_user)):
+    try:
+        doc, signed_url, expires_in = _doc_service.generate(
+            dto, owner_id=current_user["sub"], owner_role=current_user["role"]
+        )
+        return DocumentOutDTO(
+            id=doc.id,
+            owner_id=doc.owner_id,
+            owner_role=doc.owner_role,
+            document_type=doc.document_type,
+            status=doc.status,
+            created_date=doc.created_date,
+            signed_url=signed_url,
+            signed_url_expires_in=expires_in,
+        )
+    except IntegrityError:
+        raise HTTPException(status_code=409, detail="conflict")
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    except Exception:
+        raise HTTPException(status_code=500, detail="internal_error")
+
+
+@app.get("/documents/{document_id}", response_model=DocumentOutDTO)
+def get_document(document_id: str, current_user: dict = Depends(get_current_user)):
+    try:
+        doc, signed_url, expires_in = _doc_service.get(document_id, requester_id=current_user["sub"])
+        return DocumentOutDTO(
+            id=doc.id,
+            owner_id=doc.owner_id,
+            owner_role=doc.owner_role,
+            document_type=doc.document_type,
+            status=doc.status,
+            created_date=doc.created_date,
+            signed_url=signed_url,
+            signed_url_expires_in=expires_in,
+        )
+    except ValueError:
+        raise HTTPException(status_code=404, detail="not_found")
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="forbidden")
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=str(e))
     except Exception:
         raise HTTPException(status_code=500, detail="internal_error")
