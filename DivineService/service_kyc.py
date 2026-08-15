@@ -1,4 +1,6 @@
+import hashlib
 import io
+import logging
 import os
 import cv2
 import numpy as np
@@ -12,8 +14,22 @@ from signxml import XMLVerifier
 from Divinepersistence import persistenceKyc
 from DivineService.aadhaar_decode import AadhaarSecureQr, AadhaarOfflineXML, AadhaarQrParseError
 
+logger = logging.getLogger(__name__)
+
 MAX_UPLOAD_BYTES = 8 * 1024 * 1024  # 8 MB, generous for a photo of a card or the offline-XML zip
 _QR_FORMAT = zxingcpp.BarcodeFormat.QRCode
+
+
+def _cert_summary(cert_pem_bytes: bytes) -> str:
+    """Non-PII identifying info for a loaded cert - which cert was actually active for a given
+    verification attempt, useful for catching stale Render env vars without logging anything
+    about the person being verified."""
+    try:
+        cert = x509.load_pem_x509_certificate(cert_pem_bytes)
+        fingerprint = hashlib.sha256(cert_pem_bytes).hexdigest()[:16]
+        return f"subject={cert.subject.rfc4514_string()!r} serial={cert.serial_number} sha256={fingerprint}"
+    except Exception:
+        return "unavailable"
 
 
 def _load_cert(env_var: str):
@@ -63,8 +79,10 @@ class serviceKyc:
 
     def _extract_qr_text(self, image_bytes: bytes) -> str:
         if not image_bytes:
+            logger.info("kyc.qr.extract result=empty_file")
             raise ValueError("empty_file")
         if len(image_bytes) > MAX_UPLOAD_BYTES:
+            logger.info("kyc.qr.extract result=file_too_large bytes=%d", len(image_bytes))
             raise ValueError("file_too_large")
         try:
             arr = np.frombuffer(image_bytes, dtype=np.uint8)
@@ -72,7 +90,9 @@ class serviceKyc:
         except cv2.error:
             img = None
         if img is None:
+            logger.info("kyc.qr.extract result=unreadable_image bytes=%d", len(image_bytes))
             raise ValueError("unreadable_image")
+        logger.info("kyc.qr.extract image_shape=%s", getattr(img, "shape", None))
 
         # zxing-cpp (the ZXing engine - the same family of decoder most real-world QR
         # scanners, including Android's, are built on) reads Aadhaar-density QR codes
@@ -91,21 +111,32 @@ class serviceKyc:
             except Exception:
                 results = []
         if not results:
+            logger.info("kyc.qr.extract result=qr_not_found")
             raise ValueError("qr_not_found")
+        logger.info("kyc.qr.extract result=found payload_digits=%d", len(results[0].text))
         return results[0].text
 
     def verify_qr(self, image_bytes: bytes, owner_id: str, owner_role: str):
+        logger.info("kyc.qr.request owner_id=%s image_bytes=%d", owner_id, len(image_bytes or b""))
         text = self._extract_qr_text(image_bytes)
+        logger.info("kyc.qr.detected owner_id=%s payload_digits=%d", owner_id, len(text))
         if not text.isdigit():
             # Not a Secure QR payload (e.g. an old unsigned Aadhaar QR, or an unrelated QR code).
             # Not supported: there is no signature to verify on that format.
+            logger.info("kyc.qr.response owner_id=%s result=unsupported_qr_format", owner_id)
             raise ValueError("unsupported_qr_format")
         try:
             qr = AadhaarSecureQr(int(text))
         except AadhaarQrParseError as e:
+            logger.info("kyc.qr.response owner_id=%s result=qr_parse_failed reason=%s", owner_id, e)
             raise ValueError(f"qr_parse_failed:{e}")
+        logger.info(
+            "kyc.qr.parsed owner_id=%s version=%s signed_data_bytes=%d",
+            owner_id, qr.decodeddata().get("version", "none"), len(qr.signedData()),
+        )
 
-        public_key, _ = _load_qr_cert()
+        public_key, cert_pem_bytes = _load_qr_cert()
+        logger.info("kyc.qr.cert owner_id=%s cert=%s", owner_id, _cert_summary(cert_pem_bytes))
         verified = False
         failure_reason = None
         try:
@@ -115,6 +146,10 @@ class serviceKyc:
             failure_reason = "signature_invalid"
         except Exception as e:
             failure_reason = f"signature_verification_error:{type(e).__name__}"
+        logger.info(
+            "kyc.qr.response owner_id=%s verified=%s failure_reason=%s masked_aadhaar=%s",
+            owner_id, verified, failure_reason, _mask_aadhaar(qr.decodeddata().get("referenceid", "")),
+        )
 
         data = qr.decodeddata()
         return self._persistence.create_verification(
@@ -130,6 +165,7 @@ class serviceKyc:
     # ---------- Offline e-KYC XML flow ----------
 
     def verify_offline_xml(self, zip_bytes: bytes, share_code: str, owner_id: str, owner_role: str):
+        logger.info("kyc.xml.request owner_id=%s zip_bytes=%d", owner_id, len(zip_bytes or b""))
         if not zip_bytes:
             raise ValueError("empty_file")
         if len(zip_bytes) > MAX_UPLOAD_BYTES:
@@ -140,9 +176,12 @@ class serviceKyc:
         try:
             parsed = AadhaarOfflineXML(io.BytesIO(zip_bytes), share_code)
         except AadhaarQrParseError as e:
+            logger.info("kyc.xml.response owner_id=%s result=xml_parse_failed reason=%s", owner_id, e)
             raise ValueError(f"xml_parse_failed:{e}")
+        logger.info("kyc.xml.parsed owner_id=%s raw_xml_bytes=%d", owner_id, len(parsed.raw_xml()))
 
         _, cert_pem_bytes = _load_xml_cert()
+        logger.info("kyc.xml.cert owner_id=%s cert=%s", owner_id, _cert_summary(cert_pem_bytes))
         verified = False
         failure_reason = None
         try:
@@ -153,6 +192,10 @@ class serviceKyc:
             # InvalidCertificate, etree parse errors, ...) - all mean "could not cryptographically
             # confirm this document", so all funnel to the same not-verified outcome.
             failure_reason = f"xml_signature_invalid:{type(e).__name__}"
+        logger.info(
+            "kyc.xml.response owner_id=%s verified=%s failure_reason=%s masked_aadhaar=%s",
+            owner_id, verified, failure_reason, _mask_aadhaar(parsed.decodeddata().get("referenceid", "")),
+        )
 
         data = parsed.decodeddata()
         return self._persistence.create_verification(
