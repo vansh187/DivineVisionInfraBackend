@@ -55,7 +55,18 @@ class AadhaarSecureQr:
             raise AadhaarQrParseError("legacy_qr_format_unsupported")
 
     def _check_aadhaar_version(self) -> None:
-        if self.decompressed_array[:2].decode("ISO-8859-1") != "V2":
+        # UIDAI has issued Secure QR revisions beyond "V2" (e.g. "V5" seen on
+        # cards generated in 2026) that use the same 2-byte "V<digit>"
+        # version-prefix framing - only the version digit differs. Matching
+        # the literal string "V2" here mis-detects any newer version as the
+        # pre-versioned legacy layout (no prefix), which shifts every
+        # subsequent field's slice by one and corrupts the whole payload -
+        # e.g. referenceid ends up holding what should have been
+        # email_mobile_status (a single digit), tripping
+        # missing_or_invalid_reference_id even though the QR decoded fine.
+        prefix = self.decompressed_array[:2]
+        is_versioned = len(prefix) == 2 and prefix[0:1] == b"V" and prefix[1:2].isdigit()
+        if not is_versioned:
             self.details.pop(0)
             self.details.pop()
 

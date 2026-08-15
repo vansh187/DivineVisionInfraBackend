@@ -18,6 +18,15 @@ _FIELDS = [
     "PostOffice", "State", "Street", "SubDistrict", "VTC",
 ]
 
+# Same fields as _FIELDS, but with the full details layout (includes "version"
+# and "last_4_digits_mobile_no") - used to exercise version prefixes other
+# than the hardcoded "V2" (e.g. "V5", observed on a real card in production).
+_VERSIONED_FIELDS = [
+    "V5", "3", "999912345678", "Test Name", "01-01-1990", "M", "",
+    "District", "", "House", "Location", "123456",
+    "PostOffice", "State", "Street", "SubDistrict", "VTC", "XXXXXX1234",
+]
+
 
 def _encode_qr_int(fields) -> int:
     signed_data = b"\xff".join(f.encode("ISO-8859-1") for f in fields) + b"\xff"
@@ -36,6 +45,24 @@ def test_parses_well_formed_non_v2_payload():
     assert data["aadhaar_last_4_digit"] == "9999"
     assert data["email"] is True   # email_mobile_status "3" -> both
     assert data["mobile"] is True
+
+
+def test_parses_well_formed_versioned_payload_beyond_v2():
+    # Regression test: _check_aadhaar_version() used to only recognize the
+    # literal string "V2" as a version marker. Any other version digit (e.g.
+    # "V5") was treated as "no version prefix", which drops the "version" and
+    # "last_4_digits_mobile_no" fields from the expected layout and shifts
+    # every remaining field's slice by one position - referenceid ends up
+    # holding what should have been email_mobile_status (a single digit),
+    # which then fails the "at least 4 chars" check even though the QR
+    # decoded and gzip-decompressed just fine.
+    qr = AadhaarSecureQr(_encode_qr_int(_VERSIONED_FIELDS))
+    data = qr.decodeddata()
+    assert data["version"] == "V5"
+    assert data["name"] == "Test Name"
+    assert data["referenceid"] == "999912345678"
+    assert data["aadhaar_last_4_digit"] == "9999"
+    assert data["last_4_digits_mobile_no"] == "XXXXXX1234"
 
 
 def test_signature_and_signed_data_split_at_last_256_bytes():
