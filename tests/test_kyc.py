@@ -6,6 +6,7 @@ import datetime
 
 import cv2
 import numpy as np
+import zxingcpp
 from lxml import etree
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.primitives import hashes, serialization
@@ -94,24 +95,20 @@ def _build_secure_qr_int(tamper_signature: bool = False) -> int:
 
 
 def _qr_image_bytes(payload) -> bytes:
-    """Renders `payload` as a QR code PNG. cv2.QRCodeDetector has a known, accepted
-    (see product decision) non-trivial miss rate on dense QR codes - self-verify at a
-    few scales/borders here so this test fixture isn't flaky about a gap we've already
-    chosen to accept in production, rather than that gap randomly breaking CI."""
+    """Renders `payload` as a QR code PNG, self-verified against zxingcpp (the library
+    the backend actually uses for detection) so a rendering that's too small/dense to
+    decode fails loudly here rather than surfacing as a confusing qr_not_found deep in
+    an unrelated test."""
     encoder = cv2.QRCodeEncoder.create()
     qr_matrix = encoder.encode(str(payload))  # already 0/255 uint8, not a 0/1 matrix
-    detector = cv2.QRCodeDetector()
-    last_png_bytes = None
-    for scale, border in ((10, 40), (14, 56), (18, 72), (24, 96), (30, 120), (36, 144), (44, 176)):
-        big = np.repeat(np.repeat(qr_matrix, scale, axis=0), scale, axis=1)
-        bordered = cv2.copyMakeBorder(big, border, border, border, border, cv2.BORDER_CONSTANT, value=255)
-        ok, png_bytes = cv2.imencode(".png", bordered)
-        assert ok
-        last_png_bytes = png_bytes.tobytes()
-        data, _points, _ = detector.detectAndDecode(bordered)
-        if data == str(payload):
-            return last_png_bytes
-    return last_png_bytes  # fall through with the largest rendering; test itself will surface any failure clearly
+    scale, border = 8, 32
+    big = np.repeat(np.repeat(qr_matrix, scale, axis=0), scale, axis=1)
+    bordered = cv2.copyMakeBorder(big, border, border, border, border, cv2.BORDER_CONSTANT, value=255)
+    ok, png_bytes = cv2.imencode(".png", bordered)
+    assert ok
+    results = zxingcpp.read_barcodes(bordered, formats=zxingcpp.BarcodeFormat.QRCode)
+    assert results and results[0].text == str(payload), "test fixture itself failed to render a decodable QR"
+    return png_bytes.tobytes()
 
 
 # ---------- Offline XML fixture builder ----------

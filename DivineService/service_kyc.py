@@ -2,6 +2,7 @@ import io
 import os
 import cv2
 import numpy as np
+import zxingcpp
 from cryptography import x509
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives import hashes
@@ -12,6 +13,7 @@ from Divinepersistence import persistenceKyc
 from DivineService.aadhaar_decode import AadhaarSecureQr, AadhaarOfflineXML, AadhaarQrParseError
 
 MAX_UPLOAD_BYTES = 8 * 1024 * 1024  # 8 MB, generous for a photo of a card or the offline-XML zip
+_QR_FORMAT = zxingcpp.BarcodeFormat.QRCode
 
 
 def _load_cert(env_var: str):
@@ -72,32 +74,25 @@ class serviceKyc:
         if img is None:
             raise ValueError("unreadable_image")
 
-        # cv2.QRCodeDetector has a real, non-trivial miss rate on dense QR codes (the
-        # class Aadhaar Secure QR falls into) - not just image-quality issues. Try a
-        # few cheap preprocessing variants before giving up, since different ones
-        # occasionally succeed where the raw image fails.
-        detector = cv2.QRCodeDetector()
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        attempts = [img, gray]
-        for scale in (1.5, 2.0, 0.75):
-            attempts.append(cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC))
+        # zxing-cpp (the ZXing engine - the same family of decoder most real-world QR
+        # scanners, including Android's, are built on) reads Aadhaar-density QR codes
+        # far more reliably than cv2.QRCodeDetector, which was measured to have a severe
+        # miss rate on dense, real-camera-photo QR codes (previously used here). It
+        # already tries rotation/downscale/inversion internally, so only a grayscale
+        # fallback is kept as a cheap second attempt for unusual lighting.
         try:
-            _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-            attempts.append(thresh)
-        except cv2.error:
-            pass
-
-        data = ""
-        for attempt in attempts:
+            results = zxingcpp.read_barcodes(img, formats=_QR_FORMAT)
+        except Exception:
+            results = []
+        if not results:
             try:
-                data, _points, _ = detector.detectAndDecode(attempt)
-            except cv2.error:
-                continue
-            if data:
-                break
-        if not data:
+                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                results = zxingcpp.read_barcodes(gray, formats=_QR_FORMAT)
+            except Exception:
+                results = []
+        if not results:
             raise ValueError("qr_not_found")
-        return data
+        return results[0].text
 
     def verify_qr(self, image_bytes: bytes, owner_id: str, owner_role: str):
         text = self._extract_qr_text(image_bytes)

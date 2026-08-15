@@ -12,6 +12,7 @@ pytest
 requests
 fpdf2
 opencv-python-headless
+zxing-cpp
 cryptography
 signxml
 python-multipart
