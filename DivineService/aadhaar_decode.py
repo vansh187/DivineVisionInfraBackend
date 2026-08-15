@@ -43,6 +43,16 @@ class AadhaarSecureQr:
     def _convert_base10encoded_to_decompressed_array(self) -> None:
         bytes_array = self.base10encodedstring.to_bytes(5000, "big").lstrip(b"\x00")
         self.decompressed_array = zlib.decompress(bytes_array, 16 + zlib.MAX_WBITS)
+        # The pre-Secure-QR "legacy" Aadhaar QR (issued roughly before 2018) also
+        # gzip-compresses to a base10 integer, but wraps its data in signed XML
+        # (root element <PrintLetterBarcodeData ...>) rather than this class's
+        # 0xFF-pipe-delimited plain-text layout - a structurally different, unsupported
+        # format (see module docstring: only Secure QR is handled here). Detect and
+        # reject it explicitly; otherwise the delimiter/field-slicing logic below runs
+        # against XML bytes and produces a misleading missing_or_invalid_reference_id
+        # instead of a clear signal that this card predates the supported format.
+        if self.decompressed_array.lstrip()[:1] == b"<":
+            raise AadhaarQrParseError("legacy_qr_format_unsupported")
 
     def _check_aadhaar_version(self) -> None:
         if self.decompressed_array[:2].decode("ISO-8859-1") != "V2":

@@ -51,6 +51,18 @@ def test_garbage_input_raises_parse_error_not_a_raw_exception():
         AadhaarSecureQr(garbage)
 
 
+def test_legacy_xml_qr_format_raises_clear_error_not_garbage_field():
+    # The pre-Secure-QR "legacy" Aadhaar QR also gzip-compresses to a base10 integer,
+    # but wraps data in XML rather than 0xFF-pipe-delimited fields - structurally
+    # different and unsupported. This uses synthetic placeholder XML, not real Aadhaar
+    # data, purely to exercise the format-detection branch.
+    fake_legacy_xml = b'<PrintLetterBarcodeData uid="999912345678" name="Placeholder" gender="M" yob="1990"/>'
+    compressed = gzip.compress(fake_legacy_xml, compresslevel=6)
+    payload_int = int.from_bytes(compressed, "big")
+    with pytest.raises(AadhaarQrParseError, match="legacy_qr_format_unsupported"):
+        AadhaarSecureQr(payload_int)
+
+
 def test_too_few_fields_raises_parse_error():
     short_fields = ["999912345678", "Test Name"]
     with pytest.raises(AadhaarQrParseError):
