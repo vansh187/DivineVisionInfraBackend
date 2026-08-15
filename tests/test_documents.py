@@ -182,3 +182,95 @@ def test_get_document_returns_502_when_refresh_sign_fails(mock_sign):
     r = client.get(f"/documents/{_SHARED_DOCUMENT_ID}", headers=_auth_headers())
     assert r.status_code == 502
     assert r.json()["detail"] == "storage_sign_failed:503"
+
+
+# ---------- POST /documents/aadhaar-photo ----------
+
+def _fake_jpeg_bytes() -> bytes:
+    return b"\xff\xd8\xff\xe0" + b"fake-jpeg-body" * 10
+
+
+def test_upload_aadhaar_photo_requires_auth():
+    r = client.post(
+        "/documents/aadhaar-photo",
+        files={"file": ("front.jpg", _fake_jpeg_bytes(), "image/jpeg")},
+        data={"side": "front"},
+    )
+    assert r.status_code == 401
+
+
+@patch("DivineService.service_document.serviceDocument._sign_url", return_value=FAKE_SIGNED_URL)
+@patch("DivineService.service_document.serviceDocument._upload_to_storage", return_value=None)
+def test_upload_aadhaar_photo_front_happy_path(mock_upload, mock_sign):
+    r = client.post(
+        "/documents/aadhaar-photo",
+        files={"file": ("front.jpg", _fake_jpeg_bytes(), "image/jpeg")},
+        data={"side": "front"},
+        headers=_auth_headers(),
+    )
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["document_type"] == "aadhaar_front"
+    assert data["status"] == "uploaded"
+    assert data["signed_url"] == FAKE_SIGNED_URL
+    mock_upload.assert_called_once()
+    # content-type is forwarded through to storage, not hardcoded to application/pdf
+    assert mock_upload.call_args.args[2] == "image/jpeg"
+
+
+@patch("DivineService.service_document.serviceDocument._sign_url", return_value=FAKE_SIGNED_URL)
+@patch("DivineService.service_document.serviceDocument._upload_to_storage", return_value=None)
+def test_upload_aadhaar_photo_back_happy_path(mock_upload, mock_sign):
+    r = client.post(
+        "/documents/aadhaar-photo",
+        files={"file": ("back.png", _fake_jpeg_bytes(), "image/png")},
+        data={"side": "back"},
+        headers=_auth_headers(),
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["document_type"] == "aadhaar_back"
+
+
+def test_upload_aadhaar_photo_rejects_invalid_side():
+    r = client.post(
+        "/documents/aadhaar-photo",
+        files={"file": ("x.jpg", _fake_jpeg_bytes(), "image/jpeg")},
+        data={"side": "sideways"},
+        headers=_auth_headers(),
+    )
+    assert r.status_code == 400
+    assert r.json()["detail"] == "invalid_side"
+
+
+def test_upload_aadhaar_photo_rejects_unsupported_file_type():
+    r = client.post(
+        "/documents/aadhaar-photo",
+        files={"file": ("x.pdf", b"%PDF-1.4 fake", "application/pdf")},
+        data={"side": "front"},
+        headers=_auth_headers(),
+    )
+    assert r.status_code == 400
+    assert r.json()["detail"] == "unsupported_file_type"
+
+
+def test_upload_aadhaar_photo_rejects_empty_file():
+    r = client.post(
+        "/documents/aadhaar-photo",
+        files={"file": ("x.jpg", b"", "image/jpeg")},
+        data={"side": "front"},
+        headers=_auth_headers(),
+    )
+    assert r.status_code == 400
+    assert r.json()["detail"] == "empty_file"
+
+
+@patch("DivineService.service_document.serviceDocument._upload_to_storage", side_effect=RuntimeError("storage_not_configured"))
+def test_upload_aadhaar_photo_returns_502_when_storage_not_configured(mock_upload):
+    r = client.post(
+        "/documents/aadhaar-photo",
+        files={"file": ("x.jpg", _fake_jpeg_bytes(), "image/jpeg")},
+        data={"side": "front"},
+        headers=_auth_headers(),
+    )
+    assert r.status_code == 502
+    assert r.json()["detail"] == "storage_not_configured"
