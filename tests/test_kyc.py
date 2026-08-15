@@ -232,9 +232,11 @@ def test_qr_verify_succeeds_when_second_cert_in_bundle_matches():
 
 
 def test_qr_verify_fails_when_no_cert_in_bundle_matches():
+    # QR verification also falls back to the UIDAI_XML_CERT_PEM bundle (see
+    # _load_qr_verification_certs) - both must be mismatched for this to fail.
     bundle = _DECOY_CERT_PEM.decode("utf-8")
     image_bytes = _qr_image_bytes(_build_secure_qr_int())
-    with patch.dict(os.environ, {"UIDAI_QR_CERT_PEM": bundle}):
+    with patch.dict(os.environ, {"UIDAI_QR_CERT_PEM": bundle, "UIDAI_XML_CERT_PEM": bundle}):
         r = client.post(
             "/kyc/aadhaar/qr/verify",
             files={"file": ("card.png", image_bytes, "image/png")},
@@ -244,6 +246,22 @@ def test_qr_verify_fails_when_no_cert_in_bundle_matches():
     data = r.json()
     assert data["verified"] is False
     assert data["failure_reason"] == "signature_invalid"
+
+
+def test_qr_verify_succeeds_via_xml_cert_fallback_when_qr_bundle_mismatches():
+    # Real-world case this fallback exists for: a card whose Secure QR signature only
+    # verifies against the certificate documented/configured for Offline XML, not any
+    # of the certificates configured for QR. UIDAI_QR_CERT_PEM alone is the decoy; only
+    # UIDAI_XML_CERT_PEM (the module-level real test cert) can match. Exercises
+    # serviceKyc directly rather than through the HTTP endpoint, so this doesn't
+    # consume the shared per-path rate-limit budget the other tests in this file share.
+    from DivineService.service_kyc import serviceKyc
+
+    image_bytes = _qr_image_bytes(_build_secure_qr_int())
+    with patch.dict(os.environ, {"UIDAI_QR_CERT_PEM": _DECOY_CERT_PEM.decode("utf-8")}):
+        record = serviceKyc().verify_qr(image_bytes, owner_id="C00001", owner_role="customer")
+    assert record.verified
+    assert record.failure_reason is None
 
 
 def test_qr_verify_succeeds_with_larger_key_size_cert():

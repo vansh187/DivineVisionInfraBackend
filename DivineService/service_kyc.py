@@ -60,8 +60,11 @@ def _load_cert_bundle(env_var: str):
     missing/invalid. Returns a list of (public_key, cert_pem_bytes) tuples, one per
     concatenated PEM block found in the env var.
 
-    QR (Secure QR) and Offline e-KYC XML are signed with different UIDAI certificates, so each
-    flow reads its own env var rather than sharing one."""
+    QR (Secure QR) and Offline e-KYC XML are documented by UIDAI as using different signing
+    certificates, so each flow has its own env var here - but in practice a real card's Secure
+    QR has been observed verifying only against the certificate documented for Offline XML, not
+    any certificate documented/distributed for QR. See _load_qr_verification_certs, which tries
+    both bundles for QR verification because of this."""
     cert_pem = os.getenv(env_var)
     if not cert_pem:
         raise RuntimeError(f"{env_var} environment variable must be set")
@@ -85,6 +88,30 @@ def _load_qr_certs():
 
 def _load_xml_certs():
     return _load_cert_bundle("UIDAI_XML_CERT_PEM")
+
+
+def _load_qr_verification_certs():
+    """UIDAI documents Secure QR and Offline e-KYC XML as using distinct signing
+    certificates, but that isn't reliably true in practice - confirmed empirically
+    against a real 2026-issued (V5) card whose Secure QR signature only verified
+    against the certificate documented for the Offline XML flow, not any of the
+    certificates documented/distributed for QR verification. So QR verification
+    tries its own configured bundle first, then falls back to the XML bundle too.
+    Missing/invalid XML config doesn't break QR verification - it's a fallback,
+    not a requirement - so RuntimeError from a missing UIDAI_XML_CERT_PEM is
+    swallowed here rather than propagated."""
+    certs = list(_load_qr_certs())
+    seen_fingerprints = {hashlib.sha256(pem).hexdigest() for _, pem in certs}
+    try:
+        xml_certs = _load_xml_certs()
+    except RuntimeError:
+        xml_certs = []
+    for public_key, pem in xml_certs:
+        fingerprint = hashlib.sha256(pem).hexdigest()
+        if fingerprint not in seen_fingerprints:
+            certs.append((public_key, pem))
+            seen_fingerprints.add(fingerprint)
+    return certs
 
 
 def _mask_aadhaar(reference_id: str) -> str:
@@ -165,7 +192,7 @@ class serviceKyc:
             owner_id, qr.decodeddata().get("version", "none"), len(qr.decompressed_array),
         )
 
-        candidates = _load_qr_certs()
+        candidates = _load_qr_verification_certs()
         logger.info("kyc.qr.cert.candidates owner_id=%s count=%d", owner_id, len(candidates))
         verified = False
         failure_reason = None
