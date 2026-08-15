@@ -1,5 +1,6 @@
 import json
 import os
+from typing import Optional
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -210,6 +211,23 @@ def get_document(document_id: str, current_user: dict = Depends(get_current_user
         raise HTTPException(status_code=500, detail="internal_error")
 
 
+_KYC_FAILURE_MESSAGES = {
+    "signature_invalid": "Aadhaar signature verification failed. This document could not be verified as genuine.",
+}
+
+
+def _kyc_message(verified: bool, failure_reason: Optional[str]) -> str:
+    if verified:
+        return "Aadhaar verification successful."
+    if failure_reason in _KYC_FAILURE_MESSAGES:
+        return _KYC_FAILURE_MESSAGES[failure_reason]
+    if failure_reason and failure_reason.startswith("xml_signature_invalid"):
+        return "Aadhaar Offline XML signature verification failed. This document could not be verified as genuine."
+    if failure_reason and failure_reason.startswith("signature_verification_error"):
+        return "Aadhaar verification could not be completed due to a technical error. Please try again."
+    return "Aadhaar verification failed."
+
+
 def _kyc_result_to_dto(record) -> KycVerificationOutDTO:
     extracted_data = record.extracted_data
     if isinstance(extracted_data, str):
@@ -221,12 +239,15 @@ def _kyc_result_to_dto(record) -> KycVerificationOutDTO:
             extracted_data = {}
     if not isinstance(extracted_data, dict):
         extracted_data = {}
+    verified = bool(record.verified)
     return KycVerificationOutDTO(
         id=record.id,
         owner_id=record.owner_id,
         owner_role=record.owner_role,
         method=record.method,
-        verified=record.verified,
+        verified=verified,
+        status="success" if verified else "error",
+        message=_kyc_message(verified, record.failure_reason),
         masked_aadhaar=record.masked_aadhaar,
         extracted_data=extracted_data,
         failure_reason=record.failure_reason,

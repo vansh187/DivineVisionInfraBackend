@@ -58,6 +58,8 @@ class KycVerificationOutDTO(BaseModel):
     owner_role: str
     method: str
     verified: bool
+    status: str
+    message: str
     masked_aadhaar: str
     extracted_data: Dict[str, Any]
     failure_reason: Optional[str]

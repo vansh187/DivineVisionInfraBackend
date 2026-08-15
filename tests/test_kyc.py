@@ -192,6 +192,8 @@ def test_qr_verify_valid_signature():
     assert r.status_code == 200, r.text
     data = r.json()
     assert data["verified"] is True
+    assert data["status"] == "success"
+    assert data["message"] == "Aadhaar verification successful."
     assert data["method"] == "qr"
     assert data["masked_aadhaar"] == "XXXXXXXX9999"
     assert data["extracted_data"]["name"] == "Test Name"
@@ -208,6 +210,8 @@ def test_qr_verify_tampered_signature_not_verified():
     assert r.status_code == 200, r.text
     data = r.json()
     assert data["verified"] is False
+    assert data["status"] == "error"
+    assert data["message"]
     assert data["failure_reason"] == "signature_invalid"
 
 
@@ -258,6 +262,7 @@ def test_xml_verify_valid_signature():
     assert r.status_code == 200, r.text
     data = r.json()
     assert data["verified"] is True
+    assert data["status"] == "success"
     assert data["method"] == "offline_xml"
     assert data["masked_aadhaar"] == "XXXXXXXX8888"
     assert data["extracted_data"]["name"] == "Test Person"
@@ -274,6 +279,8 @@ def test_xml_verify_tampered_content_not_verified():
     assert r.status_code == 200, r.text
     data = r.json()
     assert data["verified"] is False
+    assert data["status"] == "error"
+    assert data["message"]
     assert data["failure_reason"] is not None
 
 
