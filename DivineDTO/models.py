@@ -50,3 +50,15 @@ class DocumentOutDTO(BaseModel):
     created_date: Optional[datetime]
     signed_url: str
     signed_url_expires_in: int
+
+
+class KycVerificationOutDTO(BaseModel):
+    id: str
+    owner_id: str
+    owner_role: str
+    method: str
+    verified: bool
+    masked_aadhaar: str
+    extracted_data: Dict[str, Any]
+    failure_reason: Optional[str]
+    created_date: Optional[datetime]

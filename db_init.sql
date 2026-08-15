@@ -42,3 +42,20 @@ CREATE TABLE IF NOT EXISTS divine_documents (
 );
 
 CREATE INDEX IF NOT EXISTS idx_divine_documents_owner_id ON divine_documents (owner_id);
+
+CREATE TABLE IF NOT EXISTS divine_kyc_verifications (
+  id varchar(36) PRIMARY KEY,
+  owner_id varchar(6) NOT NULL,
+  owner_role varchar(10) NOT NULL CHECK (owner_role IN ('customer', 'broker')),
+  method varchar(20) NOT NULL CHECK (method IN ('qr', 'offline_xml')),
+  verified boolean NOT NULL,
+  masked_aadhaar varchar(20) NOT NULL,
+  extracted_data jsonb NOT NULL,
+  failure_reason varchar(100),
+  created_date timestamptz DEFAULT now()
+);
+-- Note: by design, no column here ever holds a full/plaintext Aadhaar number - both the
+-- Secure QR and Offline e-KYC XML formats only ever expose the last 4 digits (see
+-- masked_aadhaar), never the full number, so there is nothing further to redact.
+
+CREATE INDEX IF NOT EXISTS idx_divine_kyc_verifications_owner_id ON divine_kyc_verifications (owner_id);

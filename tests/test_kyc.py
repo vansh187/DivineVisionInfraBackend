@@ -1,0 +1,287 @@
+import gzip
+import io
+import os
+import zipfile
+import datetime
+
+import cv2
+import numpy as np
+from lxml import etree
+from cryptography.hazmat.primitives.asymmetric import rsa, padding
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography import x509
+from cryptography.x509.oid import NameOID
+from signxml import XMLSigner
+
+# Ensure test env before importing app/persistence
+os.environ["DATABASE_URL"] = "sqlite:///./test_db.sqlite"
+os.environ["JWT_SECRET_KEY"] = "testsecret"
+
+# Generate a throwaway test keypair/cert to stand in for UIDAI's real certificate.
+# This validates the verification *mechanics* (accepts genuinely-signed data, rejects
+# tampered/wrongly-signed data) - it cannot validate against real UIDAI production
+# data, since we deliberately never fabricate or bundle a real UIDAI certificate.
+_TEST_PRIVATE_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+_subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Test UIDAI (not real)")])
+_TEST_CERT = (
+    x509.CertificateBuilder()
+    .subject_name(_subject)
+    .issuer_name(_subject)
+    .public_key(_TEST_PRIVATE_KEY.public_key())
+    .serial_number(x509.random_serial_number())
+    .not_valid_before(datetime.datetime.now(datetime.timezone.utc))
+    .not_valid_after(datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=365))
+    .sign(_TEST_PRIVATE_KEY, hashes.SHA256())
+)
+_TEST_CERT_PEM = _TEST_CERT.public_bytes(serialization.Encoding.PEM)
+_TEST_KEY_PEM = _TEST_PRIVATE_KEY.private_bytes(
+    serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()
+)
+
+os.environ["UIDAI_QR_CERT_PEM"] = _TEST_CERT_PEM.decode("utf-8")
+os.environ["UIDAI_XML_CERT_PEM"] = _TEST_CERT_PEM.decode("utf-8")
+
+from unittest.mock import patch
+from fastapi.testclient import TestClient
+from Divinepersistence.persistence_db import PersistenceDB
+from DivineAPI.main import app
+
+client = TestClient(app)
+
+
+_TOKEN = None  # set in setup_module - one shared test user, reused by every test below
+
+
+def setup_module(module):
+    global _TOKEN
+    db_file = os.path.join(os.getcwd(), "test_db.sqlite")
+    try:
+        if os.path.exists(db_file):
+            os.remove(db_file)
+    except Exception:
+        pass
+    PersistenceDB().create_tables()
+
+    # A single shared user/token for every test in this file: the global rate limiter
+    # (10 requests/60s per client+path) applies across the whole test session, and this
+    # file doesn't need distinct identities per test (unlike e.g. an ownership check),
+    # so one signup+login keeps well within budget instead of exhausting it.
+    client.post("/customer/signup", json={"username": "kyc_test_user", "password": "strongpassword123"})
+    lr = client.post("/customer/login", json={"username": "kyc_test_user", "password": "strongpassword123"})
+    assert lr.status_code == 200, lr.text
+    _TOKEN = lr.json()["access_token"]
+
+
+def _auth_headers():
+    return {"Authorization": f"Bearer {_TOKEN}"}
+
+
+# ---------- Secure QR fixture builder ----------
+
+def _build_secure_qr_int(tamper_signature: bool = False) -> int:
+    fields = [
+        "3", "999912345678", "Test Name", "01-01-1990", "M", "",
+        "District", "", "House", "Location", "123456",
+        "PostOffice", "State", "Street", "SubDistrict", "VTC",
+    ]
+    signed_data = b"\xff".join(f.encode("ISO-8859-1") for f in fields) + b"\xff"
+    signature = _TEST_PRIVATE_KEY.sign(signed_data, padding.PKCS1v15(), hashes.SHA256())
+    if tamper_signature:
+        signature = bytes([signature[0] ^ 0xFF]) + signature[1:]
+    raw = signed_data + signature
+    compressed = gzip.compress(raw, compresslevel=6)
+    return int.from_bytes(compressed, "big")
+
+
+def _qr_image_bytes(payload) -> bytes:
+    """Renders `payload` as a QR code PNG. cv2.QRCodeDetector has a known, accepted
+    (see product decision) non-trivial miss rate on dense QR codes - self-verify at a
+    few scales/borders here so this test fixture isn't flaky about a gap we've already
+    chosen to accept in production, rather than that gap randomly breaking CI."""
+    encoder = cv2.QRCodeEncoder.create()
+    qr_matrix = encoder.encode(str(payload))  # already 0/255 uint8, not a 0/1 matrix
+    detector = cv2.QRCodeDetector()
+    last_png_bytes = None
+    for scale, border in ((10, 40), (14, 56), (18, 72), (24, 96), (30, 120), (36, 144), (44, 176)):
+        big = np.repeat(np.repeat(qr_matrix, scale, axis=0), scale, axis=1)
+        bordered = cv2.copyMakeBorder(big, border, border, border, border, cv2.BORDER_CONSTANT, value=255)
+        ok, png_bytes = cv2.imencode(".png", bordered)
+        assert ok
+        last_png_bytes = png_bytes.tobytes()
+        data, _points, _ = detector.detectAndDecode(bordered)
+        if data == str(payload):
+            return last_png_bytes
+    return last_png_bytes  # fall through with the largest rendering; test itself will surface any failure clearly
+
+
+# ---------- Offline XML fixture builder ----------
+
+def _build_offline_xml_zip_bytes(share_code: str, tamper_after_signing: bool = False) -> bytes:
+    xml_doc = etree.fromstring(
+        b'<OfflinePaperlessKyc referenceId="888812345678">'
+        b'<UidData><Poi m="" e="" name="Test Person" dob="02-02-1985" gender="F"/>'
+        b'<Poa careof="" dist="TestDist" landmark="" house="12" loc="TestLoc" pc="560001" '
+        b'po="TestPO" state="Karnataka" street="MG Road" subdist="" vtc="Bengaluru"/></UidData>'
+        b"</OfflinePaperlessKyc>"
+    )
+    signed_root = XMLSigner().sign(xml_doc, key=_TEST_KEY_PEM, cert=_TEST_CERT_PEM)
+    signed_bytes = etree.tostring(signed_root)
+    if tamper_after_signing:
+        signed_bytes = signed_bytes.replace(b"Test Person", b"Evil Person")
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("offline.xml", signed_bytes)
+    buf.seek(0)
+    raw_zip = buf.getvalue()
+
+    # zipfile (stdlib) can't natively write an encrypted zip, but our persistence layer
+    # only relies on AadhaarOfflineXML's zipfile.setpassword() call at *read* time, and
+    # a plain (unencrypted) zip works fine there since setpassword() is a no-op unless
+    # the entry is actually encrypted. This still exercises the full read/parse/verify path.
+    return raw_zip
+
+
+# ================= QR flow =================
+
+def test_qr_verify_requires_auth():
+    r = client.post("/kyc/aadhaar/qr/verify", files={"file": ("card.png", b"x", "image/png")})
+    assert r.status_code == 401
+
+
+def test_qr_verify_rejects_empty_file():
+    r = client.post(
+        "/kyc/aadhaar/qr/verify",
+        files={"file": ("card.png", b"", "image/png")},
+        headers=_auth_headers(),
+    )
+    assert r.status_code == 400
+    assert r.json()["detail"] == "empty_file"
+
+
+def test_qr_verify_rejects_image_with_no_qr_code():
+    blank = np.zeros((100, 100, 3), dtype=np.uint8)
+    ok, png_bytes = cv2.imencode(".png", blank)
+    r = client.post(
+        "/kyc/aadhaar/qr/verify",
+        files={"file": ("card.png", png_bytes.tobytes(), "image/png")},
+        headers=_auth_headers(),
+    )
+    assert r.status_code == 400
+    assert r.json()["detail"] == "qr_not_found"
+
+
+def test_qr_verify_rejects_non_aadhaar_qr():
+    image_bytes = _qr_image_bytes("https://example.com/not-an-aadhaar-qr")
+    r = client.post(
+        "/kyc/aadhaar/qr/verify",
+        files={"file": ("card.png", image_bytes, "image/png")},
+        headers=_auth_headers(),
+    )
+    assert r.status_code == 400
+    assert r.json()["detail"] == "unsupported_qr_format"
+
+
+def test_qr_verify_valid_signature():
+    image_bytes = _qr_image_bytes(_build_secure_qr_int())
+    r = client.post(
+        "/kyc/aadhaar/qr/verify",
+        files={"file": ("card.png", image_bytes, "image/png")},
+        headers=_auth_headers(),
+    )
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["verified"] is True
+    assert data["method"] == "qr"
+    assert data["masked_aadhaar"] == "XXXXXXXX9999"
+    assert data["extracted_data"]["name"] == "Test Name"
+    assert data["failure_reason"] is None
+
+
+def test_qr_verify_tampered_signature_not_verified():
+    image_bytes = _qr_image_bytes(_build_secure_qr_int(tamper_signature=True))
+    r = client.post(
+        "/kyc/aadhaar/qr/verify",
+        files={"file": ("card.png", image_bytes, "image/png")},
+        headers=_auth_headers(),
+    )
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["verified"] is False
+    assert data["failure_reason"] == "signature_invalid"
+
+
+def test_qr_verify_fails_cleanly_without_configured_cert():
+    image_bytes = _qr_image_bytes(_build_secure_qr_int())
+    with patch.dict(os.environ, {}, clear=False):
+        del os.environ["UIDAI_QR_CERT_PEM"]
+        try:
+            r = client.post(
+                "/kyc/aadhaar/qr/verify",
+                files={"file": ("card.png", image_bytes, "image/png")},
+                headers=_auth_headers(),
+            )
+        finally:
+            os.environ["UIDAI_QR_CERT_PEM"] = _TEST_CERT_PEM.decode("utf-8")
+    assert r.status_code == 500
+    assert "UIDAI_QR_CERT_PEM" in r.json()["detail"]
+
+
+# ================= Offline XML flow =================
+
+def test_xml_verify_requires_auth():
+    r = client.post(
+        "/kyc/aadhaar/xml/verify",
+        files={"file": ("offline.zip", b"x", "application/zip")},
+        data={"share_code": "1234"},
+    )
+    assert r.status_code == 401
+
+
+def test_xml_verify_missing_share_code_is_422():
+    r = client.post(
+        "/kyc/aadhaar/xml/verify",
+        files={"file": ("offline.zip", b"x", "application/zip")},
+        headers=_auth_headers(),
+    )
+    assert r.status_code == 422
+
+
+def test_xml_verify_valid_signature():
+    zip_bytes = _build_offline_xml_zip_bytes("1234")
+    r = client.post(
+        "/kyc/aadhaar/xml/verify",
+        files={"file": ("offline.zip", zip_bytes, "application/zip")},
+        data={"share_code": "1234"},
+        headers=_auth_headers(),
+    )
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["verified"] is True
+    assert data["method"] == "offline_xml"
+    assert data["masked_aadhaar"] == "XXXXXXXX8888"
+    assert data["extracted_data"]["name"] == "Test Person"
+
+
+def test_xml_verify_tampered_content_not_verified():
+    zip_bytes = _build_offline_xml_zip_bytes("1234", tamper_after_signing=True)
+    r = client.post(
+        "/kyc/aadhaar/xml/verify",
+        files={"file": ("offline.zip", zip_bytes, "application/zip")},
+        data={"share_code": "1234"},
+        headers=_auth_headers(),
+    )
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["verified"] is False
+    assert data["failure_reason"] is not None
+
+
+def test_xml_verify_rejects_corrupt_zip():
+    r = client.post(
+        "/kyc/aadhaar/xml/verify",
+        files={"file": ("offline.zip", b"this is not a zip file", "application/zip")},
+        data={"share_code": "1234"},
+        headers=_auth_headers(),
+    )
+    assert r.status_code == 400

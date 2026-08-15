@@ -1,5 +1,6 @@
 from .service_customer import serviceCustomer
 from .service_broker import serviceBroker
 from .service_document import serviceDocument
+from .service_kyc import serviceKyc
 
-__all__ = ["serviceCustomer", "serviceBroker", "serviceDocument"]
+__all__ = ["serviceCustomer", "serviceBroker", "serviceDocument", "serviceKyc"]

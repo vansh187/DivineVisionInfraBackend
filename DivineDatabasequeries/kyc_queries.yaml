@@ -1,0 +1,7 @@
+# SQL queries for the KYC (Aadhaar verification) API
+create_verification: |
+  INSERT INTO divine_kyc_verifications(id, owner_id, owner_role, method, verified, masked_aadhaar, extracted_data, failure_reason, created_date)
+  VALUES (:id, :owner_id, :owner_role, :method, :verified, :masked_aadhaar, :extracted_data, :failure_reason, :created_date)
+  RETURNING *;
+get_by_id: |
+  SELECT * FROM divine_kyc_verifications WHERE id = :id LIMIT 1;

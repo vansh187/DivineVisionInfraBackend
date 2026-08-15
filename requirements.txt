@@ -11,3 +11,7 @@ PyYAML
 pytest
 requests
 fpdf2
+opencv-python-headless
+cryptography
+signxml
+python-multipart
