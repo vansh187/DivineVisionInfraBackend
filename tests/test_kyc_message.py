@@ -3,7 +3,7 @@ import os
 os.environ["DATABASE_URL"] = "sqlite:///./test_db.sqlite"
 os.environ["JWT_SECRET_KEY"] = "testsecret"
 
-from DivineAPI.main import _kyc_message
+from DivineAPI.kyc_api import _kyc_message
 
 
 def test_kyc_message_verified_true_ignores_failure_reason():

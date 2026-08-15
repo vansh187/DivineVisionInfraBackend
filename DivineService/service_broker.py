@@ -12,8 +12,8 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 class serviceBroker:
-    def __init__(self, persistence: persistenceBroker, secret_key: str = None):
-        self._persistence = persistence
+    def __init__(self, persistence: persistenceBroker = None, secret_key: str = None):
+        self._persistence = persistence or persistenceBroker()
         self._secret = secret_key or os.getenv("JWT_SECRET_KEY")
         if not self._secret:
             raise RuntimeError("JWT_SECRET_KEY environment variable must be set")

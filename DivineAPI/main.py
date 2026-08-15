@@ -1,7 +1,4 @@
-import json
-import os
-from typing import Optional
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, status
+from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -10,20 +7,12 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from DivineDTO.models import (
-    UserCreateDTO,
-    UserLoginDTO,
-    TokenDTO,
-    UserOutDTO,
-    DocumentGenerateRequestDTO,
-    DocumentOutDTO,
-    KycVerificationOutDTO,
-)
-from Divinepersistence.persistence_db import PersistenceDB
-from Divinepersistence import persistenceCustomer, persistenceBroker, persistenceDocument, persistenceKyc
-from DivineService import serviceCustomer, serviceBroker, serviceDocument, serviceKyc
-from DivineService.auth import get_current_user
-from sqlalchemy.exc import IntegrityError
+from DivineAPI.health_api import router as health_router
+from DivineAPI.customer_api import router as customer_router
+from DivineAPI.broker_api import router as broker_router
+from DivineAPI.documents_api import router as documents_router
+from DivineAPI.kyc_api import router as kyc_router
+from DivineService import serviceHealth
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
@@ -68,228 +57,11 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 
 @app.on_event("startup")
 def startup():
-    db = PersistenceDB()
-    db.create_tables()
+    serviceHealth().init_db()
 
 
-# Initialize persistence and services
-_cust_persistence = persistenceCustomer()
-_broker_persistence = persistenceBroker()
-_doc_persistence = persistenceDocument()
-_kyc_persistence = persistenceKyc()
-_cust_service = serviceCustomer(_cust_persistence, secret_key=os.getenv("JWT_SECRET_KEY"))
-_broker_service = serviceBroker(_broker_persistence, secret_key=os.getenv("JWT_SECRET_KEY"))
-_doc_service = serviceDocument(_doc_persistence)
-_kyc_service = serviceKyc(_kyc_persistence)
-
-
-@app.get("/health")
-def health():
-    db_ok = PersistenceDB().test_connection()
-    if not db_ok:
-        return JSONResponse({"status": "error", "database": "unreachable"}, status_code=503)
-    return {"status": "ok", "database": "connected"}
-
-
-@app.post("/customer/signup", response_model=UserOutDTO)
-def customer_signup(request: Request, dto: UserCreateDTO):
-    try:
-        client_ip = request.client.host if request.client else None
-        user = _cust_service.signup(dto, created_by=client_ip)
-        return UserOutDTO(
-            id=user.id,
-            username=user.username,
-            email=getattr(user, 'email', None),
-            phone=getattr(user, 'phone', None),
-            first_name=getattr(user, 'first_name', None),
-            last_name=getattr(user, 'last_name', None),
-            created_by=user.created_by,
-            created_date=user.created_date,
-            last_updated_by=user.last_updated_by,
-            last_updated_date=user.last_updated_date,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except IntegrityError:
-        raise HTTPException(status_code=409, detail="conflict")
-    except Exception:
-        raise HTTPException(status_code=500, detail="internal_error")
-
-
-@app.post("/customer/login", response_model=TokenDTO)
-def customer_login(dto: UserLoginDTO):
-    try:
-        token = _cust_service.login(dto)
-        return TokenDTO(access_token=token)
-    except ValueError:
-        raise HTTPException(status_code=401, detail="invalid_credentials")
-    except Exception:
-        raise HTTPException(status_code=500, detail="internal_error")
-
-
-@app.post("/broker/signup", response_model=UserOutDTO)
-def broker_signup(request: Request, dto: UserCreateDTO):
-    try:
-        client_ip = request.client.host if request.client else None
-        user = _broker_service.signup(dto, created_by=client_ip)
-        return UserOutDTO(
-            id=user.id,
-            username=user.username,
-            email=getattr(user, 'email', None),
-            phone=getattr(user, 'phone', None),
-            first_name=getattr(user, 'first_name', None),
-            last_name=getattr(user, 'last_name', None),
-            created_by=user.created_by,
-            created_date=user.created_date,
-            last_updated_by=user.last_updated_by,
-            last_updated_date=user.last_updated_date,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except IntegrityError:
-        raise HTTPException(status_code=409, detail="conflict")
-    except Exception:
-        raise HTTPException(status_code=500, detail="internal_error")
-
-
-@app.post("/broker/login", response_model=TokenDTO)
-def broker_login(dto: UserLoginDTO):
-    try:
-        token = _broker_service.login(dto)
-        return TokenDTO(access_token=token)
-    except ValueError:
-        raise HTTPException(status_code=401, detail="invalid_credentials")
-    except Exception:
-        raise HTTPException(status_code=500, detail="internal_error")
-
-
-@app.post("/documents/generate", response_model=DocumentOutDTO)
-def generate_document(dto: DocumentGenerateRequestDTO, current_user: dict = Depends(get_current_user)):
-    try:
-        doc, signed_url, expires_in = _doc_service.generate(
-            dto, owner_id=current_user["sub"], owner_role=current_user["role"]
-        )
-        return DocumentOutDTO(
-            id=doc.id,
-            owner_id=doc.owner_id,
-            owner_role=doc.owner_role,
-            document_type=doc.document_type,
-            status=doc.status,
-            created_date=doc.created_date,
-            signed_url=signed_url,
-            signed_url_expires_in=expires_in,
-        )
-    except IntegrityError:
-        raise HTTPException(status_code=409, detail="conflict")
-    except RuntimeError as e:
-        raise HTTPException(status_code=502, detail=str(e))
-    except Exception:
-        raise HTTPException(status_code=500, detail="internal_error")
-
-
-@app.get("/documents/{document_id}", response_model=DocumentOutDTO)
-def get_document(document_id: str, current_user: dict = Depends(get_current_user)):
-    try:
-        doc, signed_url, expires_in = _doc_service.get(document_id, requester_id=current_user["sub"])
-        return DocumentOutDTO(
-            id=doc.id,
-            owner_id=doc.owner_id,
-            owner_role=doc.owner_role,
-            document_type=doc.document_type,
-            status=doc.status,
-            created_date=doc.created_date,
-            signed_url=signed_url,
-            signed_url_expires_in=expires_in,
-        )
-    except ValueError:
-        raise HTTPException(status_code=404, detail="not_found")
-    except PermissionError:
-        raise HTTPException(status_code=403, detail="forbidden")
-    except RuntimeError as e:
-        raise HTTPException(status_code=502, detail=str(e))
-    except Exception:
-        raise HTTPException(status_code=500, detail="internal_error")
-
-
-_KYC_FAILURE_MESSAGES = {
-    "signature_invalid": "Aadhaar signature verification failed. This document could not be verified as genuine.",
-}
-
-
-def _kyc_message(verified: bool, failure_reason: Optional[str]) -> str:
-    if verified:
-        return "Aadhaar verification successful."
-    if failure_reason in _KYC_FAILURE_MESSAGES:
-        return _KYC_FAILURE_MESSAGES[failure_reason]
-    if failure_reason and failure_reason.startswith("xml_signature_invalid"):
-        return "Aadhaar Offline XML signature verification failed. This document could not be verified as genuine."
-    if failure_reason and failure_reason.startswith("signature_verification_error"):
-        return "Aadhaar verification could not be completed due to a technical error. Please try again."
-    return "Aadhaar verification failed."
-
-
-def _kyc_result_to_dto(record) -> KycVerificationOutDTO:
-    extracted_data = record.extracted_data
-    if isinstance(extracted_data, str):
-        # Postgres (jsonb) hands back a dict already; SQLite (used in tests) hands back
-        # the raw JSON text we stored, since this goes through raw SQL, not the ORM.
-        try:
-            extracted_data = json.loads(extracted_data)
-        except ValueError:
-            extracted_data = {}
-    if not isinstance(extracted_data, dict):
-        extracted_data = {}
-    verified = bool(record.verified)
-    return KycVerificationOutDTO(
-        id=record.id,
-        owner_id=record.owner_id,
-        owner_role=record.owner_role,
-        method=record.method,
-        verified=verified,
-        status="success" if verified else "error",
-        message=_kyc_message(verified, record.failure_reason),
-        masked_aadhaar=record.masked_aadhaar,
-        extracted_data=extracted_data,
-        failure_reason=record.failure_reason,
-        created_date=record.created_date,
-    )
-
-
-@app.post("/kyc/aadhaar/qr/verify", response_model=KycVerificationOutDTO)
-async def verify_aadhaar_qr(file: UploadFile = File(...), current_user: dict = Depends(get_current_user)):
-    try:
-        image_bytes = await file.read()
-        record = _kyc_service.verify_qr(
-            image_bytes, owner_id=current_user["sub"], owner_role=current_user["role"]
-        )
-        return _kyc_result_to_dto(record)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except IntegrityError:
-        raise HTTPException(status_code=409, detail="conflict")
-    except RuntimeError as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    except Exception:
-        raise HTTPException(status_code=500, detail="internal_error")
-
-
-@app.post("/kyc/aadhaar/xml/verify", response_model=KycVerificationOutDTO)
-async def verify_aadhaar_offline_xml(
-    file: UploadFile = File(...),
-    share_code: str = Form(...),
-    current_user: dict = Depends(get_current_user),
-):
-    try:
-        zip_bytes = await file.read()
-        record = _kyc_service.verify_offline_xml(
-            zip_bytes, share_code, owner_id=current_user["sub"], owner_role=current_user["role"]
-        )
-        return _kyc_result_to_dto(record)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except IntegrityError:
-        raise HTTPException(status_code=409, detail="conflict")
-    except RuntimeError as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    except Exception:
-        raise HTTPException(status_code=500, detail="internal_error")
+app.include_router(health_router)
+app.include_router(customer_router)
+app.include_router(broker_router)
+app.include_router(documents_router)
+app.include_router(kyc_router)

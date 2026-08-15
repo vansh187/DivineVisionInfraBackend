@@ -24,8 +24,8 @@ def _pdf_safe_text(value) -> str:
 
 
 class serviceDocument:
-    def __init__(self, persistence: persistenceDocument):
-        self._persistence = persistence
+    def __init__(self, persistence: persistenceDocument = None):
+        self._persistence = persistence or persistenceDocument()
         self._supabase_url = os.getenv("SUPABASE_URL")
         self._service_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
         self._bucket = os.getenv("SUPABASE_STORAGE_BUCKET", "documents")

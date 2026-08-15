@@ -54,8 +54,8 @@ def _safe_extracted_fields(data: dict) -> dict:
 
 
 class serviceKyc:
-    def __init__(self, persistence: persistenceKyc):
-        self._persistence = persistence
+    def __init__(self, persistence: persistenceKyc = None):
+        self._persistence = persistence or persistenceKyc()
 
     # ---------- QR flow ----------
 
