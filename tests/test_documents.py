@@ -274,3 +274,59 @@ def test_upload_aadhaar_photo_returns_502_when_storage_not_configured(mock_uploa
     )
     assert r.status_code == 502
     assert r.json()["detail"] == "storage_not_configured"
+
+
+# ---------- POST /documents/pan-photo ----------
+
+def test_upload_pan_photo_requires_auth():
+    r = client.post(
+        "/documents/pan-photo",
+        files={"file": ("pan.jpg", _fake_jpeg_bytes(), "image/jpeg")},
+    )
+    assert r.status_code == 401
+
+
+@patch("DivineService.service_document.serviceDocument._sign_url", return_value=FAKE_SIGNED_URL)
+@patch("DivineService.service_document.serviceDocument._upload_to_storage", return_value=None)
+def test_upload_pan_photo_happy_path(mock_upload, mock_sign):
+    r = client.post(
+        "/documents/pan-photo",
+        files={"file": ("pan.jpg", _fake_jpeg_bytes(), "image/jpeg")},
+        headers=_auth_headers(),
+    )
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["document_type"] == "pan_card"
+    assert data["status"] == "uploaded"
+    assert data["signed_url"] == FAKE_SIGNED_URL
+
+
+def test_upload_pan_photo_rejects_unsupported_file_type():
+    r = client.post(
+        "/documents/pan-photo",
+        files={"file": ("x.pdf", b"%PDF-1.4 fake", "application/pdf")},
+        headers=_auth_headers(),
+    )
+    assert r.status_code == 400
+    assert r.json()["detail"] == "unsupported_file_type"
+
+
+def test_upload_pan_photo_rejects_empty_file():
+    r = client.post(
+        "/documents/pan-photo",
+        files={"file": ("x.jpg", b"", "image/jpeg")},
+        headers=_auth_headers(),
+    )
+    assert r.status_code == 400
+    assert r.json()["detail"] == "empty_file"
+
+
+@patch("DivineService.service_document.serviceDocument._upload_to_storage", side_effect=RuntimeError("storage_not_configured"))
+def test_upload_pan_photo_returns_502_when_storage_not_configured(mock_upload):
+    r = client.post(
+        "/documents/pan-photo",
+        files={"file": ("x.jpg", _fake_jpeg_bytes(), "image/jpeg")},
+        headers=_auth_headers(),
+    )
+    assert r.status_code == 502
+    assert r.json()["detail"] == "storage_not_configured"

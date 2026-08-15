@@ -28,6 +28,10 @@ class persistenceDocument:
             'VALUES (:id, :owner_id, :owner_role, :document_type, :form_data, :storage_path, :status, :created_date, :last_updated_date) RETURNING *;'
         ))
         queries.setdefault("get_by_id", 'SELECT * FROM divine_documents WHERE id = :id LIMIT 1;')
+        queries.setdefault("get_latest_by_owner_and_type", (
+            'SELECT * FROM divine_documents WHERE owner_id = :owner_id AND document_type = :document_type '
+            'ORDER BY created_date DESC LIMIT 1;'
+        ))
         self._queries = queries
         self._engine = engine
 
@@ -62,6 +66,15 @@ class persistenceDocument:
         with self._session_factory() as db:
             query = self._queries.get("get_by_id")
             result = db.execute(text(query), {"id": id})
+            row = result.mappings().first()
+            if not row:
+                return None
+            return RowWrapper(row)
+
+    def get_latest_by_owner_and_type(self, owner_id: str, document_type: str):
+        with self._session_factory() as db:
+            query = self._queries.get("get_latest_by_owner_and_type")
+            result = db.execute(text(query), {"owner_id": owner_id, "document_type": document_type})
             row = result.mappings().first()
             if not row:
                 return None

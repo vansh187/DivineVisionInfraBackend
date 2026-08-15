@@ -1,3 +1,4 @@
+import base64
 import os
 import requests
 from unittest.mock import patch, MagicMock
@@ -6,6 +7,12 @@ os.environ["DATABASE_URL"] = "sqlite:///./test_db.sqlite"
 os.environ["JWT_SECRET_KEY"] = "testsecret"
 
 from DivineService.service_document import serviceDocument, _safe_path_segment, _pdf_safe_text
+
+# The smallest possible valid PNG (1x1, transparent) - a real, decodable image so
+# fpdf2's embedding path (which uses Pillow) is exercised for real, not just mocked.
+_TINY_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
 
 
 def _service(configured=True):
@@ -185,3 +192,151 @@ def test_delete_from_storage_never_raises_even_on_network_error(mock_delete):
     mock_delete.side_effect = requests.exceptions.ConnectionError("boom")
     svc, _ = _service()
     svc._delete_from_storage("C00001/kyc_1.pdf")  # must swallow the error, not raise
+
+
+# ---------- _render_pdf with attachments ----------
+
+def test_render_pdf_embeds_valid_image_attachment():
+    svc, _ = _service()
+    pdf_bytes = svc._render_pdf("booking_application", {"name": "A"}, {"Aadhaar Card - Front": _TINY_PNG})
+    assert pdf_bytes.startswith(b"%PDF")
+
+
+def test_render_pdf_falls_back_gracefully_on_corrupt_attachment():
+    svc, _ = _service()
+    # Must not raise - a bad attachment shouldn't fail a document that otherwise succeeded.
+    pdf_bytes = svc._render_pdf("booking_application", {"name": "A"}, {"Bad": b"not-an-image"})
+    assert pdf_bytes.startswith(b"%PDF")
+
+
+def test_render_pdf_without_attachments_unchanged():
+    svc, _ = _service()
+    pdf_bytes = svc._render_pdf("kyc", {"name": "A"})
+    assert pdf_bytes.startswith(b"%PDF")
+
+
+# ---------- _download_from_storage ----------
+
+def test_download_from_storage_raises_when_not_configured():
+    svc, _ = _service(configured=False)
+    try:
+        svc._download_from_storage("C00001/x.jpg")
+        assert False, "expected RuntimeError"
+    except RuntimeError as e:
+        assert str(e) == "storage_not_configured"
+
+
+@patch("DivineService.service_document.requests.get")
+def test_download_from_storage_raises_on_non_200(mock_get):
+    mock_get.return_value = MagicMock(status_code=404)
+    svc, _ = _service()
+    try:
+        svc._download_from_storage("C00001/x.jpg")
+        assert False, "expected RuntimeError"
+    except RuntimeError as e:
+        assert str(e) == "storage_download_failed:404"
+
+
+@patch("DivineService.service_document.requests.get")
+def test_download_from_storage_raises_on_network_error(mock_get):
+    mock_get.side_effect = requests.exceptions.ConnectionError("boom")
+    svc, _ = _service()
+    try:
+        svc._download_from_storage("C00001/x.jpg")
+        assert False, "expected RuntimeError"
+    except RuntimeError as e:
+        assert str(e) == "storage_unreachable"
+
+
+@patch("DivineService.service_document.requests.get")
+def test_download_from_storage_returns_bytes_on_success(mock_get):
+    mock_get.return_value = MagicMock(status_code=200, content=b"filedata")
+    svc, _ = _service()
+    assert svc._download_from_storage("C00001/x.jpg") == b"filedata"
+
+
+# ---------- generate() gating on booking_application ----------
+
+def test_generate_booking_application_raises_when_documents_missing():
+    from DivineDTO.models import DocumentGenerateRequestDTO
+
+    persistence = MagicMock()
+    persistence.get_latest_by_owner_and_type.return_value = None
+    svc = serviceDocument(persistence)
+
+    dto = DocumentGenerateRequestDTO(document_type="booking_application", form_data={"name": "A"})
+    try:
+        svc.generate(dto, owner_id="C00001", owner_role="customer")
+        assert False, "expected ValueError"
+    except ValueError as e:
+        message = str(e)
+        assert message.startswith("documents_incomplete:")
+        assert "aadhaar_front" in message
+        assert "aadhaar_back" in message
+        assert "pan_card" in message
+
+
+@patch.object(serviceDocument, "_sign_url", return_value="https://fake.supabase.co/signed")
+@patch.object(serviceDocument, "_upload_to_storage")
+@patch.object(serviceDocument, "_download_from_storage", return_value=_TINY_PNG)
+def test_generate_booking_application_succeeds_and_embeds_when_all_present(mock_download, mock_upload, mock_sign):
+    from DivineDTO.models import DocumentGenerateRequestDTO
+
+    persistence = MagicMock()
+    persistence.get_latest_by_owner_and_type.return_value = MagicMock(storage_path="C00001/aadhaar_front_x.jpg")
+    persistence.create_document.return_value = MagicMock(
+        id="doc1", owner_id="C00001", owner_role="customer",
+        document_type="booking_application", status="generated", created_date=None,
+    )
+    svc = serviceDocument(persistence)
+
+    dto = DocumentGenerateRequestDTO(document_type="booking_application", form_data={"name": "A"})
+    doc, signed_url, expires_in = svc.generate(dto, owner_id="C00001", owner_role="customer")
+
+    assert doc.id == "doc1"
+    assert mock_download.call_count == 3  # aadhaar_front, aadhaar_back, pan_card
+    mock_upload.assert_called_once()
+
+
+def test_generate_non_gated_document_type_skips_document_lookup():
+    from DivineDTO.models import DocumentGenerateRequestDTO
+
+    persistence = MagicMock()
+    persistence.create_document.return_value = MagicMock(
+        id="doc1", owner_id="C00001", owner_role="customer", document_type="kyc", status="generated", created_date=None,
+    )
+    svc = serviceDocument(persistence)
+    svc._supabase_url = "https://fake.supabase.co"
+    svc._service_key = "fake-key"
+
+    with patch.object(serviceDocument, "_upload_to_storage"), patch.object(serviceDocument, "_sign_url", return_value="url"):
+        dto = DocumentGenerateRequestDTO(document_type="kyc", form_data={"name": "A"})
+        svc.generate(dto, owner_id="C00001", owner_role="customer")
+
+    persistence.get_latest_by_owner_and_type.assert_not_called()
+
+
+# ---------- upload_pan_photo / upload_aadhaar_photo ----------
+
+@patch.object(serviceDocument, "_sign_url", return_value="url")
+@patch.object(serviceDocument, "_upload_to_storage")
+def test_upload_pan_photo_uses_pan_card_document_type(mock_upload, mock_sign):
+    persistence = MagicMock()
+    persistence.create_document.return_value = MagicMock(id="doc1")
+    svc = serviceDocument(persistence)
+    svc._supabase_url = "https://fake.supabase.co"
+    svc._service_key = "fake-key"
+
+    svc.upload_pan_photo(b"filedata", "image/jpeg", owner_id="C00001", owner_role="customer")
+
+    _, kwargs = persistence.create_document.call_args
+    assert kwargs["document_type"] == "pan_card"
+
+
+def test_upload_aadhaar_photo_rejects_invalid_side():
+    svc, _ = _service()
+    try:
+        svc.upload_aadhaar_photo(b"data", "image/jpeg", "sideways", owner_id="C00001", owner_role="customer")
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert str(e) == "invalid_side"
