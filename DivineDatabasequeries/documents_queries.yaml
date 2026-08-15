@@ -1,0 +1,10 @@
+# SQL queries for the documents API
+create_document: |
+  INSERT INTO divine_documents(id, owner_id, owner_role, document_type, form_data, storage_path, status, created_date, last_updated_date)
+  VALUES (:id, :owner_id, :owner_role, :document_type, :form_data, :storage_path, :status, :created_date, :last_updated_date)
+  RETURNING *;
+get_by_id: |
+  SELECT * FROM divine_documents WHERE id = :id LIMIT 1;
+get_latest_by_owner_and_type: |
+  SELECT * FROM divine_documents WHERE owner_id = :owner_id AND document_type = :document_type
+  ORDER BY created_date DESC LIMIT 1;
