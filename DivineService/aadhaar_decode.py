@@ -11,11 +11,20 @@ verification against UIDAI's certificate are implemented separately in this repo
 """
 import zipfile
 import zlib
-import xml.etree.ElementTree as ET
+import defusedxml.ElementTree as ET
+from defusedxml.common import DefusedXmlException
 
 
 class AadhaarQrParseError(Exception):
     """Raised when Aadhaar Secure QR / Offline XML data cannot be parsed into the expected shape."""
+
+
+# Bounds the decompressed size of the single entry inside an Offline e-KYC ZIP. The ZIP
+# password (share_code) is attacker-supplied along with the file itself, so anyone can
+# author their own small-compressed/huge-decompressed zip bomb without needing a real
+# Aadhaar card - this runs before any UIDAI signature check, so nothing else gates it.
+# 5 MB is generous for the demographic-only XML this format actually contains (no photo).
+MAX_OFFLINE_XML_ENTRY_BYTES = 5 * 1024 * 1024
 
 
 class AadhaarSecureQr:
@@ -105,10 +114,24 @@ class AadhaarSecureQr:
         documented/observed default), but callers verifying against a candidate
         certificate with a different key size should pass that key's actual byte
         length (key_size // 8) instead of assuming 2048-bit universally."""
+        self._check_sig_len(sig_len)
         return self.decompressed_array[len(self.decompressed_array) - sig_len :]
 
     def signedData(self, sig_len: int = 256) -> bytes:
+        self._check_sig_len(sig_len)
         return self.decompressed_array[: len(self.decompressed_array) - sig_len]
+
+    def _check_sig_len(self, sig_len: int) -> None:
+        # Without this, a payload shorter than sig_len (malformed/truncated, or simply
+        # too small for a given candidate's key size) would silently negative-index into
+        # a wrapped-around or empty byte range instead of failing clearly - callers would
+        # see an opaque "signature_invalid" from the doomed-to-fail verify() call rather
+        # than a distinct signal that the payload itself is too short to contain this
+        # candidate's signature at all.
+        if len(self.decompressed_array) < sig_len:
+            raise AadhaarQrParseError(
+                f"payload_too_short_for_signature: {len(self.decompressed_array)} bytes, need {sig_len}"
+            )
 
     # Note: deliberately not extracting the embedded photo here. pyaadhaar's upstream
     # logic for locating the photo's byte boundary (relative to the trailing signature
@@ -130,6 +153,8 @@ class AadhaarOfflineXML:
             names = zf.namelist()
             if not names:
                 raise AadhaarQrParseError("invalid_zip_or_share_code: zip has no entries")
+            if zf.getinfo(names[0]).file_size > MAX_OFFLINE_XML_ENTRY_BYTES:
+                raise AadhaarQrParseError("invalid_zip_or_share_code: entry too large")
             filedata = zf.open(names[0]).read()
         except (zipfile.BadZipFile, RuntimeError, KeyError) as e:
             # RuntimeError covers wrong-password ("Bad password for file") from zipfile
@@ -138,7 +163,12 @@ class AadhaarOfflineXML:
         self.raw_xml_bytes = filedata
 
         try:
-            parsedxml = ET.fromstring(filedata, parser=ET.XMLParser(encoding="utf-8"))
+            # defusedxml.ElementTree.fromstring() (unlike stdlib's) has no `parser=` kwarg -
+            # encoding is read from the XML declaration/BOM per the XML spec, which UIDAI's
+            # documents already declare, and its default forbid_entities/forbid_external
+            # guard against entity-expansion and XXE-style resource-exhaustion attacks that
+            # stdlib xml.etree.ElementTree does not protect against on its own.
+            parsedxml = ET.fromstring(filedata)
             self.root = parsedxml
 
             hashofmobile = self.root[0][0].attrib.get("m", "")
@@ -176,6 +206,11 @@ class AadhaarOfflineXML:
         except AadhaarQrParseError:
             raise
         except (KeyError, IndexError, ET.ParseError) as e:
+            raise AadhaarQrParseError(f"unexpected_offline_xml_structure: {e}") from e
+        except DefusedXmlException as e:
+            # defusedxml's guard exceptions (EntitiesForbidden, ExternalReferenceForbidden,
+            # etc.) aren't ET.ParseError subclasses, so they need their own clause to reach
+            # a clean 400 instead of falling through to the outer generic-500 handler.
             raise AadhaarQrParseError(f"unexpected_offline_xml_structure: {e}") from e
 
     def decodeddata(self) -> dict:

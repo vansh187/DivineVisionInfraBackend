@@ -10,5 +10,14 @@ import os
 # pointing every test in the session at the production database. This happened for
 # real: adding a new test file that sorted before test_auth.py and didn't set these
 # vars caused a full-suite run to write test signups into production.
-os.environ.setdefault("DATABASE_URL", "sqlite:///./test_db.sqlite")
-os.environ.setdefault("JWT_SECRET_KEY", "testsecret")
+#
+# Unconditional assignment, not setdefault: a DATABASE_URL already exported in the
+# developer's shell before pytest even starts (common when testing locally against a
+# real Supabase instance for other reasons) would leave setdefault's guard a no-op,
+# reopening the exact same production-write risk through a different trigger. There is
+# no legitimate reason for this test suite to run against anything but the local sqlite
+# database - a deliberate integration-test run against a real DB should use its own
+# distinct env var and test entry point, not rely on whatever DATABASE_URL happens to
+# be in the environment.
+os.environ["DATABASE_URL"] = "sqlite:///./test_db.sqlite"
+os.environ["JWT_SECRET_KEY"] = "testsecret"

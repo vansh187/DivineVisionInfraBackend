@@ -1,7 +1,7 @@
 -- PostgreSQL initialization script for Divine users
 -- Creates customer and broker user tables with ID format checks
 
-CREATE TABLE IF NOT EXISTS "DIVINE_CUSTOMER_USERS" (
+CREATE TABLE IF NOT EXISTS divine_customer_users (
   id varchar(6) PRIMARY KEY CHECK (id ~ '^C[0-9]{5}$'),
   username varchar(255) UNIQUE NOT NULL,
   first_name varchar(150),
@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS "DIVINE_CUSTOMER_USERS" (
   last_updated_date timestamptz DEFAULT now()
 );
 
-CREATE TABLE IF NOT EXISTS "DIVINE_BROKER_USERS" (
+CREATE TABLE IF NOT EXISTS divine_broker_users (
   id varchar(6) PRIMARY KEY CHECK (id ~ '^B[0-9]{5}$'),
   username varchar(255) UNIQUE NOT NULL,
   first_name varchar(150),

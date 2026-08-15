@@ -2,6 +2,8 @@ import io
 import os
 import re
 import uuid
+import cv2
+import numpy as np
 import requests
 from fpdf import FPDF
 from fpdf.enums import XPos, YPos
@@ -196,6 +198,17 @@ class serviceDocument:
         ext = _ALLOWED_PHOTO_TYPES.get((content_type or "").lower())
         if not ext:
             raise ValueError("unsupported_file_type")
+        # Content-Type is a client-supplied header, not a guarantee of what the bytes
+        # actually are - decoding confirms this is a real, readable image (matching how
+        # the QR KYC flow validates uploads) rather than trusting the header alone, which
+        # would let an arbitrary file through mislabeled as image/jpeg or image/png.
+        arr = np.frombuffer(file_bytes, dtype=np.uint8)
+        try:
+            img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        except cv2.error:
+            img = None
+        if img is None:
+            raise ValueError("unsupported_file_type")
 
         document_id = str(uuid.uuid4())
         object_path = f"{owner_id}/{document_type}_{document_id}.{ext}"
@@ -227,11 +240,15 @@ class serviceDocument:
     def upload_pan_photo(self, file_bytes: bytes, content_type: str, owner_id: str, owner_role: str):
         return self._upload_photo(file_bytes, content_type, "pan_card", owner_id, owner_role)
 
-    def get(self, document_id: str, requester_id: str):
+    def get(self, document_id: str, requester_id: str, requester_role: str = None):
         doc = self._persistence.get_by_id(document_id)
         if not doc:
             raise ValueError("not_found")
-        if doc.owner_id != requester_id:
+        # owner_id alone currently can't collide across roles (customer/broker IDs use
+        # distinct prefixes), so this check only "works" by accident of that ID scheme -
+        # comparing owner_role too makes the authorization boundary explicit rather than
+        # incidental, in case that ID scheme is ever changed.
+        if doc.owner_id != requester_id or (requester_role is not None and doc.owner_role != requester_role):
             raise PermissionError("forbidden")
         signed_url = self._sign_url(doc.storage_path)
         return doc, signed_url, DEFAULT_SIGNED_URL_EXPIRY_SECONDS

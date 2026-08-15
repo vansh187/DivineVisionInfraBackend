@@ -55,9 +55,13 @@ def _kyc_result_to_dto(record) -> KycVerificationOutDTO:
 
 
 @router.post("/qr/verify", response_model=KycVerificationOutDTO)
-async def verify_aadhaar_qr(file: UploadFile = File(...), current_user: dict = Depends(get_current_user)):
+def verify_aadhaar_qr(file: UploadFile = File(...), current_user: dict = Depends(get_current_user)):
+    # Plain def, not async def: verify_qr does CPU-bound image decode/QR scan/RSA signature
+    # verification, none of it awaited. FastAPI runs sync routes in a threadpool
+    # automatically; declaring this async def would instead run all of that inline on the
+    # single event-loop thread, blocking every other concurrent request for its duration.
     try:
-        image_bytes = await file.read()
+        image_bytes = file.file.read()
         record = _kyc_service.verify_qr(
             image_bytes, owner_id=current_user["sub"], owner_role=current_user["role"]
         )
@@ -73,13 +77,15 @@ async def verify_aadhaar_qr(file: UploadFile = File(...), current_user: dict = D
 
 
 @router.post("/xml/verify", response_model=KycVerificationOutDTO)
-async def verify_aadhaar_offline_xml(
+def verify_aadhaar_offline_xml(
     file: UploadFile = File(...),
     share_code: str = Form(...),
     current_user: dict = Depends(get_current_user),
 ):
+    # See verify_aadhaar_qr above: plain def so FastAPI threadpools the blocking
+    # zip/XML-signature verification work instead of running it on the event loop.
     try:
-        zip_bytes = await file.read()
+        zip_bytes = file.file.read()
         record = _kyc_service.verify_offline_xml(
             zip_bytes, share_code, owner_id=current_user["sub"], owner_role=current_user["role"]
         )

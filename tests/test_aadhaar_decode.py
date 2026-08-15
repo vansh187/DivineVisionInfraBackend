@@ -196,6 +196,31 @@ def test_malformed_xml_inside_valid_zip_raises_parse_error():
         AadhaarOfflineXML(io.BytesIO(_build_zip(b"<not><valid xml")), "1234")
 
 
+def test_oversized_zip_entry_rejected_before_reading():
+    # The zip password (share_code) is attacker-supplied along with the file itself, so
+    # nothing before this check requires a real Aadhaar card - an entry whose declared
+    # decompressed size exceeds the cap must be rejected without ever reading/decompressing
+    # it in full, so a small-compressed/huge-decompressed zip bomb can't exhaust memory.
+    from DivineService.aadhaar_decode import MAX_OFFLINE_XML_ENTRY_BYTES
+
+    oversized_xml = b"<a>" + (b"x" * (MAX_OFFLINE_XML_ENTRY_BYTES + 1)) + b"</a>"
+    with pytest.raises(AadhaarQrParseError):
+        AadhaarOfflineXML(io.BytesIO(_build_zip(oversized_xml)), "1234")
+
+
+def test_entity_expansion_in_xml_is_rejected_not_expanded():
+    # Guards against a "billion laughs"-style resource-exhaustion payload smuggled inside
+    # the offline XML - stdlib xml.etree.ElementTree does not protect against this on its
+    # own, which is why this module uses defusedxml.ElementTree instead.
+    bomb_xml = (
+        b"<?xml version=\"1.0\"?>"
+        b"<!DOCTYPE a [<!ENTITY b \"spam\"><!ENTITY c \"&b;&b;&b;&b;&b;&b;&b;&b;&b;&b;\">]>"
+        b"<a>&c;</a>"
+    )
+    with pytest.raises(AadhaarQrParseError):
+        AadhaarOfflineXML(io.BytesIO(_build_zip(bomb_xml)), "1234")
+
+
 def test_missing_expected_attributes_raises_parse_error():
     # Valid XML, but missing the "name" attribute AadhaarOfflineXML expects at root[0][0].
     bad_xml = (

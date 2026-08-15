@@ -16,3 +16,4 @@ zxing-cpp
 cryptography
 signxml
 python-multipart
+defusedxml

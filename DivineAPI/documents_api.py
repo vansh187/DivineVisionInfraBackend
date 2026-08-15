@@ -36,13 +36,16 @@ def generate_document(dto: DocumentGenerateRequestDTO, current_user: dict = Depe
 
 
 @router.post("/aadhaar-photo", response_model=DocumentOutDTO)
-async def upload_aadhaar_photo(
+def upload_aadhaar_photo(
     file: UploadFile = File(...),
     side: str = Form(...),
     current_user: dict = Depends(get_current_user),
 ):
+    # Plain def, not async def: upload_aadhaar_photo does a blocking network call to
+    # Supabase Storage (requests.post, up to 30s). FastAPI threadpools sync routes
+    # automatically; async def here would instead block the event loop for that duration.
     try:
-        file_bytes = await file.read()
+        file_bytes = file.file.read()
         doc, signed_url, expires_in = _doc_service.upload_aadhaar_photo(
             file_bytes, file.content_type, side, owner_id=current_user["sub"], owner_role=current_user["role"]
         )
@@ -67,12 +70,14 @@ async def upload_aadhaar_photo(
 
 
 @router.post("/pan-photo", response_model=DocumentOutDTO)
-async def upload_pan_photo(
+def upload_pan_photo(
     file: UploadFile = File(...),
     current_user: dict = Depends(get_current_user),
 ):
+    # See upload_aadhaar_photo above: plain def so FastAPI threadpools the blocking
+    # Supabase Storage upload instead of running it on the event loop.
     try:
-        file_bytes = await file.read()
+        file_bytes = file.file.read()
         doc, signed_url, expires_in = _doc_service.upload_pan_photo(
             file_bytes, file.content_type, owner_id=current_user["sub"], owner_role=current_user["role"]
         )
@@ -99,7 +104,9 @@ async def upload_pan_photo(
 @router.get("/{document_id}", response_model=DocumentOutDTO)
 def get_document(document_id: str, current_user: dict = Depends(get_current_user)):
     try:
-        doc, signed_url, expires_in = _doc_service.get(document_id, requester_id=current_user["sub"])
+        doc, signed_url, expires_in = _doc_service.get(
+            document_id, requester_id=current_user["sub"], requester_role=current_user["role"]
+        )
         return DocumentOutDTO(
             id=doc.id,
             owner_id=doc.owner_id,

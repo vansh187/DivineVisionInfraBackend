@@ -187,7 +187,16 @@ def test_get_document_returns_502_when_refresh_sign_fails(mock_sign):
 # ---------- POST /documents/aadhaar-photo ----------
 
 def _fake_jpeg_bytes() -> bytes:
-    return b"\xff\xd8\xff\xe0" + b"fake-jpeg-body" * 10
+    # Genuinely decodable image bytes, not just a JPEG magic-number prefix - the upload
+    # endpoint verifies uploads by actually decoding them (cv2.imdecode), not by trusting
+    # the client-supplied Content-Type header alone, so a real (if tiny/blank) image is
+    # needed for the happy-path tests using this helper to actually succeed.
+    import cv2
+    import numpy as np
+
+    blank = np.zeros((20, 20, 3), dtype=np.uint8)
+    ok, encoded = cv2.imencode(".jpg", blank)
+    return encoded.tobytes()
 
 
 def test_upload_aadhaar_photo_requires_auth():
@@ -246,6 +255,19 @@ def test_upload_aadhaar_photo_rejects_unsupported_file_type():
     r = client.post(
         "/documents/aadhaar-photo",
         files={"file": ("x.pdf", b"%PDF-1.4 fake", "application/pdf")},
+        data={"side": "front"},
+        headers=_auth_headers(),
+    )
+    assert r.status_code == 400
+    assert r.json()["detail"] == "unsupported_file_type"
+
+
+def test_upload_aadhaar_photo_rejects_non_image_bytes_with_image_content_type():
+    # Content-Type is client-supplied and not trustworthy on its own - bytes claiming to
+    # be image/jpeg but that aren't actually decodable as an image must still be rejected.
+    r = client.post(
+        "/documents/aadhaar-photo",
+        files={"file": ("x.jpg", b"not actually an image", "image/jpeg")},
         data={"side": "front"},
         headers=_auth_headers(),
     )

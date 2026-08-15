@@ -318,6 +318,15 @@ def test_generate_non_gated_document_type_skips_document_lookup():
 
 # ---------- upload_pan_photo / upload_aadhaar_photo ----------
 
+def _fake_photo_bytes() -> bytes:
+    import cv2
+    import numpy as np
+
+    blank = np.zeros((20, 20, 3), dtype=np.uint8)
+    ok, encoded = cv2.imencode(".jpg", blank)
+    return encoded.tobytes()
+
+
 @patch.object(serviceDocument, "_sign_url", return_value="url")
 @patch.object(serviceDocument, "_upload_to_storage")
 def test_upload_pan_photo_uses_pan_card_document_type(mock_upload, mock_sign):
@@ -327,7 +336,7 @@ def test_upload_pan_photo_uses_pan_card_document_type(mock_upload, mock_sign):
     svc._supabase_url = "https://fake.supabase.co"
     svc._service_key = "fake-key"
 
-    svc.upload_pan_photo(b"filedata", "image/jpeg", owner_id="C00001", owner_role="customer")
+    svc.upload_pan_photo(_fake_photo_bytes(), "image/jpeg", owner_id="C00001", owner_role="customer")
 
     _, kwargs = persistence.create_document.call_args
     assert kwargs["document_type"] == "pan_card"
@@ -340,3 +349,27 @@ def test_upload_aadhaar_photo_rejects_invalid_side():
         assert False, "expected ValueError"
     except ValueError as e:
         assert str(e) == "invalid_side"
+
+
+# ---------- get() ownership check ----------
+
+def test_get_rejects_matching_owner_id_but_different_owner_role():
+    # owner_id alone can't currently collide across roles (customer/broker IDs use
+    # distinct prefixes), but the authorization check itself should not rely on that
+    # incidentally - a document belonging to a broker must not be servable to a customer
+    # whose id happens to match, in case the ID scheme is ever changed.
+    svc, persistence = _service()
+    persistence.get_by_id.return_value = MagicMock(owner_id="X00001", owner_role="broker", storage_path="p")
+    try:
+        svc.get("doc1", requester_id="X00001", requester_role="customer")
+        assert False, "expected PermissionError"
+    except PermissionError as e:
+        assert str(e) == "forbidden"
+
+
+def test_get_succeeds_when_owner_id_and_role_both_match():
+    svc, persistence = _service()
+    persistence.get_by_id.return_value = MagicMock(owner_id="C00001", owner_role="customer", storage_path="p")
+    with patch.object(serviceDocument, "_sign_url", return_value="url"):
+        doc, signed_url, expires_in = svc.get("doc1", requester_id="C00001", requester_role="customer")
+    assert signed_url == "url"

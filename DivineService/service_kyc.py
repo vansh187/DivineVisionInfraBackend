@@ -90,29 +90,37 @@ def _load_xml_certs():
     return _load_cert_bundle("UIDAI_XML_CERT_PEM")
 
 
-def _load_qr_verification_certs():
+def _load_certs_with_fallback(primary_loader, fallback_loader, log_tag: str):
     """UIDAI documents Secure QR and Offline e-KYC XML as using distinct signing
     certificates, but that isn't reliably true in practice - confirmed empirically
     against a real 2026-issued (V5) card whose Secure QR signature only verified
     against the certificate documented for the Offline XML flow, not any of the
-    certificates documented/distributed for QR verification. So QR verification
-    tries its own configured bundle first, then falls back to the XML bundle too.
-    Missing/invalid XML config doesn't break QR verification - it's a fallback,
-    not a requirement - so RuntimeError from a missing UIDAI_XML_CERT_PEM is
-    swallowed here rather than propagated."""
-    certs = list(_load_qr_certs())
+    certificates documented/distributed for QR verification. Since it's not known
+    which direction a mismatch like that might recur in, both flows try their own
+    configured bundle first, then fall back to the other flow's bundle too. Missing/
+    invalid fallback config doesn't break verification - it's a fallback, not a
+    requirement - so RuntimeError from the fallback loader is swallowed here."""
+    certs = list(primary_loader())
     seen_fingerprints = {hashlib.sha256(pem).hexdigest() for _, pem in certs}
     try:
-        xml_certs = _load_xml_certs()
+        fallback_certs = fallback_loader()
     except RuntimeError as e:
-        logger.info("kyc.qr.cert.xml_fallback_unavailable reason=%s", e)
-        xml_certs = []
-    for public_key, pem in xml_certs:
+        logger.info("kyc.%s.cert.fallback_unavailable reason=%s", log_tag, e)
+        fallback_certs = []
+    for public_key, pem in fallback_certs:
         fingerprint = hashlib.sha256(pem).hexdigest()
         if fingerprint not in seen_fingerprints:
             certs.append((public_key, pem))
             seen_fingerprints.add(fingerprint)
     return certs
+
+
+def _load_qr_verification_certs():
+    return _load_certs_with_fallback(_load_qr_certs, _load_xml_certs, "qr")
+
+
+def _load_xml_verification_certs():
+    return _load_certs_with_fallback(_load_xml_certs, _load_qr_certs, "xml")
 
 
 def _mask_aadhaar(reference_id: str) -> str:
@@ -227,18 +235,18 @@ class serviceKyc:
                 )
                 # Keep trying remaining candidates - an error verifying against one cert
                 # (e.g. a malformed key) doesn't mean the next candidate won't succeed.
+        data = qr.decodeddata()
+        masked_aadhaar = _mask_aadhaar(data.get("referenceid", ""))
         logger.info(
             "kyc.qr.response owner_id=%s verified=%s failure_reason=%s masked_aadhaar=%s",
-            owner_id, verified, failure_reason, _mask_aadhaar(qr.decodeddata().get("referenceid", "")),
+            owner_id, verified, failure_reason, masked_aadhaar,
         )
-
-        data = qr.decodeddata()
         return self._persistence.create_verification(
             owner_id=owner_id,
             owner_role=owner_role,
             method="qr",
             verified=verified,
-            masked_aadhaar=_mask_aadhaar(data.get("referenceid", "")),
+            masked_aadhaar=masked_aadhaar,
             extracted_data=_safe_extracted_fields(data),
             failure_reason=failure_reason,
         )
@@ -261,7 +269,7 @@ class serviceKyc:
             raise ValueError(f"xml_parse_failed:{e}")
         logger.info("kyc.xml.parsed owner_id=%s raw_xml_bytes=%d", owner_id, len(parsed.raw_xml()))
 
-        candidates = _load_xml_certs()
+        candidates = _load_xml_verification_certs()
         logger.info("kyc.xml.cert.candidates owner_id=%s count=%d", owner_id, len(candidates))
         verified = False
         failure_reason = None
@@ -281,18 +289,18 @@ class serviceKyc:
                     "kyc.xml.cert.no_match owner_id=%s cert=%s error=%s",
                     owner_id, _cert_summary(cert_pem_bytes), failure_reason,
                 )
+        data = parsed.decodeddata()
+        masked_aadhaar = _mask_aadhaar(data.get("referenceid", ""))
         logger.info(
             "kyc.xml.response owner_id=%s verified=%s failure_reason=%s masked_aadhaar=%s",
-            owner_id, verified, failure_reason, _mask_aadhaar(parsed.decodeddata().get("referenceid", "")),
+            owner_id, verified, failure_reason, masked_aadhaar,
         )
-
-        data = parsed.decodeddata()
         return self._persistence.create_verification(
             owner_id=owner_id,
             owner_role=owner_role,
             method="offline_xml",
             verified=verified,
-            masked_aadhaar=_mask_aadhaar(data.get("referenceid", "")),
+            masked_aadhaar=masked_aadhaar,
             extracted_data=_safe_extracted_fields(data),
             failure_reason=failure_reason,
         )

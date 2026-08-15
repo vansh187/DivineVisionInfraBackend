@@ -378,6 +378,22 @@ def test_xml_verify_succeeds_when_second_cert_in_bundle_matches():
     assert data["verified"] is True
 
 
+def test_xml_verify_succeeds_via_qr_cert_fallback_when_xml_bundle_mismatches():
+    # Mirror of the QR flow's fallback to the XML bundle: verify_offline_xml now also
+    # falls back to UIDAI_QR_CERT_PEM if its own bundle doesn't match, since it isn't
+    # known in which direction a documented-cert mismatch might recur. Exercises
+    # serviceKyc directly to avoid consuming the shared per-path rate-limit budget.
+    from DivineService.service_kyc import serviceKyc
+
+    zip_bytes = _build_offline_xml_zip_bytes("1234")
+    with patch.dict(os.environ, {"UIDAI_XML_CERT_PEM": _DECOY_CERT_PEM.decode("utf-8")}):
+        record = serviceKyc().verify_offline_xml(
+            zip_bytes, "1234", owner_id="C00001", owner_role="customer"
+        )
+    assert record.verified
+    assert record.failure_reason is None
+
+
 def test_xml_verify_tampered_content_not_verified():
     zip_bytes = _build_offline_xml_zip_bytes("1234", tamper_after_signing=True)
     r = client.post(
