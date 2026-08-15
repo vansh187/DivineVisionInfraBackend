@@ -104,7 +104,8 @@ def _load_qr_verification_certs():
     seen_fingerprints = {hashlib.sha256(pem).hexdigest() for _, pem in certs}
     try:
         xml_certs = _load_xml_certs()
-    except RuntimeError:
+    except RuntimeError as e:
+        logger.info("kyc.qr.cert.xml_fallback_unavailable reason=%s", e)
         xml_certs = []
     for public_key, pem in xml_certs:
         fingerprint = hashlib.sha256(pem).hexdigest()
