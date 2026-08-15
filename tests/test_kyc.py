@@ -42,6 +42,22 @@ _TEST_KEY_PEM = _TEST_PRIVATE_KEY.private_bytes(
 os.environ["UIDAI_QR_CERT_PEM"] = _TEST_CERT_PEM.decode("utf-8")
 os.environ["UIDAI_XML_CERT_PEM"] = _TEST_CERT_PEM.decode("utf-8")
 
+# A second, wrong-key cert - used to test that UIDAI_*_CERT_PEM accepts a bundle of
+# multiple candidate certificates and tries each one, since in practice it's been
+# necessary to hold several UIDAI certificates and try them all against a real card.
+_DECOY_PRIVATE_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+_decoy_subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Decoy cert (wrong key)")])
+_DECOY_CERT_PEM = (
+    x509.CertificateBuilder()
+    .subject_name(_decoy_subject)
+    .issuer_name(_decoy_subject)
+    .public_key(_DECOY_PRIVATE_KEY.public_key())
+    .serial_number(x509.random_serial_number())
+    .not_valid_before(datetime.datetime.now(datetime.timezone.utc))
+    .not_valid_after(datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=365))
+    .sign(_DECOY_PRIVATE_KEY, hashes.SHA256())
+).public_bytes(serialization.Encoding.PEM)
+
 from unittest.mock import patch
 from fastapi.testclient import TestClient
 from Divinepersistence.persistence_db import PersistenceDB
@@ -197,6 +213,39 @@ def test_qr_verify_valid_signature():
     assert data["failure_reason"] is None
 
 
+def test_qr_verify_succeeds_when_second_cert_in_bundle_matches():
+    # UIDAI_QR_CERT_PEM can hold multiple concatenated candidate certificates - the first
+    # (wrong) one should be tried and rejected, then the second (correct) one accepted,
+    # rather than giving up after the first candidate fails.
+    bundle = _DECOY_CERT_PEM.decode("utf-8") + "\n" + _TEST_CERT_PEM.decode("utf-8")
+    image_bytes = _qr_image_bytes(_build_secure_qr_int())
+    with patch.dict(os.environ, {"UIDAI_QR_CERT_PEM": bundle}):
+        r = client.post(
+            "/kyc/aadhaar/qr/verify",
+            files={"file": ("card.png", image_bytes, "image/png")},
+            headers=_auth_headers(),
+        )
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["verified"] is True
+    assert data["failure_reason"] is None
+
+
+def test_qr_verify_fails_when_no_cert_in_bundle_matches():
+    bundle = _DECOY_CERT_PEM.decode("utf-8")
+    image_bytes = _qr_image_bytes(_build_secure_qr_int())
+    with patch.dict(os.environ, {"UIDAI_QR_CERT_PEM": bundle}):
+        r = client.post(
+            "/kyc/aadhaar/qr/verify",
+            files={"file": ("card.png", image_bytes, "image/png")},
+            headers=_auth_headers(),
+        )
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["verified"] is False
+    assert data["failure_reason"] == "signature_invalid"
+
+
 def test_qr_verify_tampered_signature_not_verified():
     image_bytes = _qr_image_bytes(_build_secure_qr_int(tamper_signature=True))
     r = client.post(
@@ -263,6 +312,21 @@ def test_xml_verify_valid_signature():
     assert data["method"] == "offline_xml"
     assert data["masked_aadhaar"] == "XXXXXXXX8888"
     assert data["extracted_data"]["name"] == "Test Person"
+
+
+def test_xml_verify_succeeds_when_second_cert_in_bundle_matches():
+    bundle = _DECOY_CERT_PEM.decode("utf-8") + "\n" + _TEST_CERT_PEM.decode("utf-8")
+    zip_bytes = _build_offline_xml_zip_bytes("1234")
+    with patch.dict(os.environ, {"UIDAI_XML_CERT_PEM": bundle}):
+        r = client.post(
+            "/kyc/aadhaar/xml/verify",
+            files={"file": ("offline.zip", zip_bytes, "application/zip")},
+            data={"share_code": "1234"},
+            headers=_auth_headers(),
+        )
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["verified"] is True
 
 
 def test_xml_verify_tampered_content_not_verified():

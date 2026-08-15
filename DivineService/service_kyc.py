@@ -32,29 +32,59 @@ def _cert_summary(cert_pem_bytes: bytes) -> str:
         return "unavailable"
 
 
-def _load_cert(env_var: str):
-    """Loads a UIDAI verification certificate from config. Raises RuntimeError if missing/invalid
-    - deliberately NOT a hardcoded/bundled certificate; must be supplied via env var.
+def _split_cert_bundle(cert_pem_text: str) -> list:
+    """Splits a possibly-multi-certificate PEM string into individual cert PEM blocks. UIDAI
+    doesn't publish a single canonical 'the' signing certificate per flow - it's plausible
+    (and, in practice, has been necessary) to hold several candidate certificates and try
+    each one, since there's no reliable way to know in advance which one a given real card
+    was signed with."""
+    blocks = []
+    start_marker, end_marker = "-----BEGIN CERTIFICATE-----", "-----END CERTIFICATE-----"
+    pos = 0
+    while True:
+        start = cert_pem_text.find(start_marker, pos)
+        if start == -1:
+            break
+        end = cert_pem_text.find(end_marker, start)
+        if end == -1:
+            break
+        end += len(end_marker)
+        blocks.append(cert_pem_text[start:end])
+        pos = end
+    return blocks
+
+
+def _load_cert_bundle(env_var: str):
+    """Loads one or more UIDAI verification certificates from config - deliberately NOT a
+    hardcoded/bundled certificate; must be supplied via env var. Raises RuntimeError if
+    missing/invalid. Returns a list of (public_key, cert_pem_bytes) tuples, one per
+    concatenated PEM block found in the env var.
 
     QR (Secure QR) and Offline e-KYC XML are signed with different UIDAI certificates, so each
     flow reads its own env var rather than sharing one."""
     cert_pem = os.getenv(env_var)
     if not cert_pem:
         raise RuntimeError(f"{env_var} environment variable must be set")
-    cert_pem_bytes = cert_pem.encode("utf-8")
-    try:
-        cert = x509.load_pem_x509_certificate(cert_pem_bytes)
-    except Exception as e:
-        raise RuntimeError(f"{env_var}_invalid: {type(e).__name__}")
-    return cert.public_key(), cert_pem_bytes
+    blocks = _split_cert_bundle(cert_pem)
+    if not blocks:
+        raise RuntimeError(f"{env_var}_invalid: no PEM certificate blocks found")
+    certs = []
+    for block in blocks:
+        block_bytes = block.encode("utf-8")
+        try:
+            cert = x509.load_pem_x509_certificate(block_bytes)
+        except Exception as e:
+            raise RuntimeError(f"{env_var}_invalid: {type(e).__name__}")
+        certs.append((cert.public_key(), block_bytes))
+    return certs
 
 
-def _load_qr_cert():
-    return _load_cert("UIDAI_QR_CERT_PEM")
+def _load_qr_certs():
+    return _load_cert_bundle("UIDAI_QR_CERT_PEM")
 
 
-def _load_xml_cert():
-    return _load_cert("UIDAI_XML_CERT_PEM")
+def _load_xml_certs():
+    return _load_cert_bundle("UIDAI_XML_CERT_PEM")
 
 
 def _mask_aadhaar(reference_id: str) -> str:
@@ -135,17 +165,28 @@ class serviceKyc:
             owner_id, qr.decodeddata().get("version", "none"), len(qr.signedData()),
         )
 
-        public_key, cert_pem_bytes = _load_qr_cert()
-        logger.info("kyc.qr.cert owner_id=%s cert=%s", owner_id, _cert_summary(cert_pem_bytes))
+        candidates = _load_qr_certs()
+        logger.info("kyc.qr.cert.candidates owner_id=%s count=%d", owner_id, len(candidates))
         verified = False
         failure_reason = None
-        try:
-            public_key.verify(qr.signature(), qr.signedData(), padding.PKCS1v15(), hashes.SHA256())
-            verified = True
-        except InvalidSignature:
-            failure_reason = "signature_invalid"
-        except Exception as e:
-            failure_reason = f"signature_verification_error:{type(e).__name__}"
+        for public_key, cert_pem_bytes in candidates:
+            try:
+                public_key.verify(qr.signature(), qr.signedData(), padding.PKCS1v15(), hashes.SHA256())
+                verified = True
+                failure_reason = None
+                logger.info("kyc.qr.cert.match owner_id=%s cert=%s", owner_id, _cert_summary(cert_pem_bytes))
+                break
+            except InvalidSignature:
+                logger.info("kyc.qr.cert.no_match owner_id=%s cert=%s", owner_id, _cert_summary(cert_pem_bytes))
+                failure_reason = "signature_invalid"
+            except Exception as e:
+                failure_reason = f"signature_verification_error:{type(e).__name__}"
+                logger.info(
+                    "kyc.qr.cert.error owner_id=%s cert=%s error=%s",
+                    owner_id, _cert_summary(cert_pem_bytes), failure_reason,
+                )
+                # Keep trying remaining candidates - an error verifying against one cert
+                # (e.g. a malformed key) doesn't mean the next candidate won't succeed.
         logger.info(
             "kyc.qr.response owner_id=%s verified=%s failure_reason=%s masked_aadhaar=%s",
             owner_id, verified, failure_reason, _mask_aadhaar(qr.decodeddata().get("referenceid", "")),
@@ -180,18 +221,26 @@ class serviceKyc:
             raise ValueError(f"xml_parse_failed:{e}")
         logger.info("kyc.xml.parsed owner_id=%s raw_xml_bytes=%d", owner_id, len(parsed.raw_xml()))
 
-        _, cert_pem_bytes = _load_xml_cert()
-        logger.info("kyc.xml.cert owner_id=%s cert=%s", owner_id, _cert_summary(cert_pem_bytes))
+        candidates = _load_xml_certs()
+        logger.info("kyc.xml.cert.candidates owner_id=%s count=%d", owner_id, len(candidates))
         verified = False
         failure_reason = None
-        try:
-            XMLVerifier().verify(parsed.raw_xml(), x509_cert=cert_pem_bytes)
-            verified = True
-        except Exception as e:
-            # signxml raises several distinct exception types (InvalidSignature, InvalidDigest,
-            # InvalidCertificate, etree parse errors, ...) - all mean "could not cryptographically
-            # confirm this document", so all funnel to the same not-verified outcome.
-            failure_reason = f"xml_signature_invalid:{type(e).__name__}"
+        for _, cert_pem_bytes in candidates:
+            try:
+                XMLVerifier().verify(parsed.raw_xml(), x509_cert=cert_pem_bytes)
+                verified = True
+                failure_reason = None
+                logger.info("kyc.xml.cert.match owner_id=%s cert=%s", owner_id, _cert_summary(cert_pem_bytes))
+                break
+            except Exception as e:
+                # signxml raises several distinct exception types (InvalidSignature, InvalidDigest,
+                # InvalidCertificate, etree parse errors, ...) - all mean "could not cryptographically
+                # confirm this document against this candidate", so keep trying the rest.
+                failure_reason = f"xml_signature_invalid:{type(e).__name__}"
+                logger.info(
+                    "kyc.xml.cert.no_match owner_id=%s cert=%s error=%s",
+                    owner_id, _cert_summary(cert_pem_bytes), failure_reason,
+                )
         logger.info(
             "kyc.xml.response owner_id=%s verified=%s failure_reason=%s masked_aadhaar=%s",
             owner_id, verified, failure_reason, _mask_aadhaar(parsed.decodeddata().get("referenceid", "")),
