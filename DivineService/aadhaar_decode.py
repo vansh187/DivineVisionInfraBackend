@@ -100,11 +100,15 @@ class AadhaarSecureQr:
     def decodeddata(self) -> dict:
         return self.data
 
-    def signature(self) -> bytes:
-        return self.decompressed_array[len(self.decompressed_array) - 256 :]
+    def signature(self, sig_len: int = 256) -> bytes:
+        """`sig_len` is the trailing signature's byte length - 256 for RSA-2048 (the
+        documented/observed default), but callers verifying against a candidate
+        certificate with a different key size should pass that key's actual byte
+        length (key_size // 8) instead of assuming 2048-bit universally."""
+        return self.decompressed_array[len(self.decompressed_array) - sig_len :]
 
-    def signedData(self) -> bytes:
-        return self.decompressed_array[: len(self.decompressed_array) - 256]
+    def signedData(self, sig_len: int = 256) -> bytes:
+        return self.decompressed_array[: len(self.decompressed_array) - sig_len]
 
     # Note: deliberately not extracting the embedded photo here. pyaadhaar's upstream
     # logic for locating the photo's byte boundary (relative to the trailing signature

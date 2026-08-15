@@ -95,14 +95,14 @@ def _auth_headers():
 
 # ---------- Secure QR fixture builder ----------
 
-def _build_secure_qr_int(tamper_signature: bool = False) -> int:
+def _build_secure_qr_int(tamper_signature: bool = False, private_key=None) -> int:
     fields = [
         "3", "999912345678", "Test Name", "01-01-1990", "M", "",
         "District", "", "House", "Location", "123456",
         "PostOffice", "State", "Street", "SubDistrict", "VTC",
     ]
     signed_data = b"\xff".join(f.encode("ISO-8859-1") for f in fields) + b"\xff"
-    signature = _TEST_PRIVATE_KEY.sign(signed_data, padding.PKCS1v15(), hashes.SHA256())
+    signature = (private_key or _TEST_PRIVATE_KEY).sign(signed_data, padding.PKCS1v15(), hashes.SHA256())
     if tamper_signature:
         signature = bytes([signature[0] ^ 0xFF]) + signature[1:]
     raw = signed_data + signature
@@ -244,6 +244,37 @@ def test_qr_verify_fails_when_no_cert_in_bundle_matches():
     data = r.json()
     assert data["verified"] is False
     assert data["failure_reason"] == "signature_invalid"
+
+
+def test_qr_verify_succeeds_with_larger_key_size_cert():
+    # Regression test: signature length used to be hardcoded to 256 bytes (RSA-2048).
+    # A card signed with a larger key (e.g. RSA-3072, 384-byte signature) would have its
+    # signature/signed-data split at the wrong offset and fail InvalidSignature no matter
+    # how many correct-but-2048-bit candidate certs were tried. sig_len is now derived
+    # from each candidate's own key size instead of assumed uniform.
+    large_key = rsa.generate_private_key(public_exponent=65537, key_size=3072)
+    large_subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Test UIDAI (3072-bit)")])
+    large_cert_pem = (
+        x509.CertificateBuilder()
+        .subject_name(large_subject)
+        .issuer_name(large_subject)
+        .public_key(large_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(datetime.datetime.now(datetime.timezone.utc))
+        .not_valid_after(datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=365))
+        .sign(large_key, hashes.SHA256())
+    ).public_bytes(serialization.Encoding.PEM)
+
+    image_bytes = _qr_image_bytes(_build_secure_qr_int(private_key=large_key))
+    with patch.dict(os.environ, {"UIDAI_QR_CERT_PEM": large_cert_pem.decode("utf-8")}):
+        r = client.post(
+            "/kyc/aadhaar/qr/verify",
+            files={"file": ("card.png", image_bytes, "image/png")},
+            headers=_auth_headers(),
+        )
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["verified"] is True, data
 
 
 def test_qr_verify_tampered_signature_not_verified():

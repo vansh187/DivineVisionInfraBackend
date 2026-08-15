@@ -161,8 +161,8 @@ class serviceKyc:
             logger.info("kyc.qr.response owner_id=%s result=qr_parse_failed reason=%s", owner_id, e)
             raise ValueError(f"qr_parse_failed:{e}")
         logger.info(
-            "kyc.qr.parsed owner_id=%s version=%s signed_data_bytes=%d",
-            owner_id, qr.decodeddata().get("version", "none"), len(qr.signedData()),
+            "kyc.qr.parsed owner_id=%s version=%s decompressed_bytes=%d",
+            owner_id, qr.decodeddata().get("version", "none"), len(qr.decompressed_array),
         )
 
         candidates = _load_qr_certs()
@@ -170,20 +170,32 @@ class serviceKyc:
         verified = False
         failure_reason = None
         for public_key, cert_pem_bytes in candidates:
+            # Signature length is derived from THIS candidate's own RSA key size rather
+            # than assumed to always be 256 bytes (RSA-2048) - a candidate signed with a
+            # larger key (e.g. RSA-3072/4096) would otherwise have its signature/signed-data
+            # split at the wrong offset, guaranteeing InvalidSignature regardless of whether
+            # the key itself is actually correct.
+            sig_len = public_key.key_size // 8
             try:
-                public_key.verify(qr.signature(), qr.signedData(), padding.PKCS1v15(), hashes.SHA256())
+                public_key.verify(
+                    qr.signature(sig_len), qr.signedData(sig_len), padding.PKCS1v15(), hashes.SHA256()
+                )
                 verified = True
                 failure_reason = None
-                logger.info("kyc.qr.cert.match owner_id=%s cert=%s", owner_id, _cert_summary(cert_pem_bytes))
+                logger.info(
+                    "kyc.qr.cert.match owner_id=%s cert=%s sig_len=%d", owner_id, _cert_summary(cert_pem_bytes), sig_len
+                )
                 break
             except InvalidSignature:
-                logger.info("kyc.qr.cert.no_match owner_id=%s cert=%s", owner_id, _cert_summary(cert_pem_bytes))
+                logger.info(
+                    "kyc.qr.cert.no_match owner_id=%s cert=%s sig_len=%d", owner_id, _cert_summary(cert_pem_bytes), sig_len
+                )
                 failure_reason = "signature_invalid"
             except Exception as e:
                 failure_reason = f"signature_verification_error:{type(e).__name__}"
                 logger.info(
-                    "kyc.qr.cert.error owner_id=%s cert=%s error=%s",
-                    owner_id, _cert_summary(cert_pem_bytes), failure_reason,
+                    "kyc.qr.cert.error owner_id=%s cert=%s sig_len=%d error=%s",
+                    owner_id, _cert_summary(cert_pem_bytes), sig_len, failure_reason,
                 )
                 # Keep trying remaining candidates - an error verifying against one cert
                 # (e.g. a malformed key) doesn't mean the next candidate won't succeed.
