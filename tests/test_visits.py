@@ -137,3 +137,40 @@ def test_cancel_visit_happy_path_removes_it_from_list():
     list_res = client.get("/visits", headers=_auth_headers())  # /visits call 9
     ids = [v["id"] for v in list_res.json()]
     assert _shared_visit_id not in ids
+
+
+def test_visit_history_requires_auth():
+    r = client.get("/visits/history")
+    assert r.status_code == 401
+
+
+def test_visit_history_rejects_customer_caller():
+    r = client.get("/visits/history", headers=_auth_headers(_CUSTOMER_TOKEN))
+    assert r.status_code == 403
+
+
+def test_visit_history_shows_past_visit_before_cancelled_visit():
+    # _shared_visit_id was already cancelled above. Add one past-dated visit
+    # (never cancelled) so both history buckets are populated.
+    past_res = client.post(  # /visits call 10
+        "/visits",
+        json=_sample_payload(customer_name="Past Visit Customer", date="2020-01-01", time="09:00"),
+        headers=_auth_headers(),
+    )
+    assert past_res.status_code == 200, past_res.text
+    past_id = past_res.json()["id"]
+
+    r = client.get("/visits/history", headers=_auth_headers())
+    assert r.status_code == 200, r.text
+    entries = [v for v in r.json() if v["id"] in (past_id, _shared_visit_id)]
+    assert [e["id"] for e in entries] == [past_id, _shared_visit_id]
+    assert entries[0]["status"] == "completed"
+    assert entries[1]["status"] == "cancelled"
+
+
+def test_visit_history_scoped_to_own_broker():
+    r = client.get("/visits/history", headers=_auth_headers(_OTHER_BROKER_TOKEN))
+    assert r.status_code == 200, r.text
+    names = [v["customer_name"] for v in r.json()]
+    assert "Past Visit Customer" not in names
+    assert "Jane Doe" not in names

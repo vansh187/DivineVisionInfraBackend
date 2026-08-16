@@ -8,6 +8,19 @@ get_by_id: |
 list_by_broker: |
   SELECT * FROM divine_site_visits WHERE broker_id = :broker_id AND status != 'cancelled'
   ORDER BY visit_date ASC, visit_time ASC;
+list_history_by_broker: |
+  SELECT * FROM divine_site_visits
+  WHERE broker_id = :broker_id
+    AND (
+      status = 'cancelled'
+      OR visit_date < :today
+      OR (visit_date = :today AND visit_time < :now_time)
+    )
+  ORDER BY
+    CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END ASC,
+    CASE WHEN status = 'cancelled' THEN last_updated_date END DESC,
+    visit_date DESC,
+    visit_time DESC;
 update_status: |
   UPDATE divine_site_visits SET status = :status, last_updated_date = :last_updated_date
   WHERE id = :id RETURNING *;

@@ -58,6 +58,16 @@ def list_visits(current_user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=500, detail="internal_error")
 
 
+@router.get("/history", response_model=List[VisitOutDTO])
+def get_visit_history(current_user: dict = Depends(get_current_user)):
+    broker_id = _require_broker(current_user)
+    try:
+        records = _visit_service.get_visit_history(broker_id)
+        return [_to_visit_out(r) for r in records]
+    except Exception:
+        raise HTTPException(status_code=500, detail="internal_error")
+
+
 @router.delete("/{visit_id}", response_model=VisitOutDTO)
 def cancel_visit(visit_id: str, current_user: dict = Depends(get_current_user)):
     _require_broker(current_user)

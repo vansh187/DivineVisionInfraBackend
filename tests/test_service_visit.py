@@ -96,6 +96,25 @@ def test_list_visits_delegates_to_persistence():
     assert len(result) == 2
 
 
+# ---------- get_visit_history ----------
+
+def test_get_visit_history_marks_lapsed_scheduled_as_completed():
+    svc, persistence = _service()
+    persistence.list_history_by_broker.return_value = [
+        MagicMock(status="scheduled"),
+        MagicMock(status="cancelled"),
+    ]
+
+    records = svc.get_visit_history("B00001")
+
+    assert records[0].status == "completed"
+    assert records[1].status == "cancelled"
+    persistence.list_history_by_broker.assert_called_once()
+    args, kwargs = persistence.list_history_by_broker.call_args
+    assert args[0] == "B00001"
+    assert "today" in kwargs and "now_time" in kwargs
+
+
 # ---------- cancel_visit ----------
 
 def test_cancel_visit_raises_not_found():

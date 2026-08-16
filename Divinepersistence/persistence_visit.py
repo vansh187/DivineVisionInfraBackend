@@ -31,6 +31,15 @@ class persistenceVisit:
             'SELECT * FROM divine_site_visits WHERE broker_id = :broker_id AND status != \'cancelled\' '
             'ORDER BY visit_date ASC, visit_time ASC;'
         ))
+        queries.setdefault("list_history_by_broker", (
+            "SELECT * FROM divine_site_visits "
+            "WHERE broker_id = :broker_id "
+            "AND (status = 'cancelled' OR visit_date < :today OR (visit_date = :today AND visit_time < :now_time)) "
+            "ORDER BY "
+            "CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END ASC, "
+            "CASE WHEN status = 'cancelled' THEN last_updated_date END DESC, "
+            "visit_date DESC, visit_time DESC;"
+        ))
         queries.setdefault("update_status", (
             'UPDATE divine_site_visits SET status = :status, last_updated_date = :last_updated_date '
             'WHERE id = :id RETURNING *;'
@@ -77,6 +86,12 @@ class persistenceVisit:
         with self._session_factory() as db:
             query = self._queries.get("list_by_broker")
             result = db.execute(text(query), {"broker_id": broker_id})
+            return [RowWrapper(row) for row in result.mappings().all()]
+
+    def list_history_by_broker(self, broker_id: str, today, now_time: str):
+        with self._session_factory() as db:
+            query = self._queries.get("list_history_by_broker")
+            result = db.execute(text(query), {"broker_id": broker_id, "today": today, "now_time": now_time})
             return [RowWrapper(row) for row in result.mappings().all()]
 
     def update_status(self, id: str, status: str) -> VisitModel:

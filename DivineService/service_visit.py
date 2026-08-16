@@ -43,6 +43,14 @@ class serviceVisit:
     def list_visits(self, broker_id: str):
         return self._persistence.list_by_broker(broker_id)
 
+    def get_visit_history(self, broker_id: str):
+        now = datetime.now()
+        records = self._persistence.list_history_by_broker(broker_id, today=now.date(), now_time=now.strftime("%H:%M"))
+        for record in records:
+            if record.status != "cancelled":
+                record.status = "completed"
+        return records
+
     def cancel_visit(self, visit_id: str, requester_id: str):
         record = self._persistence.get_by_id(visit_id)
         if not record:
