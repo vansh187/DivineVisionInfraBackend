@@ -146,3 +146,62 @@ class MarketTrendOutDTO(BaseModel):
 class MarketTrendListDTO(BaseModel):
     count: int
     trends: List[MarketTrendOutDTO]
+
+
+class BrokerCommissionCreateDTO(BaseModel):
+    brokerId: str = Field(..., min_length=1, max_length=80)
+    serialNumber: str = Field(..., min_length=1, max_length=100)
+    unitAddress: str = Field(..., min_length=1, max_length=500)
+    customerName: Optional[str] = Field(None, max_length=200)
+    township: Optional[str] = Field(None, max_length=200)
+    saleValue: Optional[float] = Field(None, ge=0)
+    commissionAmount: float = Field(..., gt=0)
+    transactionMode: str = Field(..., min_length=1, max_length=20)
+
+
+class BrokerCommissionOutDTO(BaseModel):
+    id: str
+    brokerId: str
+    serialNumber: str
+    unitAddress: str
+    customerName: Optional[str]
+    township: Optional[str]
+    saleValue: Optional[float]
+    commissionAmount: float
+    status: str
+    transactionMode: str
+    createdAt: str
+    paidAt: Optional[str]
+    rejectedAt: Optional[str]
+
+
+class BrokerCommissionPaymentOutDTO(BaseModel):
+    razorpayOrderId: str
+    razorpayKeyId: str
+    amount: float
+    amountPaise: int
+    currency: str
+    status: str
+
+
+class BrokerCommissionCreateResponseDTO(BaseModel):
+    success: bool
+    commission: BrokerCommissionOutDTO
+
+
+class AdminCommissionPaymentResponseDTO(BaseModel):
+    success: bool
+    commission: BrokerCommissionOutDTO
+    payment: BrokerCommissionPaymentOutDTO
+
+
+class BrokerCommissionSummaryDTO(BaseModel):
+    pending: float
+    paid: float
+    rejected: float
+
+
+class BrokerCommissionListResponseDTO(BaseModel):
+    success: bool
+    commissions: List[BrokerCommissionOutDTO]
+    summary: BrokerCommissionSummaryDTO

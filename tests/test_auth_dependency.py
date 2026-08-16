@@ -7,7 +7,7 @@ os.environ["JWT_SECRET_KEY"] = "testsecret"
 import jwt
 import pytest
 from fastapi import HTTPException
-from DivineService.auth import get_current_user, _get_secret
+from DivineService.auth import get_current_admin_or_broker, get_current_user, _get_secret
 
 
 def _token(payload_overrides=None, secret="testsecret", exp_delta=timedelta(hours=1)):
@@ -30,6 +30,19 @@ def test_valid_token_returns_expected_dict():
 def test_valid_token_broker_role():
     result = get_current_user(authorization=f"Bearer {_token({'role': 'broker', 'sub': 'B00001'})}")
     assert result["role"] == "broker"
+
+
+def test_valid_token_admin_role_for_admin_or_broker_dependency():
+    result = get_current_admin_or_broker(authorization=f"Bearer {_token({'role': 'admin', 'sub': 'admin_1'})}")
+    assert result["role"] == "admin"
+
+
+def test_admin_role_is_not_valid_for_regular_user_dependency():
+    token = _token({"role": "admin", "sub": "admin_1"})
+    with pytest.raises(HTTPException) as exc_info:
+        get_current_user(authorization=f"Bearer {token}")
+    assert exc_info.value.status_code == 401
+    assert exc_info.value.detail == "invalid_token"
 
 
 def test_missing_header_raises_401_missing_token():
@@ -81,7 +94,7 @@ def test_missing_sub_claim_raises_401_invalid_token():
 
 def test_invalid_role_claim_raises_401_invalid_token():
     # Not "customer" or "broker" - e.g. a forged/corrupted token from an older schema.
-    token = _token({"role": "admin"})
+    token = _token({"role": "auditor"})
     with pytest.raises(HTTPException) as exc_info:
         get_current_user(authorization=f"Bearer {token}")
     assert exc_info.value.status_code == 401
