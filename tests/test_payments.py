@@ -31,10 +31,11 @@ payment_api._payment_service._key_secret = "rzp_test_fake_key_secret"
 
 _TOKEN = None
 _OTHER_TOKEN = None
+_BROKER_TOKEN = None
 
 
 def setup_module(module):
-    global _TOKEN, _OTHER_TOKEN
+    global _TOKEN, _OTHER_TOKEN, _BROKER_TOKEN
     db_file = os.path.join(os.getcwd(), "test_db.sqlite")
     try:
         if os.path.exists(db_file):
@@ -52,6 +53,11 @@ def setup_module(module):
     lr2 = client.post("/customer/login", json={"username": "paycust_other", "password": "strongpassword"})
     assert lr2.status_code == 200, lr2.text
     _OTHER_TOKEN = lr2.json()["access_token"]
+
+    client.post("/broker/signup", json={"username": "paybroker_shared", "password": "strongpassword"})
+    lr3 = client.post("/broker/login", json={"username": "paybroker_shared", "password": "strongpassword"})
+    assert lr3.status_code == 200, lr3.text
+    _BROKER_TOKEN = lr3.json()["access_token"]
 
 
 def _auth_headers(token=None):
@@ -248,3 +254,54 @@ def test_webhook_marks_payment_paid_end_to_end(mock_client_method):
     get_after = client.get(f"/payments/{payment_id}", headers=_auth_headers())
     assert get_after.json()["status"] == "paid"
     assert get_after.json()["razorpay_payment_id"] == "pay_webhook_e2e"
+
+
+# ---------- POST /payments/cash ----------
+
+def test_record_cash_payment_requires_auth():
+    r = client.post("/payments/cash", json={"amount": 1000})
+    assert r.status_code == 401
+
+
+def test_record_cash_payment_allows_customer_caller():
+    r = client.post("/payments/cash", json={"amount": 1000}, headers=_auth_headers())
+    assert r.status_code == 200, r.text
+    assert r.json()["method"] == "cash"
+    assert r.json()["owner_role"] == "customer"
+
+
+def test_record_cash_payment_rejects_non_positive_amount():
+    r = client.post("/payments/cash", json={"amount": 0}, headers=_auth_headers(_BROKER_TOKEN))
+    assert r.status_code == 422  # pydantic gt=0 constraint
+
+
+def test_record_cash_payment_happy_path_settles_immediately():
+    # No razorpay.Client mocking needed at all - cash never touches the gateway.
+    r = client.post(
+        "/payments/cash",
+        json={"amount": 18500.50, "note": "Paid at site office"},
+        headers=_auth_headers(_BROKER_TOKEN),
+    )
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["amount"] == 18500.50
+    assert data["status"] == "paid"
+    assert data["method"] == "cash"
+    assert data["verified"] is True
+    assert data["razorpay_order_id"] is None
+    assert data["razorpay_payment_id"] is None
+
+
+def test_record_cash_payment_works_without_a_note():
+    r = client.post("/payments/cash", json={"amount": 500}, headers=_auth_headers(_BROKER_TOKEN))
+    assert r.status_code == 200, r.text
+    assert r.json()["method"] == "cash"
+
+
+def test_record_cash_payment_is_owner_scoped():
+    r = client.post("/payments/cash", json={"amount": 999}, headers=_auth_headers(_BROKER_TOKEN))
+    assert r.status_code == 200, r.text
+    payment_id = r.json()["id"]
+
+    other_get = client.get(f"/payments/{payment_id}", headers=_auth_headers(_OTHER_TOKEN))
+    assert other_get.status_code == 403

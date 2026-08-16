@@ -1,0 +1,8 @@
+# SQL queries for the read-only market-trends API
+list_market_trends: |
+  SELECT * FROM divine_market_trends
+  WHERE (:city IS NULL OR lower(city) = lower(:city))
+    AND (:locality IS NULL OR lower(locality) = lower(:locality))
+    AND (:property_type IS NULL OR lower(property_type) = lower(:property_type))
+  ORDER BY as_of_date DESC, city ASC, locality ASC, property_type ASC
+  LIMIT :limit;

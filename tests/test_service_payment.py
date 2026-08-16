@@ -286,3 +286,101 @@ def test_handle_webhook_marks_failed_on_failed_event():
     assert result == "processed:failed"
     _, kwargs = persistence.update_payment_status.call_args
     assert kwargs["status"] == "failed"
+
+
+# ---------- record_cash_payment ----------
+
+def test_record_cash_payment_allows_customer_caller():
+    svc, persistence = _service()
+    persistence.create_payment.return_value = MagicMock(id="pay1", status="paid", method="cash")
+
+    record = svc.record_cash_payment(1000, owner_id="C00001", owner_role="customer")
+
+    assert record.status == "paid"
+    _, kwargs = persistence.create_payment.call_args
+    assert kwargs["owner_id"] == "C00001"
+    assert kwargs["owner_role"] == "customer"
+
+
+def test_record_cash_payment_allows_broker_caller():
+    svc, persistence = _service()
+    persistence.create_payment.return_value = MagicMock(id="pay1", status="paid", method="cash")
+
+    record = svc.record_cash_payment(1000, owner_id="B00001", owner_role="broker")
+
+    assert record.status == "paid"
+    _, kwargs = persistence.create_payment.call_args
+    assert kwargs["owner_id"] == "B00001"
+    assert kwargs["owner_role"] == "broker"
+
+
+def test_record_cash_payment_rejects_zero_or_negative_amount():
+    svc, _ = _service()
+    for bad in (0, -5):
+        try:
+            svc.record_cash_payment(bad, owner_id="B00001", owner_role="broker")
+            assert False, "expected ValueError"
+        except ValueError as e:
+            assert str(e) == "invalid_amount"
+
+
+def test_record_cash_payment_rejects_amount_too_large():
+    svc, _ = _service()
+    try:
+        svc.record_cash_payment(50_000_000, owner_id="B00001", owner_role="broker")
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert str(e) == "amount_too_large"
+
+
+def test_record_cash_payment_does_not_require_razorpay_configuration():
+    # Unlike create_order/verify_payment, cash never touches the gateway - must succeed
+    # even with no RAZORPAY_KEY_ID/SECRET set at all.
+    svc, persistence = _service(configured=False)
+    persistence.create_payment.return_value = MagicMock(id="pay1", status="paid", method="cash")
+    record = svc.record_cash_payment(15000, owner_id="B00001", owner_role="broker")
+    assert record.status == "paid"
+
+
+def test_record_cash_payment_settles_immediately_with_no_gateway_order_id():
+    svc, persistence = _service()
+    persistence.create_payment.return_value = MagicMock(id="pay1", status="paid", method="cash")
+
+    svc.record_cash_payment(2500.75, owner_id="B00001", owner_role="broker")
+
+    _, kwargs = persistence.create_payment.call_args
+    assert kwargs["owner_id"] == "B00001"
+    assert kwargs["amount"] == 2500.75
+    assert kwargs["status"] == "paid"
+    assert kwargs["method"] == "cash"
+    assert kwargs["razorpay_order_id"] is None
+
+
+def test_record_cash_payment_includes_note_when_given():
+    svc, persistence = _service()
+    persistence.create_payment.return_value = MagicMock(id="pay1", status="paid", method="cash")
+
+    svc.record_cash_payment(1000, owner_id="B00001", owner_role="broker", note="Collected at site visit")
+
+    _, kwargs = persistence.create_payment.call_args
+    assert kwargs["notes"] == {"note": "Collected at site visit"}
+
+
+def test_record_cash_payment_omits_note_when_not_given():
+    svc, persistence = _service()
+    persistence.create_payment.return_value = MagicMock(id="pay1", status="paid", method="cash")
+
+    svc.record_cash_payment(1000, owner_id="B00001", owner_role="broker")
+
+    _, kwargs = persistence.create_payment.call_args
+    assert kwargs["notes"] == {}
+
+
+def test_record_cash_payment_omits_whitespace_only_note():
+    svc, persistence = _service()
+    persistence.create_payment.return_value = MagicMock(id="pay1", status="paid", method="cash")
+
+    svc.record_cash_payment(1000, owner_id="B00001", owner_role="broker", note="   ")
+
+    _, kwargs = persistence.create_payment.call_args
+    assert kwargs["notes"] == {}

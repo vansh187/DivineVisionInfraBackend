@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from datetime import datetime
 
 
@@ -86,6 +86,11 @@ class PaymentVerifyRequestDTO(BaseModel):
     razorpay_signature: str
 
 
+class PaymentCashRequestDTO(BaseModel):
+    amount: float = Field(..., gt=0, description="Amount in INR (rupees) the customer handed over in cash")
+    note: Optional[str] = Field(None, max_length=500)
+
+
 class PaymentOutDTO(BaseModel):
     id: str
     owner_id: str
@@ -93,7 +98,110 @@ class PaymentOutDTO(BaseModel):
     amount: float
     currency: str
     status: str
+    method: str
     verified: bool
-    razorpay_order_id: str
+    razorpay_order_id: Optional[str]
     razorpay_payment_id: Optional[str]
     created_date: Optional[datetime]
+
+
+class VisitScheduleRequestDTO(BaseModel):
+    customer_name: str = Field(..., min_length=1, max_length=200)
+    customer_contact: Optional[str] = Field(None, max_length=200)
+    date: str = Field(..., description="YYYY-MM-DD")
+    time: str = Field(..., description="HH:MM, 24-hour")
+    notes: Optional[str] = Field(None, max_length=1000)
+
+
+class VisitOutDTO(BaseModel):
+    id: str
+    broker_id: str
+    customer_name: str
+    customer_contact: Optional[str]
+    date: str
+    time: str
+    notes: Optional[str]
+    status: str
+    created_date: Optional[datetime]
+
+
+class MarketTrendOutDTO(BaseModel):
+    id: str
+    city: str
+    locality: Optional[str]
+    property_type: str
+    period_label: str
+    as_of_date: str
+    price_per_sqyd: float
+    previous_price_per_sqyd: Optional[float]
+    price_change_percent: Optional[float]
+    trend_direction: str
+    rental_yield_percent: Optional[float]
+    demand_score: Optional[float]
+    supply_score: Optional[float]
+    demand_label: str
+    sample_size: int
+
+
+class MarketTrendListDTO(BaseModel):
+    count: int
+    trends: List[MarketTrendOutDTO]
+
+
+class BrokerCommissionCreateDTO(BaseModel):
+    brokerId: str = Field(..., min_length=1, max_length=80)
+    serialNumber: str = Field(..., min_length=1, max_length=100)
+    unitAddress: str = Field(..., min_length=1, max_length=500)
+    customerName: Optional[str] = Field(None, max_length=200)
+    township: Optional[str] = Field(None, max_length=200)
+    saleValue: Optional[float] = Field(None, ge=0)
+    commissionAmount: float = Field(..., gt=0)
+    transactionMode: str = Field(..., min_length=1, max_length=20)
+
+
+class BrokerCommissionOutDTO(BaseModel):
+    id: str
+    brokerId: str
+    serialNumber: str
+    unitAddress: str
+    customerName: Optional[str]
+    township: Optional[str]
+    saleValue: Optional[float]
+    commissionAmount: float
+    status: str
+    transactionMode: str
+    createdAt: str
+    paidAt: Optional[str]
+    rejectedAt: Optional[str]
+
+
+class BrokerCommissionPaymentOutDTO(BaseModel):
+    razorpayOrderId: str
+    razorpayKeyId: str
+    amount: float
+    amountPaise: int
+    currency: str
+    status: str
+
+
+class BrokerCommissionCreateResponseDTO(BaseModel):
+    success: bool
+    commission: BrokerCommissionOutDTO
+
+
+class AdminCommissionPaymentResponseDTO(BaseModel):
+    success: bool
+    commission: BrokerCommissionOutDTO
+    payment: BrokerCommissionPaymentOutDTO
+
+
+class BrokerCommissionSummaryDTO(BaseModel):
+    pending: float
+    paid: float
+    rejected: float
+
+
+class BrokerCommissionListResponseDTO(BaseModel):
+    success: bool
+    commissions: List[BrokerCommissionOutDTO]
+    summary: BrokerCommissionSummaryDTO

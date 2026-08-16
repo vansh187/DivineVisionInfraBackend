@@ -1,0 +1,20 @@
+# SQL queries for broker commission records used by broker/admin commission APIs
+create_commission: |
+  INSERT INTO divine_broker_commissions(
+    id, broker_id, serial_number, unit_address, customer_name, township, sale_value,
+    commission_amount, status, transaction_mode, razorpay_order_id, created_at, paid_at, rejected_at, last_updated_at
+  )
+  VALUES (
+    :id, :broker_id, :serial_number, :unit_address, :customer_name, :township, :sale_value,
+    :commission_amount, :status, :transaction_mode, :razorpay_order_id, :created_at, :paid_at, :rejected_at, :last_updated_at
+  )
+  RETURNING *;
+list_by_broker: |
+  SELECT * FROM divine_broker_commissions
+  WHERE broker_id = :broker_id
+  ORDER BY created_at DESC, id DESC;
+summary_by_broker: |
+  SELECT status, COALESCE(SUM(commission_amount), 0) AS total
+  FROM divine_broker_commissions
+  WHERE broker_id = :broker_id
+  GROUP BY status;

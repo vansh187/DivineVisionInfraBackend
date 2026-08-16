@@ -27,14 +27,32 @@ class servicePayment:
             raise RuntimeError("payment_not_configured")
         return razorpay.Client(auth=(self._key_id, self._key_secret))
 
-    def create_order(self, amount: float, owner_id: str, owner_role: str):
-        """Creates a Razorpay Order and a matching local record. The order is created with
-        payment NOT yet captured - amount only becomes "paid" once verify_payment() confirms
-        a valid signature from Razorpay, never from the client's own say-so."""
+    def _validate_amount(self, amount: float) -> None:
         if amount <= 0:
             raise ValueError("invalid_amount")
         if amount > MAX_AMOUNT_INR:
             raise ValueError("amount_too_large")
+
+    def _persist_new_payment(self, owner_id: str, owner_role: str, amount: float, status: str,
+                              razorpay_order_id: str = None, method: str = "razorpay", notes: dict = None):
+        payment_id = str(uuid.uuid4())
+        return self._persistence.create_payment(
+            id=payment_id,
+            owner_id=owner_id,
+            owner_role=owner_role,
+            amount=amount,
+            currency=DEFAULT_CURRENCY,
+            status=status,
+            razorpay_order_id=razorpay_order_id,
+            method=method,
+            notes=notes or {},
+        )
+
+    def create_order(self, amount: float, owner_id: str, owner_role: str):
+        """Creates a Razorpay Order and a matching local record. The order is created with
+        payment NOT yet captured - amount only becomes "paid" once verify_payment() confirms
+        a valid signature from Razorpay, never from the client's own say-so."""
+        self._validate_amount(amount)
 
         client = self._client()
         amount_paise = int(round(amount * 100))
@@ -47,17 +65,28 @@ class servicePayment:
         except Exception as e:
             raise RuntimeError(f"payment_order_failed:{type(e).__name__}")
 
-        payment_id = str(uuid.uuid4())
-        record = self._persistence.create_payment(
-            id=payment_id,
-            owner_id=owner_id,
-            owner_role=owner_role,
-            amount=amount,
-            currency=DEFAULT_CURRENCY,
-            status="created",
-            razorpay_order_id=order["id"],
+        record = self._persist_new_payment(
+            owner_id=owner_id, owner_role=owner_role, amount=amount,
+            status="created", razorpay_order_id=order["id"],
         )
         return record, self._key_id
+
+    def record_cash_payment(self, amount: float, owner_id: str, owner_role: str, note: str = None):
+        """Records cash already collected in person - there's no gateway transaction to
+        create or verify (unlike create_order/verify_payment), so this settles the record
+        as "paid" immediately, straight from what was typed in. Available to both customers
+        (self-reporting cash they handed over) and brokers (logging cash collected on a
+        visit) - it's an unverified, self-reported record either way, same trust model as
+        someone writing it in a physical receipt book, not a cryptographically confirmed
+        transaction like the Razorpay flow."""
+        self._validate_amount(amount)
+
+        note = (note or "").strip()
+        record = self._persist_new_payment(
+            owner_id=owner_id, owner_role=owner_role, amount=amount, status="paid",
+            razorpay_order_id=None, method="cash", notes={"note": note} if note else {},
+        )
+        return record
 
     def verify_payment(self, razorpay_order_id: str, razorpay_payment_id: str, razorpay_signature: str, owner_id: str):
         """Verifies the payment signature Razorpay's checkout hands back to the client -
