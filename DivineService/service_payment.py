@@ -74,12 +74,11 @@ class servicePayment:
     def record_cash_payment(self, amount: float, owner_id: str, owner_role: str, note: str = None):
         """Records cash already collected in person - there's no gateway transaction to
         create or verify (unlike create_order/verify_payment), so this settles the record
-        as "paid" immediately, straight from what the staff member typed in. Broker-only:
-        this is staff attesting cash was physically handed over, not something a customer
-        can self-report - without this check, any authenticated customer could fabricate an
-        arbitrary "paid" record with no real transaction behind it at all."""
-        if owner_role != "broker":
-            raise PermissionError("cash_payments_broker_only")
+        as "paid" immediately, straight from what was typed in. Available to both customers
+        (self-reporting cash they handed over) and brokers (logging cash collected on a
+        visit) - it's an unverified, self-reported record either way, same trust model as
+        someone writing it in a physical receipt book, not a cryptographically confirmed
+        transaction like the Razorpay flow."""
         self._validate_amount(amount)
 
         note = (note or "").strip()

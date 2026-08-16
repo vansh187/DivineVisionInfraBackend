@@ -290,17 +290,28 @@ def test_handle_webhook_marks_failed_on_failed_event():
 
 # ---------- record_cash_payment ----------
 
-def test_record_cash_payment_rejects_non_broker_caller():
-    # The critical case: a customer must not be able to self-report a fabricated "paid"
-    # cash payment with no real transaction behind it. Checked before amount validation
-    # too, so a customer can't probe validation ordering to learn anything either.
+def test_record_cash_payment_allows_customer_caller():
     svc, persistence = _service()
-    try:
-        svc.record_cash_payment(1000, owner_id="C00001", owner_role="customer")
-        assert False, "expected PermissionError"
-    except PermissionError as e:
-        assert str(e) == "cash_payments_broker_only"
-    persistence.create_payment.assert_not_called()
+    persistence.create_payment.return_value = MagicMock(id="pay1", status="paid", method="cash")
+
+    record = svc.record_cash_payment(1000, owner_id="C00001", owner_role="customer")
+
+    assert record.status == "paid"
+    _, kwargs = persistence.create_payment.call_args
+    assert kwargs["owner_id"] == "C00001"
+    assert kwargs["owner_role"] == "customer"
+
+
+def test_record_cash_payment_allows_broker_caller():
+    svc, persistence = _service()
+    persistence.create_payment.return_value = MagicMock(id="pay1", status="paid", method="cash")
+
+    record = svc.record_cash_payment(1000, owner_id="B00001", owner_role="broker")
+
+    assert record.status == "paid"
+    _, kwargs = persistence.create_payment.call_args
+    assert kwargs["owner_id"] == "B00001"
+    assert kwargs["owner_role"] == "broker"
 
 
 def test_record_cash_payment_rejects_zero_or_negative_amount():

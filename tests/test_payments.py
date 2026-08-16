@@ -263,12 +263,11 @@ def test_record_cash_payment_requires_auth():
     assert r.status_code == 401
 
 
-def test_record_cash_payment_rejects_customer_caller():
-    # The bug this fixes: a plain customer must not be able to self-report a fabricated
-    # "paid" cash record with no real transaction behind it.
+def test_record_cash_payment_allows_customer_caller():
     r = client.post("/payments/cash", json={"amount": 1000}, headers=_auth_headers())
-    assert r.status_code == 403
-    assert r.json()["detail"] == "cash_payments_broker_only"
+    assert r.status_code == 200, r.text
+    assert r.json()["method"] == "cash"
+    assert r.json()["owner_role"] == "customer"
 
 
 def test_record_cash_payment_rejects_non_positive_amount():
