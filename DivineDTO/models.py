@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from datetime import datetime
 
 
@@ -103,3 +103,46 @@ class PaymentOutDTO(BaseModel):
     razorpay_order_id: Optional[str]
     razorpay_payment_id: Optional[str]
     created_date: Optional[datetime]
+
+
+class VisitScheduleRequestDTO(BaseModel):
+    customer_name: str = Field(..., min_length=1, max_length=200)
+    customer_contact: Optional[str] = Field(None, max_length=200)
+    date: str = Field(..., description="YYYY-MM-DD")
+    time: str = Field(..., description="HH:MM, 24-hour")
+    notes: Optional[str] = Field(None, max_length=1000)
+
+
+class VisitOutDTO(BaseModel):
+    id: str
+    broker_id: str
+    customer_name: str
+    customer_contact: Optional[str]
+    date: str
+    time: str
+    notes: Optional[str]
+    status: str
+    created_date: Optional[datetime]
+
+
+class MarketTrendOutDTO(BaseModel):
+    id: str
+    city: str
+    locality: Optional[str]
+    property_type: str
+    period_label: str
+    as_of_date: str
+    price_per_sqyd: float
+    previous_price_per_sqyd: Optional[float]
+    price_change_percent: Optional[float]
+    trend_direction: str
+    rental_yield_percent: Optional[float]
+    demand_score: Optional[float]
+    supply_score: Optional[float]
+    demand_label: str
+    sample_size: int
+
+
+class MarketTrendListDTO(BaseModel):
+    count: int
+    trends: List[MarketTrendOutDTO]

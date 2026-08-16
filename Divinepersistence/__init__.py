@@ -4,5 +4,7 @@ from .persistence_broker import persistenceBroker
 from .persistence_document import persistenceDocument
 from .persistence_kyc import persistenceKyc
 from .persistence_payment import persistencePayment
+from .persistence_visit import persistenceVisit
+from .persistence_market_trend import persistenceMarketTrend
 
-__all__ = ["PersistenceDB", "persistenceCustomer", "persistenceBroker", "persistenceDocument", "persistenceKyc", "persistencePayment"]
+__all__ = ["PersistenceDB", "persistenceCustomer", "persistenceBroker", "persistenceDocument", "persistenceKyc", "persistencePayment", "persistenceVisit", "persistenceMarketTrend"]

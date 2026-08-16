@@ -1,0 +1,13 @@
+# SQL queries for the site-visits API
+create_visit: |
+  INSERT INTO divine_site_visits(id, broker_id, customer_name, customer_contact, visit_date, visit_time, notes, status, created_date, last_updated_date)
+  VALUES (:id, :broker_id, :customer_name, :customer_contact, :visit_date, :visit_time, :notes, :status, :created_date, :last_updated_date)
+  RETURNING *;
+get_by_id: |
+  SELECT * FROM divine_site_visits WHERE id = :id LIMIT 1;
+list_by_broker: |
+  SELECT * FROM divine_site_visits WHERE broker_id = :broker_id AND status != 'cancelled'
+  ORDER BY visit_date ASC, visit_time ASC;
+update_status: |
+  UPDATE divine_site_visits SET status = :status, last_updated_date = :last_updated_date
+  WHERE id = :id RETURNING *;

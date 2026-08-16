@@ -78,3 +78,38 @@ CREATE TABLE IF NOT EXISTS divine_payments (
 
 CREATE INDEX IF NOT EXISTS idx_divine_payments_owner_id ON divine_payments (owner_id);
 CREATE INDEX IF NOT EXISTS idx_divine_payments_razorpay_order_id ON divine_payments (razorpay_order_id);
+
+CREATE TABLE IF NOT EXISTS divine_site_visits (
+  id varchar(36) PRIMARY KEY,
+  broker_id varchar(6) NOT NULL,
+  customer_name varchar(200) NOT NULL,
+  customer_contact varchar(200),
+  visit_date date NOT NULL,
+  visit_time varchar(5) NOT NULL,
+  notes text,
+  status varchar(20) NOT NULL DEFAULT 'scheduled' CHECK (status IN ('scheduled', 'cancelled')),
+  created_date timestamptz DEFAULT now(),
+  last_updated_date timestamptz DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_divine_site_visits_broker_id ON divine_site_visits (broker_id);
+
+CREATE TABLE IF NOT EXISTS divine_market_trends (
+  id varchar(36) PRIMARY KEY,
+  city varchar(100) NOT NULL,
+  locality varchar(150),
+  property_type varchar(80) NOT NULL,
+  period_label varchar(50) NOT NULL,
+  as_of_date date NOT NULL,
+  price_per_sqyd numeric(12,2) NOT NULL CHECK (price_per_sqyd > 0),
+  previous_price_per_sqyd numeric(12,2) CHECK (previous_price_per_sqyd IS NULL OR previous_price_per_sqyd > 0),
+  rental_yield_percent numeric(5,2) CHECK (rental_yield_percent IS NULL OR rental_yield_percent >= 0),
+  demand_score numeric(5,2) CHECK (demand_score IS NULL OR demand_score BETWEEN 0 AND 100),
+  supply_score numeric(5,2) CHECK (supply_score IS NULL OR supply_score BETWEEN 0 AND 100),
+  sample_size integer NOT NULL DEFAULT 0 CHECK (sample_size >= 0),
+  created_date timestamptz DEFAULT now(),
+  last_updated_date timestamptz DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_divine_market_trends_filters
+  ON divine_market_trends (city, locality, property_type, as_of_date DESC);
