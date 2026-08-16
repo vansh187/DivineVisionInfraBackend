@@ -86,6 +86,11 @@ class PaymentVerifyRequestDTO(BaseModel):
     razorpay_signature: str
 
 
+class PaymentCashRequestDTO(BaseModel):
+    amount: float = Field(..., gt=0, description="Amount in INR (rupees) the customer handed over in cash")
+    note: Optional[str] = Field(None, max_length=500)
+
+
 class PaymentOutDTO(BaseModel):
     id: str
     owner_id: str
@@ -93,6 +98,7 @@ class PaymentOutDTO(BaseModel):
     amount: float
     currency: str
     status: str
+    method: str
     verified: bool
     razorpay_order_id: str
     razorpay_payment_id: Optional[str]

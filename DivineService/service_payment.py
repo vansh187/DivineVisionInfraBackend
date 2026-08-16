@@ -27,14 +27,17 @@ class servicePayment:
             raise RuntimeError("payment_not_configured")
         return razorpay.Client(auth=(self._key_id, self._key_secret))
 
-    def create_order(self, amount: float, owner_id: str, owner_role: str):
-        """Creates a Razorpay Order and a matching local record. The order is created with
-        payment NOT yet captured - amount only becomes "paid" once verify_payment() confirms
-        a valid signature from Razorpay, never from the client's own say-so."""
+    def _validate_amount(self, amount: float) -> None:
         if amount <= 0:
             raise ValueError("invalid_amount")
         if amount > MAX_AMOUNT_INR:
             raise ValueError("amount_too_large")
+
+    def create_order(self, amount: float, owner_id: str, owner_role: str):
+        """Creates a Razorpay Order and a matching local record. The order is created with
+        payment NOT yet captured - amount only becomes "paid" once verify_payment() confirms
+        a valid signature from Razorpay, never from the client's own say-so."""
+        self._validate_amount(amount)
 
         client = self._client()
         amount_paise = int(round(amount * 100))
@@ -58,6 +61,29 @@ class servicePayment:
             razorpay_order_id=order["id"],
         )
         return record, self._key_id
+
+    def record_cash_payment(self, amount: float, owner_id: str, owner_role: str, note: str = None):
+        """Records cash already collected in person - there's no gateway transaction to
+        create or verify (unlike create_order/verify_payment), so this settles the record
+        as "paid" immediately, straight from what the staff member typed in. razorpay_order_id
+        stays NOT NULL (no schema change needed there) via a synthetic "cash_<uuid>"
+        placeholder that's obviously not a real gateway id."""
+        self._validate_amount(amount)
+
+        payment_id = str(uuid.uuid4())
+        synthetic_order_id = f"cash_{uuid.uuid4()}"
+        record = self._persistence.create_payment(
+            id=payment_id,
+            owner_id=owner_id,
+            owner_role=owner_role,
+            amount=amount,
+            currency=DEFAULT_CURRENCY,
+            status="paid",
+            razorpay_order_id=synthetic_order_id,
+            method="cash",
+            notes={"note": note} if note else {},
+        )
+        return record
 
     def verify_payment(self, razorpay_order_id: str, razorpay_payment_id: str, razorpay_signature: str, owner_id: str):
         """Verifies the payment signature Razorpay's checkout hands back to the client -

@@ -5,6 +5,7 @@ from DivineDTO.models import (
     PaymentOrderRequestDTO,
     PaymentOrderOutDTO,
     PaymentVerifyRequestDTO,
+    PaymentCashRequestDTO,
     PaymentOutDTO,
 )
 from DivineService import servicePayment
@@ -22,6 +23,7 @@ def _to_payment_out(record, verified: bool = None) -> PaymentOutDTO:
         amount=float(record.amount),
         currency=record.currency,
         status=record.status,
+        method=record.method,
         verified=record.status == "paid" if verified is None else verified,
         razorpay_order_id=record.razorpay_order_id,
         razorpay_payment_id=record.razorpay_payment_id,
@@ -68,6 +70,21 @@ def verify_payment(dto: PaymentVerifyRequestDTO, current_user: dict = Depends(ge
         raise HTTPException(status_code=403, detail="forbidden")
     except RuntimeError as e:
         raise HTTPException(status_code=502, detail=str(e))
+    except Exception:
+        raise HTTPException(status_code=500, detail="internal_error")
+
+
+@router.post("/cash", response_model=PaymentOutDTO)
+def record_cash_payment(dto: PaymentCashRequestDTO, current_user: dict = Depends(get_current_user)):
+    try:
+        record = _payment_service.record_cash_payment(
+            dto.amount, owner_id=current_user["sub"], owner_role=current_user["role"], note=dto.note
+        )
+        return _to_payment_out(record)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except IntegrityError:
+        raise HTTPException(status_code=409, detail="conflict")
     except Exception:
         raise HTTPException(status_code=500, detail="internal_error")
 

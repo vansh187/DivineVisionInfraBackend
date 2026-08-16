@@ -1,7 +1,7 @@
 # SQL queries for the payments API
 create_payment: |
-  INSERT INTO divine_payments(id, owner_id, owner_role, amount, currency, status, razorpay_order_id, notes, created_date, last_updated_date)
-  VALUES (:id, :owner_id, :owner_role, :amount, :currency, :status, :razorpay_order_id, :notes, :created_date, :last_updated_date)
+  INSERT INTO divine_payments(id, owner_id, owner_role, amount, currency, status, method, razorpay_order_id, notes, created_date, last_updated_date)
+  VALUES (:id, :owner_id, :owner_role, :amount, :currency, :status, :method, :razorpay_order_id, :notes, :created_date, :last_updated_date)
   RETURNING *;
 get_by_id: |
   SELECT * FROM divine_payments WHERE id = :id LIMIT 1;

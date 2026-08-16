@@ -14,6 +14,11 @@ class PaymentModel(Base):
     amount = Column(Numeric(12, 2), nullable=False)
     currency = Column(String(3), nullable=False, default="INR")
     status = Column(String(20), nullable=False, default="created")  # created | paid | failed
+    # "razorpay" (default, backward compatible with rows created before this column
+    # existed) or "cash" - a cash entry has no real gateway order, so razorpay_order_id
+    # holds a synthetic "cash_<uuid>" placeholder instead (kept NOT NULL rather than
+    # loosened, since that requires no schema migration beyond adding this column).
+    method = Column(String(20), nullable=False, default="razorpay")
     razorpay_order_id = Column(String(64), nullable=False, index=True)
     razorpay_payment_id = Column(String(64))
     razorpay_signature = Column(String(255))
@@ -27,8 +32,8 @@ class persistencePayment:
         self._session_factory = session_factory
         queries = load_queries("payment_queries.yaml")
         queries.setdefault("create_payment", (
-            'INSERT INTO divine_payments(id, owner_id, owner_role, amount, currency, status, razorpay_order_id, notes, created_date, last_updated_date) '
-            'VALUES (:id, :owner_id, :owner_role, :amount, :currency, :status, :razorpay_order_id, :notes, :created_date, :last_updated_date) RETURNING *;'
+            'INSERT INTO divine_payments(id, owner_id, owner_role, amount, currency, status, method, razorpay_order_id, notes, created_date, last_updated_date) '
+            'VALUES (:id, :owner_id, :owner_role, :amount, :currency, :status, :method, :razorpay_order_id, :notes, :created_date, :last_updated_date) RETURNING *;'
         ))
         queries.setdefault("get_by_id", 'SELECT * FROM divine_payments WHERE id = :id LIMIT 1;')
         queries.setdefault("get_by_razorpay_order_id", 'SELECT * FROM divine_payments WHERE razorpay_order_id = :razorpay_order_id LIMIT 1;')
@@ -40,7 +45,7 @@ class persistencePayment:
         self._queries = queries
         self._engine = engine
 
-    def create_payment(self, id: str, owner_id: str, owner_role: str, amount, currency: str, status: str, razorpay_order_id: str, notes: dict = None) -> PaymentModel:
+    def create_payment(self, id: str, owner_id: str, owner_role: str, amount, currency: str, status: str, razorpay_order_id: str, method: str = "razorpay", notes: dict = None) -> PaymentModel:
         with self._session_factory() as db:
             try:
                 now = datetime.now(timezone.utc)
@@ -52,6 +57,7 @@ class persistencePayment:
                     "amount": amount,
                     "currency": currency,
                     "status": status,
+                    "method": method,
                     "razorpay_order_id": razorpay_order_id,
                     "notes": json.dumps(notes or {}),
                     "created_date": now,

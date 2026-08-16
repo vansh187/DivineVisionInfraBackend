@@ -248,3 +248,47 @@ def test_webhook_marks_payment_paid_end_to_end(mock_client_method):
     get_after = client.get(f"/payments/{payment_id}", headers=_auth_headers())
     assert get_after.json()["status"] == "paid"
     assert get_after.json()["razorpay_payment_id"] == "pay_webhook_e2e"
+
+
+# ---------- POST /payments/cash ----------
+
+def test_record_cash_payment_requires_auth():
+    r = client.post("/payments/cash", json={"amount": 1000})
+    assert r.status_code == 401
+
+
+def test_record_cash_payment_rejects_non_positive_amount():
+    r = client.post("/payments/cash", json={"amount": 0}, headers=_auth_headers())
+    assert r.status_code == 422  # pydantic gt=0 constraint
+
+
+def test_record_cash_payment_happy_path_settles_immediately():
+    # No razorpay.Client mocking needed at all - cash never touches the gateway.
+    r = client.post(
+        "/payments/cash",
+        json={"amount": 18500.50, "note": "Paid at site office"},
+        headers=_auth_headers(),
+    )
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["amount"] == 18500.50
+    assert data["status"] == "paid"
+    assert data["method"] == "cash"
+    assert data["verified"] is True
+    assert data["razorpay_order_id"].startswith("cash_")
+    assert data["razorpay_payment_id"] is None
+
+
+def test_record_cash_payment_works_without_a_note():
+    r = client.post("/payments/cash", json={"amount": 500}, headers=_auth_headers())
+    assert r.status_code == 200, r.text
+    assert r.json()["method"] == "cash"
+
+
+def test_record_cash_payment_is_owner_scoped():
+    r = client.post("/payments/cash", json={"amount": 999}, headers=_auth_headers())
+    assert r.status_code == 200, r.text
+    payment_id = r.json()["id"]
+
+    other_get = client.get(f"/payments/{payment_id}", headers=_auth_headers(_OTHER_TOKEN))
+    assert other_get.status_code == 403
