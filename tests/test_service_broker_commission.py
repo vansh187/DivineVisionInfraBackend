@@ -170,6 +170,25 @@ def test_create_paid_commission_rejects_invalid_money():
         assert str(e) == "invalid_commissionAmount"
 
 
+def test_create_paid_commission_propagates_integrity_error_as_is():
+    from sqlalchemy.exc import IntegrityError
+
+    svc, persistence = _service()
+    persistence.create_commission.side_effect = IntegrityError("stmt", "params", Exception("dup"))
+
+    try:
+        svc.create_paid_commission(
+            brokerId="brk_123",
+            serialNumber="SN-1001",
+            unitAddress="Plot 42",
+            commissionAmount=45000,
+            transactionMode="cash",
+        )
+        assert False, "expected IntegrityError"
+    except IntegrityError:
+        pass
+
+
 def test_list_for_broker_returns_commissions_and_summary():
     svc, persistence = _service()
     persistence.list_by_broker.return_value = [_record()]

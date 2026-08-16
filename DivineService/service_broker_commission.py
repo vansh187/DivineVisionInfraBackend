@@ -4,6 +4,7 @@ import uuid
 import razorpay
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from sqlalchemy.exc import IntegrityError
 from Divinepersistence import persistenceBrokerCommission
 
 
@@ -157,7 +158,7 @@ class serviceBrokerCommission:
                 last_updated_at=now,
             )
             return self._format_commission(record)
-        except ValueError:
+        except (ValueError, IntegrityError):
             raise
         except Exception as e:
             raise RuntimeError("commission_create_failed") from e
@@ -177,7 +178,7 @@ class serviceBrokerCommission:
                 transactionMode=transactionMode,
                 source="broker",
             )
-        except ValueError:
+        except (ValueError, IntegrityError):
             raise
         except Exception as e:
             raise RuntimeError("commission_create_failed") from e
@@ -228,7 +229,7 @@ class serviceBrokerCommission:
                 "currency": "INR",
                 "status": "created",
             }
-        except ValueError:
+        except (ValueError, IntegrityError):
             raise
         except Exception as e:
             if isinstance(e, RuntimeError):
