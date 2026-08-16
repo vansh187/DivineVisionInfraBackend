@@ -10,13 +10,8 @@ before this feature went through Razorpay).
 Usage:
     python scripts/add_payment_method_column.py
 """
-import sys
-import os
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from dotenv import load_dotenv
-load_dotenv()
+from _bootstrap import setup
+setup()
 
 from Divinepersistence.persistence_db import engine
 from sqlalchemy import text

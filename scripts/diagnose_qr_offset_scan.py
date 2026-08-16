@@ -12,12 +12,9 @@ Usage:
     python scripts/diagnose_qr_offset_scan.py path/to/qr_photo.jpg
 """
 import sys
-import os
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from dotenv import load_dotenv
-load_dotenv()
+from _bootstrap import setup
+setup()
 
 import cv2
 import numpy as np

@@ -33,6 +33,21 @@ class servicePayment:
         if amount > MAX_AMOUNT_INR:
             raise ValueError("amount_too_large")
 
+    def _persist_new_payment(self, owner_id: str, owner_role: str, amount: float, status: str,
+                              razorpay_order_id: str = None, method: str = "razorpay", notes: dict = None):
+        payment_id = str(uuid.uuid4())
+        return self._persistence.create_payment(
+            id=payment_id,
+            owner_id=owner_id,
+            owner_role=owner_role,
+            amount=amount,
+            currency=DEFAULT_CURRENCY,
+            status=status,
+            razorpay_order_id=razorpay_order_id,
+            method=method,
+            notes=notes or {},
+        )
+
     def create_order(self, amount: float, owner_id: str, owner_role: str):
         """Creates a Razorpay Order and a matching local record. The order is created with
         payment NOT yet captured - amount only becomes "paid" once verify_payment() confirms
@@ -50,38 +65,27 @@ class servicePayment:
         except Exception as e:
             raise RuntimeError(f"payment_order_failed:{type(e).__name__}")
 
-        payment_id = str(uuid.uuid4())
-        record = self._persistence.create_payment(
-            id=payment_id,
-            owner_id=owner_id,
-            owner_role=owner_role,
-            amount=amount,
-            currency=DEFAULT_CURRENCY,
-            status="created",
-            razorpay_order_id=order["id"],
+        record = self._persist_new_payment(
+            owner_id=owner_id, owner_role=owner_role, amount=amount,
+            status="created", razorpay_order_id=order["id"],
         )
         return record, self._key_id
 
     def record_cash_payment(self, amount: float, owner_id: str, owner_role: str, note: str = None):
         """Records cash already collected in person - there's no gateway transaction to
         create or verify (unlike create_order/verify_payment), so this settles the record
-        as "paid" immediately, straight from what the staff member typed in. razorpay_order_id
-        stays NOT NULL (no schema change needed there) via a synthetic "cash_<uuid>"
-        placeholder that's obviously not a real gateway id."""
+        as "paid" immediately, straight from what the staff member typed in. Broker-only:
+        this is staff attesting cash was physically handed over, not something a customer
+        can self-report - without this check, any authenticated customer could fabricate an
+        arbitrary "paid" record with no real transaction behind it at all."""
+        if owner_role != "broker":
+            raise PermissionError("cash_payments_broker_only")
         self._validate_amount(amount)
 
-        payment_id = str(uuid.uuid4())
-        synthetic_order_id = f"cash_{uuid.uuid4()}"
-        record = self._persistence.create_payment(
-            id=payment_id,
-            owner_id=owner_id,
-            owner_role=owner_role,
-            amount=amount,
-            currency=DEFAULT_CURRENCY,
-            status="paid",
-            razorpay_order_id=synthetic_order_id,
-            method="cash",
-            notes={"note": note} if note else {},
+        note = (note or "").strip()
+        record = self._persist_new_payment(
+            owner_id=owner_id, owner_role=owner_role, amount=amount, status="paid",
+            razorpay_order_id=None, method="cash", notes={"note": note} if note else {},
         )
         return record
 

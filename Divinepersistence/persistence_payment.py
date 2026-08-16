@@ -15,11 +15,12 @@ class PaymentModel(Base):
     currency = Column(String(3), nullable=False, default="INR")
     status = Column(String(20), nullable=False, default="created")  # created | paid | failed
     # "razorpay" (default, backward compatible with rows created before this column
-    # existed) or "cash" - a cash entry has no real gateway order, so razorpay_order_id
-    # holds a synthetic "cash_<uuid>" placeholder instead (kept NOT NULL rather than
-    # loosened, since that requires no schema migration beyond adding this column).
+    # existed) or "cash". A cash entry has no real gateway order, so razorpay_order_id is
+    # nullable and left NULL for those rows - not a synthetic placeholder string, which
+    # would make every future reader of this column have to know a lexical convention
+    # ("starts with cash_") instead of just checking for NULL.
     method = Column(String(20), nullable=False, default="razorpay")
-    razorpay_order_id = Column(String(64), nullable=False, index=True)
+    razorpay_order_id = Column(String(64), nullable=True, index=True)
     razorpay_payment_id = Column(String(64))
     razorpay_signature = Column(String(255))
     notes = Column(JSON().with_variant(JSONB, "postgresql"))
@@ -45,7 +46,7 @@ class persistencePayment:
         self._queries = queries
         self._engine = engine
 
-    def create_payment(self, id: str, owner_id: str, owner_role: str, amount, currency: str, status: str, razorpay_order_id: str, method: str = "razorpay", notes: dict = None) -> PaymentModel:
+    def create_payment(self, id: str, owner_id: str, owner_role: str, amount, currency: str, status: str, razorpay_order_id: str = None, method: str = "razorpay", notes: dict = None) -> PaymentModel:
         with self._session_factory() as db:
             try:
                 now = datetime.now(timezone.utc)

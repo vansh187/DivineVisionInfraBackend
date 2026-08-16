@@ -68,7 +68,7 @@ CREATE TABLE IF NOT EXISTS divine_payments (
   currency varchar(3) NOT NULL DEFAULT 'INR',
   status varchar(20) NOT NULL DEFAULT 'created' CHECK (status IN ('created', 'paid', 'failed')),
   method varchar(20) NOT NULL DEFAULT 'razorpay' CHECK (method IN ('razorpay', 'cash')),
-  razorpay_order_id varchar(64) NOT NULL,
+  razorpay_order_id varchar(64),
   razorpay_payment_id varchar(64),
   razorpay_signature varchar(255),
   notes jsonb,

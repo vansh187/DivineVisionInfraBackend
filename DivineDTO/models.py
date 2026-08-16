@@ -100,6 +100,6 @@ class PaymentOutDTO(BaseModel):
     status: str
     method: str
     verified: bool
-    razorpay_order_id: str
+    razorpay_order_id: Optional[str]
     razorpay_payment_id: Optional[str]
     created_date: Optional[datetime]

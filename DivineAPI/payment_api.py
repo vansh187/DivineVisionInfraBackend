@@ -23,7 +23,10 @@ def _to_payment_out(record, verified: bool = None) -> PaymentOutDTO:
         amount=float(record.amount),
         currency=record.currency,
         status=record.status,
-        method=record.method,
+        # Defensive default: if this row (or the whole table, in a not-yet-migrated
+        # environment) predates the method column, don't 500 on a plain read - every
+        # payment before this feature existed went through Razorpay, so that's correct.
+        method=getattr(record, "method", "razorpay"),
         verified=record.status == "paid" if verified is None else verified,
         razorpay_order_id=record.razorpay_order_id,
         razorpay_payment_id=record.razorpay_payment_id,
@@ -83,6 +86,8 @@ def record_cash_payment(dto: PaymentCashRequestDTO, current_user: dict = Depends
         return _to_payment_out(record)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="cash_payments_broker_only")
     except IntegrityError:
         raise HTTPException(status_code=409, detail="conflict")
     except Exception:
