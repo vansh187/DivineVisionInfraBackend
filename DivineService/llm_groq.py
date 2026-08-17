@@ -21,7 +21,11 @@ class llmGroq:
         if not api_key:
             raise RuntimeError("GROQ_API_KEY environment variable must be set")
         self._client = Groq(api_key=api_key)
-        self._timeout = float(os.getenv("GROQ_TIMEOUT_SECONDS", "6"))
+        # openai/gpt-oss-120b is a reasoning model - even with reasoning_format="hidden" it
+        # still spends real wall-clock time thinking before the hidden reasoning is stripped,
+        # so 6s was too tight once a turn chains more than one Groq call (a tool round plus a
+        # second round for the final answer, or the guardrail judge call on top of that).
+        self._timeout = float(os.getenv("GROQ_TIMEOUT_SECONDS", "15"))
 
     def _to_openai_tools(self, tools: list) -> list:
         return [

@@ -203,12 +203,9 @@ class serviceChatbot:
         used_kb = False
 
         for round_index in range(MAX_TOOL_ROUNDS):
-            allow_tools = round_index < MAX_TOOL_ROUNDS - 1
-            tools = TOOL_SCHEMAS if allow_tools else None
-
             if provider == "gemini":
                 try:
-                    step = self._gemini.generate(SYSTEM_INSTRUCTION, history, tools=tools)
+                    step = self._gemini.generate(SYSTEM_INSTRUCTION, history, tools=TOOL_SCHEMAS)
                 except GeminiError:
                     # Gemini can fail on ANY round (observed in practice: transient 503s / slow
                     # responses under load), not just the first - so the fallback must be able to
@@ -216,14 +213,14 @@ class serviceChatbot:
                     provider = "groq"
                     history = self._gemini_history_to_groq(history)
                     try:
-                        step = self._groq.generate(SYSTEM_INSTRUCTION, history, tools=tools)
+                        step = self._groq.generate(SYSTEM_INSTRUCTION, history, tools=TOOL_SCHEMAS)
                     except GroqError:
-                        return {"reply": DEGRADED_FALLBACK_REPLY, "llm_provider": None}
+                        break
             else:
                 try:
-                    step = self._groq.generate(SYSTEM_INSTRUCTION, history, tools=tools)
+                    step = self._groq.generate(SYSTEM_INSTRUCTION, history, tools=TOOL_SCHEMAS)
                 except GroqError:
-                    return {"reply": DEGRADED_FALLBACK_REPLY, "llm_provider": provider}
+                    break
 
             if step["function_call"]:
                 name = step["function_call"]["name"]
@@ -255,7 +252,35 @@ class serviceChatbot:
 
             return self._apply_guardrail(draft_reply, retrieved_chunks, provider)
 
-        return {"reply": DEGRADED_FALLBACK_REPLY, "llm_provider": provider}
+        # The tool-round budget ran out (or a provider genuinely failed) without ever landing
+        # on a text reply. Rather than keep negotiating "please stop calling tools now" on the
+        # same tool-call-laden conversation - a constraint this model does not reliably honor,
+        # and which Groq hard-rejects outright when disobeyed - finish with one guaranteed-clean
+        # call: no tools registered, no tool-call-shaped history, just the gathered facts. A
+        # model with no tool schema in the request has no structural way to attempt a tool call.
+        return self._final_text_only(provider, latest_text, retrieved_chunks, used_kb)
+
+    def _final_text_only(self, provider: str, latest_text: str, retrieved_chunks: list, used_kb: bool):
+        context_note = ""
+        if retrieved_chunks:
+            joined = "\n".join(c["content"] for c in retrieved_chunks)
+            context_note = f"\n\nRelevant knowledge base info you already looked up:\n{joined}"
+        prompt = f"The visitor just said: \"{latest_text}\"{context_note}\n\nReply now, directly, in plain text."
+
+        for attempt_provider in ([provider, "groq"] if provider == "gemini" else ["groq"]):
+            try:
+                if attempt_provider == "gemini":
+                    step = self._gemini.generate(SYSTEM_INSTRUCTION, [{"role": "user", "text": prompt}])
+                else:
+                    step = self._groq.generate(SYSTEM_INSTRUCTION, [{"role": "user", "content": prompt}])
+                draft_reply = step["text"] or SAFE_FALLBACK_REPLY
+                if not used_kb:
+                    return {"reply": draft_reply, "llm_provider": attempt_provider}
+                return self._apply_guardrail(draft_reply, retrieved_chunks, attempt_provider)
+            except (GeminiError, GroqError):
+                continue
+
+        return {"reply": DEGRADED_FALLBACK_REPLY, "llm_provider": None}
 
     def _apply_guardrail(self, draft_reply: str, retrieved_chunks: list, provider: str):
         try:
