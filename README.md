@@ -28,6 +28,12 @@ Endpoints:
 - POST /customer/login
 - POST /broker/signup
 - POST /broker/login
+- POST /chatbot/session/init - starts a visitor chat session, no login required
+- POST /chatbot/message - send a text/voice message or trigger the callback-request flow, no login required
+- GET /chatbot/callback-requests - broker/admin-only list of pending callback requests
+
+The chatbot module needs `GEMINI_API_KEY` and `GROQ_API_KEY` set (see `.env.example`).
+Knowledge base articles are ingested with `python -m scripts.ingest_kb <file.txt> --title "..." --category pricing`.
 
 Notes:
 - Tables are `DIVINE_CUSTOMER_USERS` and `DIVINE_BROKER_USERS` and the SQL script targets PostgreSQL.

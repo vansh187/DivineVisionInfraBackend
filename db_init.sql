@@ -140,3 +140,120 @@ CREATE INDEX IF NOT EXISTS idx_divine_broker_commissions_created_at
   ON divine_broker_commissions (created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_divine_broker_commissions_razorpay_order_id
   ON divine_broker_commissions (razorpay_order_id);
+
+-- ============================================================
+-- AI Concierge Chatbot (Phase 1: web widget only)
+-- ============================================================
+
+CREATE EXTENSION IF NOT EXISTS vector;
+
+CREATE TABLE IF NOT EXISTS divine_chatbot_leads (
+  id varchar(36) PRIMARY KEY,
+  channel varchar(10) NOT NULL DEFAULT 'web' CHECK (channel IN ('web')),
+  visitor_name varchar(200),
+  visitor_phone varchar(20),
+  linked_customer_id varchar(6) REFERENCES divine_customer_users(id),
+  lead_temperature varchar(10) NOT NULL DEFAULT 'cold' CHECK (lead_temperature IN ('hot','warm','cold')),
+  assigned_broker_id varchar(6) REFERENCES divine_broker_users(id),
+  consent_given boolean NOT NULL DEFAULT false,
+  consent_at timestamptz,
+  created_date timestamptz DEFAULT now(),
+  last_updated_date timestamptz DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_chatbot_leads_phone ON divine_chatbot_leads (visitor_phone);
+CREATE INDEX IF NOT EXISTS idx_chatbot_leads_temperature ON divine_chatbot_leads (lead_temperature);
+
+CREATE TABLE IF NOT EXISTS divine_chatbot_lead_sources (
+  id varchar(36) PRIMARY KEY,
+  lead_id varchar(36) NOT NULL REFERENCES divine_chatbot_leads(id),
+  ip_address inet,
+  ip_geo_city varchar(120),
+  ip_geo_region varchar(120),
+  precise_lat double precision,
+  precise_long double precision,
+  maps_link text,
+  referrer text,
+  utm_source varchar(120),
+  utm_medium varchar(120),
+  utm_campaign varchar(120),
+  device_type varchar(40),
+  captured_at timestamptz DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_chatbot_lead_sources_lead_id ON divine_chatbot_lead_sources (lead_id);
+
+CREATE TABLE IF NOT EXISTS divine_chatbot_sessions (
+  id varchar(36) PRIMARY KEY,
+  lead_id varchar(36) REFERENCES divine_chatbot_leads(id),
+  callback_state varchar(20) CHECK (callback_state IN ('awaiting_name','awaiting_phone','awaiting_time','complete')),
+  callback_name varchar(200),
+  callback_phone varchar(20),
+  callback_time varchar(100),
+  created_date timestamptz DEFAULT now(),
+  last_activity_date timestamptz DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_chatbot_sessions_lead_id ON divine_chatbot_sessions (lead_id);
+CREATE INDEX IF NOT EXISTS idx_chatbot_sessions_last_activity ON divine_chatbot_sessions (last_activity_date DESC);
+
+CREATE TABLE IF NOT EXISTS divine_chatbot_messages (
+  id varchar(36) PRIMARY KEY,
+  session_id varchar(36) NOT NULL REFERENCES divine_chatbot_sessions(id),
+  role varchar(10) NOT NULL CHECK (role IN ('user','assistant','tool')),
+  content text NOT NULL,
+  tool_name varchar(80),
+  llm_provider varchar(10) CHECK (llm_provider IN ('gemini','groq')),
+  guardrail_score numeric(3,2),
+  guardrail_passed boolean,
+  latency_ms integer,
+  created_date timestamptz DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_chatbot_messages_session_id ON divine_chatbot_messages (session_id, created_date);
+
+CREATE TABLE IF NOT EXISTS divine_chatbot_qualification (
+  id varchar(36) PRIMARY KEY,
+  lead_id varchar(36) NOT NULL REFERENCES divine_chatbot_leads(id),
+  budget_min numeric(14,2),
+  budget_max numeric(14,2),
+  unit_type varchar(80),
+  timeline_days integer,
+  intent_signal varchar(120),
+  temperature varchar(10) CHECK (temperature IN ('hot','warm','cold')),
+  updated_date timestamptz DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_chatbot_qualification_lead_id ON divine_chatbot_qualification (lead_id);
+
+CREATE TABLE IF NOT EXISTS divine_chatbot_callback_requests (
+  id varchar(36) PRIMARY KEY,
+  lead_id varchar(36) NOT NULL REFERENCES divine_chatbot_leads(id),
+  visitor_name varchar(200) NOT NULL,
+  phone varchar(20) NOT NULL,
+  preferred_time varchar(100) NOT NULL,
+  status varchar(20) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','contacted','done')),
+  requested_at timestamptz DEFAULT now(),
+  actioned_at timestamptz
+);
+CREATE INDEX IF NOT EXISTS idx_chatbot_callback_requests_status ON divine_chatbot_callback_requests (status);
+CREATE INDEX IF NOT EXISTS idx_chatbot_callback_requests_lead_id ON divine_chatbot_callback_requests (lead_id);
+
+CREATE TABLE IF NOT EXISTS divine_chatbot_kb_documents (
+  id varchar(36) PRIMARY KEY,
+  title varchar(300) NOT NULL,
+  category varchar(80) NOT NULL,
+  source_uri text,
+  created_date timestamptz DEFAULT now(),
+  last_updated_date timestamptz DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS divine_chatbot_kb_chunks (
+  id varchar(36) PRIMARY KEY,
+  document_id varchar(36) NOT NULL REFERENCES divine_chatbot_kb_documents(id),
+  chunk_index integer NOT NULL,
+  content text NOT NULL,
+  embedding vector(768) NOT NULL,
+  created_date timestamptz DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_chatbot_kb_chunks_document_id ON divine_chatbot_kb_chunks (document_id);
+-- HNSW (not ivfflat): ivfflat's recall degrades badly on a small/young table (its list
+-- partitioning assumes real row volume) - a freshly-seeded KB would silently return zero
+-- matches on every search. HNSW has no such "too few rows" failure mode.
+CREATE INDEX IF NOT EXISTS idx_chatbot_kb_chunks_embedding
+  ON divine_chatbot_kb_chunks USING hnsw (embedding vector_cosine_ops);
