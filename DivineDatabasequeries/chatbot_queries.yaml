@@ -1,0 +1,83 @@
+# SQL queries for the AI concierge chatbot module
+create_lead: |
+  INSERT INTO divine_chatbot_leads(id, channel, visitor_name, visitor_phone, lead_temperature, consent_given, consent_at, created_date, last_updated_date)
+  VALUES (:id, :channel, :visitor_name, :visitor_phone, :lead_temperature, :consent_given, :consent_at, :created_date, :last_updated_date)
+  RETURNING *;
+get_lead_by_id: |
+  SELECT * FROM divine_chatbot_leads WHERE id = :id LIMIT 1;
+update_lead_fields: |
+  UPDATE divine_chatbot_leads
+  SET visitor_name = COALESCE(:visitor_name, visitor_name),
+      visitor_phone = COALESCE(:visitor_phone, visitor_phone),
+      lead_temperature = COALESCE(:lead_temperature, lead_temperature),
+      last_updated_date = :last_updated_date
+  WHERE id = :id
+  RETURNING *;
+
+create_lead_source: |
+  INSERT INTO divine_chatbot_lead_sources(id, lead_id, ip_address, ip_geo_city, ip_geo_region, precise_lat, precise_long, maps_link, referrer, utm_source, utm_medium, utm_campaign, device_type, captured_at)
+  VALUES (:id, :lead_id, :ip_address, :ip_geo_city, :ip_geo_region, :precise_lat, :precise_long, :maps_link, :referrer, :utm_source, :utm_medium, :utm_campaign, :device_type, :captured_at)
+  RETURNING *;
+update_lead_source_location: |
+  UPDATE divine_chatbot_lead_sources
+  SET precise_lat = :precise_lat, precise_long = :precise_long, maps_link = :maps_link
+  WHERE id = (
+    SELECT id FROM divine_chatbot_lead_sources WHERE lead_id = :lead_id ORDER BY captured_at DESC LIMIT 1
+  )
+  RETURNING *;
+
+create_session: |
+  INSERT INTO divine_chatbot_sessions(id, lead_id, created_date, last_activity_date)
+  VALUES (:id, :lead_id, :created_date, :last_activity_date)
+  RETURNING *;
+get_session_by_id: |
+  SELECT * FROM divine_chatbot_sessions WHERE id = :id LIMIT 1;
+touch_session: |
+  UPDATE divine_chatbot_sessions SET last_activity_date = :last_activity_date WHERE id = :id RETURNING *;
+update_session_callback_state: |
+  UPDATE divine_chatbot_sessions
+  SET callback_state = :callback_state,
+      callback_name = COALESCE(:callback_name, callback_name),
+      callback_phone = COALESCE(:callback_phone, callback_phone),
+      callback_time = COALESCE(:callback_time, callback_time),
+      last_activity_date = :last_activity_date
+  WHERE id = :id
+  RETURNING *;
+
+create_message: |
+  INSERT INTO divine_chatbot_messages(id, session_id, role, content, tool_name, llm_provider, guardrail_score, guardrail_passed, latency_ms, created_date)
+  VALUES (:id, :session_id, :role, :content, :tool_name, :llm_provider, :guardrail_score, :guardrail_passed, :latency_ms, :created_date)
+  RETURNING *;
+list_recent_messages: |
+  SELECT * FROM (
+    SELECT * FROM divine_chatbot_messages WHERE session_id = :session_id ORDER BY created_date DESC LIMIT :limit
+  ) recent ORDER BY created_date ASC;
+
+upsert_qualification: |
+  INSERT INTO divine_chatbot_qualification(id, lead_id, budget_min, budget_max, unit_type, timeline_days, intent_signal, temperature, updated_date)
+  VALUES (:id, :lead_id, :budget_min, :budget_max, :unit_type, :timeline_days, :intent_signal, :temperature, :updated_date)
+  RETURNING *;
+
+create_callback_request: |
+  INSERT INTO divine_chatbot_callback_requests(id, lead_id, visitor_name, phone, preferred_time, status, requested_at)
+  VALUES (:id, :lead_id, :visitor_name, :phone, :preferred_time, 'pending', :requested_at)
+  RETURNING *;
+list_callback_requests: |
+  SELECT * FROM divine_chatbot_callback_requests ORDER BY requested_at DESC LIMIT :limit;
+
+search_kb_chunks: |
+  SELECT c.id, c.document_id, c.content, d.title, d.category,
+         1 - (c.embedding <=> (:embedding)::vector) AS similarity
+  FROM divine_chatbot_kb_chunks c
+  JOIN divine_chatbot_kb_documents d ON d.id = c.document_id
+  ORDER BY c.embedding <=> (:embedding)::vector
+  LIMIT :top_k;
+
+create_kb_document: |
+  INSERT INTO divine_chatbot_kb_documents(id, title, category, source_uri, created_date, last_updated_date)
+  VALUES (:id, :title, :category, :source_uri, :created_date, :last_updated_date)
+  RETURNING *;
+create_kb_chunk: |
+  INSERT INTO divine_chatbot_kb_chunks(id, document_id, chunk_index, content, embedding, created_date)
+  VALUES (:id, :document_id, :chunk_index, :content, (:embedding)::vector, :created_date)
+  RETURNING id;

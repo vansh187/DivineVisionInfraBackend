@@ -1,0 +1,405 @@
+import os
+import re
+import json
+import uuid
+import logging
+import ipaddress
+from datetime import datetime, timezone
+
+from Divinepersistence import persistenceChatbot
+from DivineService.llm_gemini import llmGemini, GeminiError
+from DivineService.llm_groq import llmGroq, GroqError
+
+logger = logging.getLogger(__name__)
+
+SYSTEM_INSTRUCTION = (
+    "You are the AI concierge for Divine Vision Infratech, a real-estate developer. "
+    "Answer visitor questions about projects, pricing, RERA, and specs ONLY using the "
+    "search_knowledge_base tool's results - never invent figures or claims from your own "
+    "general knowledge. If the knowledge base has no relevant information, say so plainly "
+    "and offer a callback instead of guessing. Keep replies short, warm, and in the "
+    "visitor's own language/register (Hindi/Hinglish/English as they write). Use "
+    "upsert_crm_lead when the visitor shares their name or phone number. Use "
+    "extract_lead_signals after a few substantive turns to capture budget/timeline signals."
+)
+
+SAFE_FALLBACK_REPLY = "I don't want to guess on that — let me get you an exact answer from our team. Would you like a callback?"
+DEGRADED_FALLBACK_REPLY = "Sorry, I'm having a little trouble right now. Could you try again in a moment, or would you like our team to call you back?"
+
+MAX_TOOL_ROUNDS = 3
+HISTORY_TURN_LIMIT = 20
+GUARDRAIL_THRESHOLD = float(os.getenv("CHATBOT_GUARDRAIL_THRESHOLD", "0.5"))
+
+TOOL_SCHEMAS = [
+    {
+        "name": "search_knowledge_base",
+        "description": "Search the project knowledge base (pricing, RERA, specs, location) for information relevant to the visitor's question.",
+        "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "search query"}}, "required": ["query"]},
+    },
+    {
+        "name": "upsert_crm_lead",
+        "description": "Save or update the visitor's name and/or phone number on their lead record.",
+        "parameters": {"type": "object", "properties": {
+            "name": {"type": "string", "description": "visitor's name, if known"},
+            "phone": {"type": "string", "description": "visitor's phone number, if known"},
+        }, "required": []},
+    },
+    {
+        "name": "extract_lead_signals",
+        "description": "Extract budget, unit type, timeline, and intent signals from the conversation so far.",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+]
+
+
+def valid_phone(raw: str) -> bool:
+    digits = re.sub(r"\D", "", raw or "")
+    if len(digits) == 12 and digits.startswith("91"):
+        digits = digits[2:]
+    return len(digits) == 10 and digits[0] in "6789"
+
+
+def normalize_phone(raw: str) -> str:
+    digits = re.sub(r"\D", "", raw or "")
+    if len(digits) == 12 and digits.startswith("91"):
+        digits = digits[2:]
+    return digits
+
+
+class serviceChatbot:
+    def __init__(self, persistence: persistenceChatbot = None, gemini: llmGemini = None, groq: llmGroq = None):
+        self._persistence = persistence or persistenceChatbot()
+        self._gemini = gemini or llmGemini()
+        self._groq = groq or llmGroq()
+
+    # ---- Session init ---------------------------------------------------
+    def init_session(self, referrer: str = None, utm_source: str = None, utm_medium: str = None,
+                      utm_campaign: str = None, device_type: str = None, ip_address: str = None):
+        lead = self._persistence.create_lead(id=str(uuid.uuid4()))
+        self._persistence.create_lead_source(
+            id=str(uuid.uuid4()), lead_id=lead.id, ip_address=self._safe_ip(ip_address),
+            referrer=referrer, utm_source=utm_source, utm_medium=utm_medium,
+            utm_campaign=utm_campaign, device_type=device_type,
+        )
+        session = self._persistence.create_session(id=str(uuid.uuid4()), lead_id=lead.id)
+        return {"session_id": session.id, "lead_id": lead.id}
+
+    # ---- Main entry point -------------------------------------------------
+    def handle_message(self, session_id: str, text: str = None, audio_bytes: bytes = None,
+                        intent: str = None, precise_lat: float = None, precise_long: float = None):
+        session = self._persistence.get_session_by_id(session_id)
+        if not session:
+            raise ValueError("session_not_found")
+        try:
+            self._persistence.touch_session(session_id)
+        except Exception as e:
+            # Best-effort activity timestamp - must never block the actual conversation turn.
+            logger.warning("touch_session_failed: %s", e)
+
+        if precise_lat is not None and precise_long is not None:
+            try:
+                maps_link = f"https://maps.google.com/?q={precise_lat},{precise_long}"
+                self._persistence.update_lead_source_location(session.lead_id, precise_lat, precise_long, maps_link)
+            except Exception as e:
+                # Best-effort: losing precise geo must never block the visitor's actual message.
+                logger.warning("update_lead_source_location_failed: %s", e)
+
+        if audio_bytes:
+            try:
+                text = self._groq.transcribe(audio_bytes)
+            except GroqError:
+                return {"session_id": session_id, "reply": None, "error": "stt_failed"}
+
+        text = (text or "").strip()
+
+        if intent == "request_callback" and not session.callback_state:
+            session = self._persistence.update_session_callback_state(session_id, "awaiting_name")
+            reply = "Sure! May I know your name?"
+            self._persist_turn(session_id, "user", "[intent:request_callback]")
+            self._persist_turn(session_id, "assistant", reply)
+            return {"session_id": session_id, "reply": reply}
+
+        if session.callback_state:
+            return self._advance_callback_flow(session, text)
+
+        if not text:
+            return {"session_id": session_id, "reply": "Sorry, I didn't catch that — could you type your question?"}
+
+        self._persist_turn(session_id, "user", text)
+        result = self._run_agent_loop(session, text)
+        self._persist_turn(
+            session_id, "assistant", result["reply"], llm_provider=result.get("llm_provider"),
+            guardrail_score=result.get("guardrail_score"), guardrail_passed=result.get("guardrail_passed"),
+        )
+        return {"session_id": session_id, "reply": result["reply"], "llm_provider": result.get("llm_provider"),
+                "guardrail_passed": result.get("guardrail_passed")}
+
+    # ---- Callback state machine (deterministic, no LLM) --------------------
+    def _advance_callback_flow(self, session, text: str):
+        session_id = session.id
+        state = session.callback_state
+
+        if state == "complete":
+            # Callback flow already finished on a prior turn - clear the state and hand this
+            # message to the normal agent loop instead, which will persist it itself. Persisting
+            # it here too (before the recursive call below) would double-write the same user turn.
+            self._persistence.update_session_callback_state(session_id, None)
+            return self.handle_message(session_id, text=text)
+
+        self._persist_turn(session_id, "user", text)
+
+        if state == "awaiting_name":
+            if not text:
+                reply = "Could you share your name?"
+                self._persist_turn(session_id, "assistant", reply)
+                return {"session_id": session_id, "reply": reply}
+            self._persistence.update_session_callback_state(session_id, "awaiting_phone", callback_name=text)
+            reply = "And your phone number?"
+            self._persist_turn(session_id, "assistant", reply)
+            return {"session_id": session_id, "reply": reply}
+
+        if state == "awaiting_phone":
+            if not valid_phone(text):
+                reply = "Could you share a valid 10-digit number?"
+                self._persist_turn(session_id, "assistant", reply)
+                return {"session_id": session_id, "reply": reply}
+            self._persistence.update_session_callback_state(session_id, "awaiting_time", callback_phone=normalize_phone(text))
+            reply = "What time works best for you? Morning, afternoon, or evening?"
+            self._persist_turn(session_id, "assistant", reply)
+            return {"session_id": session_id, "reply": reply}
+
+        if state == "awaiting_time":
+            if not text:
+                reply = "What time works best — morning, afternoon, or evening?"
+                self._persist_turn(session_id, "assistant", reply)
+                return {"session_id": session_id, "reply": reply}
+            updated = self._persistence.update_session_callback_state(session_id, "complete", callback_time=text)
+
+            self._persistence.create_callback_request(
+                id=str(uuid.uuid4()), lead_id=session.lead_id,
+                visitor_name=updated.callback_name, phone=updated.callback_phone, preferred_time=updated.callback_time,
+            )
+            self._persistence.update_lead_fields(session.lead_id, visitor_name=updated.callback_name, visitor_phone=updated.callback_phone)
+
+            reply = (f"Got it, {updated.callback_name}! We'll call you at {updated.callback_phone} around "
+                     f"{updated.callback_time}. Our team will be in touch shortly.")
+            self._persist_turn(session_id, "assistant", reply)
+            return {
+                "session_id": session_id, "reply": reply,
+                "callback_confirmed": {"name": updated.callback_name, "phone": updated.callback_phone, "preferred_time": updated.callback_time},
+            }
+
+        # Unreachable in practice - callback_state is DB-constrained to the four known
+        # values and "complete" is handled above before any persistence happens.
+        return {"session_id": session_id, "reply": DEGRADED_FALLBACK_REPLY}
+
+    # ---- Agent loop (Gemini primary, Groq fallback) -------------------------
+    def _run_agent_loop(self, session, latest_text: str):
+        history = self._load_gemini_history(session.id)
+        history.append({"role": "user", "text": latest_text})
+
+        provider = "gemini"
+        retrieved_chunks = []
+        used_kb = False
+
+        for round_index in range(MAX_TOOL_ROUNDS):
+            allow_tools = round_index < MAX_TOOL_ROUNDS - 1
+            tools = TOOL_SCHEMAS if allow_tools else None
+
+            if provider == "gemini":
+                try:
+                    step = self._gemini.generate(SYSTEM_INSTRUCTION, history, tools=tools)
+                except GeminiError:
+                    # Gemini can fail on ANY round (observed in practice: transient 503s / slow
+                    # responses under load), not just the first - so the fallback must be able to
+                    # trigger mid-loop too, converting whatever history has accumulated so far.
+                    provider = "groq"
+                    history = self._gemini_history_to_groq(history)
+                    try:
+                        step = self._groq.generate(SYSTEM_INSTRUCTION, history, tools=tools)
+                    except GroqError:
+                        return {"reply": DEGRADED_FALLBACK_REPLY, "llm_provider": None}
+            else:
+                try:
+                    step = self._groq.generate(SYSTEM_INSTRUCTION, history, tools=tools)
+                except GroqError:
+                    return {"reply": DEGRADED_FALLBACK_REPLY, "llm_provider": provider}
+
+            if step["function_call"]:
+                name = step["function_call"]["name"]
+                args = step["function_call"]["args"]
+                tool_result = self._execute_tool(session, name, args)
+                if name == "search_knowledge_base":
+                    used_kb = True
+                    retrieved_chunks = tool_result.get("chunks", [])
+
+                if provider == "gemini":
+                    history.append({"role": "model", "function_call": {
+                        "name": name, "args": args, "thought_signature": step["function_call"].get("thought_signature"),
+                    }})
+                    history.append({"role": "tool", "function_response": {"name": name, "response": tool_result}})
+                else:
+                    # A plain round_index-based id could collide with ids already assigned
+                    # during _gemini_history_to_groq's conversion (it also numbers from 0) if
+                    # the fallback happened mid-loop - a random suffix guarantees uniqueness
+                    # within the conversation regardless of when the switch occurred.
+                    call_id = f"call_{round_index}_{uuid.uuid4().hex[:8]}"
+                    history.append({"role": "assistant", "content": None,
+                                     "tool_calls": [{"id": call_id, "type": "function", "function": {"name": name, "arguments": json.dumps(args)}}]})
+                    history.append({"role": "tool", "tool_call_id": call_id, "name": name, "content": json.dumps(tool_result)})
+                continue
+
+            draft_reply = step["text"] or SAFE_FALLBACK_REPLY
+            if not used_kb:
+                return {"reply": draft_reply, "llm_provider": provider}
+
+            return self._apply_guardrail(draft_reply, retrieved_chunks, provider)
+
+        return {"reply": DEGRADED_FALLBACK_REPLY, "llm_provider": provider}
+
+    def _apply_guardrail(self, draft_reply: str, retrieved_chunks: list, provider: str):
+        try:
+            score = self._groq.judge(draft_reply, [c["content"] for c in retrieved_chunks])
+        except Exception as e:
+            # Fails closed on ANY failure here (transport, or malformed chunk data) - never
+            # send an unverified draft just because the judge call itself broke.
+            if not isinstance(e, GroqError):
+                logger.warning("guardrail_check_failed: %s", e)
+            return {"reply": SAFE_FALLBACK_REPLY, "llm_provider": provider, "guardrail_score": None, "guardrail_passed": False}
+        passed = score >= GUARDRAIL_THRESHOLD
+        return {
+            "reply": draft_reply if passed else SAFE_FALLBACK_REPLY,
+            "llm_provider": provider, "guardrail_score": score, "guardrail_passed": passed,
+        }
+
+    # ---- Tool execution -----------------------------------------------------
+    def _execute_tool(self, session, name: str, args: dict) -> dict:
+        try:
+            if name == "search_knowledge_base":
+                return self._tool_search_knowledge_base(args.get("query", ""))
+            if name == "upsert_crm_lead":
+                return self._tool_upsert_crm_lead(session, args.get("name"), args.get("phone"))
+            if name == "extract_lead_signals":
+                return self._tool_extract_lead_signals(session)
+        except Exception as e:
+            logger.warning("chatbot_tool_failed: %s %s", name, e)
+            return {"error": "tool_failed"}
+        return {"error": "unknown_tool"}
+
+    def _tool_search_knowledge_base(self, query: str) -> dict:
+        if not query.strip():
+            return {"chunks": [], "sources": []}
+        try:
+            embedding = self._gemini.embed(query)
+        except GeminiError:
+            return {"chunks": [], "sources": []}
+        rows = self._persistence.search_kb_chunks(embedding, top_k=5)
+        chunks = [{"content": r.content, "similarity": float(r.similarity)} for r in rows if r.similarity and r.similarity > 0.3]
+        sources = [r.title for r in rows if r.similarity and r.similarity > 0.3]
+        return {"chunks": chunks, "sources": sources}
+
+    def _tool_upsert_crm_lead(self, session, name: str, phone: str) -> dict:
+        if phone and not valid_phone(phone):
+            return {"error": "invalid_phone"}
+        self._persistence.update_lead_fields(
+            session.lead_id, visitor_name=name, visitor_phone=normalize_phone(phone) if phone else None,
+        )
+        return {"lead_id": session.lead_id}
+
+    def _tool_extract_lead_signals(self, session) -> dict:
+        recent = self._persistence.list_recent_messages(session.id, limit=HISTORY_TURN_LIMIT)
+        transcript = "\n".join(f"{m.role}: {m.content}" for m in recent if m.content)
+        if not transcript.strip():
+            return {}
+        try:
+            data = self._groq.generate_json(
+                system_instruction=(
+                    "Extract lead qualification signals from this real-estate chat transcript. "
+                    "Return ONLY JSON: {\"budget_min\": number|null, \"budget_max\": number|null, "
+                    "\"unit_type\": string|null, \"timeline_days\": number|null, \"intent_signal\": string|null, "
+                    "\"temperature\": \"hot\"|\"warm\"|\"cold\"}"
+                ),
+                user_content=transcript,
+            )
+        except GroqError:
+            return {}
+        self._persistence.upsert_qualification(
+            id=str(uuid.uuid4()), lead_id=session.lead_id,
+            budget_min=data.get("budget_min"), budget_max=data.get("budget_max"),
+            unit_type=data.get("unit_type"), timeline_days=data.get("timeline_days"),
+            intent_signal=data.get("intent_signal"), temperature=data.get("temperature"),
+        )
+        if data.get("temperature"):
+            self._persistence.update_lead_fields(session.lead_id, lead_temperature=data["temperature"])
+        return data
+
+    # ---- Callback requests (broker-facing) -----------------------------
+    def list_callback_requests(self, limit: int = 100):
+        return self._persistence.list_callback_requests(limit=limit)
+
+    def _safe_ip(self, raw: str):
+        # Postgres's `inet` column rejects anything that isn't a valid IP outright (a lone
+        # malformed X-Forwarded-For entry, or a proxy/test client that isn't a real address,
+        # would otherwise crash session creation - the single highest-value moment to capture
+        # a lead). Store NULL instead of failing the whole request when the value is unusable.
+        if not raw:
+            return None
+        try:
+            ipaddress.ip_address(raw)
+            return raw
+        except ValueError:
+            return None
+
+    # ---- Helpers -------------------------------------------------------
+    def _persist_turn(self, session_id: str, role: str, content: str, tool_name: str = None,
+                       llm_provider: str = None, guardrail_score: float = None, guardrail_passed: bool = None):
+        # Best-effort: a transcript-logging failure must never discard an otherwise-successful
+        # reply that's already been computed (and for the pre-agent-loop user-turn write, must
+        # never block the turn from proceeding either - conversation history is a convenience
+        # for future context, not a precondition for answering this message).
+        try:
+            self._persistence.create_message(
+                id=str(uuid.uuid4()), session_id=session_id, role=role, content=content or "",
+                tool_name=tool_name, llm_provider=llm_provider, guardrail_score=guardrail_score, guardrail_passed=guardrail_passed,
+            )
+        except Exception as e:
+            logger.warning("persist_turn_failed: %s", e)
+
+    def _load_gemini_history(self, session_id: str) -> list:
+        try:
+            rows = self._persistence.list_recent_messages(session_id, limit=HISTORY_TURN_LIMIT)
+        except Exception as e:
+            # Losing prior context is degraded, not fatal - the visitor's current message still
+            # deserves an attempt at an answer, just without conversation memory this turn.
+            logger.warning("load_history_failed: %s", e)
+            return []
+        history = []
+        for row in rows:
+            if row.role == "user":
+                history.append({"role": "user", "text": row.content})
+            elif row.role == "assistant":
+                history.append({"role": "model", "text": row.content})
+        return history
+
+    def _gemini_history_to_groq(self, gemini_history: list) -> list:
+        """Converts accumulated Gemini-shaped turns (including function_call/function_response
+        entries from mid-loop tool rounds) into OpenAI-shaped messages Groq expects, so a
+        Gemini failure partway through a tool-calling round can still hand off to Groq instead
+        of losing everything gathered so far."""
+        converted = []
+        last_call_id = None
+        for m in gemini_history:
+            if m["role"] == "user" and "text" in m:
+                converted.append({"role": "user", "content": m["text"]})
+            elif m["role"] == "model" and "text" in m:
+                converted.append({"role": "assistant", "content": m["text"]})
+            elif m["role"] == "model" and "function_call" in m:
+                last_call_id = f"call_{uuid.uuid4().hex[:8]}"
+                fc = m["function_call"]
+                converted.append({"role": "assistant", "content": None,
+                                   "tool_calls": [{"id": last_call_id, "type": "function",
+                                                    "function": {"name": fc["name"], "arguments": json.dumps(fc["args"])}}]})
+            elif m["role"] == "tool" and "function_response" in m:
+                fr = m["function_response"]
+                converted.append({"role": "tool", "tool_call_id": last_call_id, "name": fr["name"], "content": json.dumps(fr["response"])})
+        return converted

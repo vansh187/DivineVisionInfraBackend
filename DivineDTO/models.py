@@ -205,3 +205,50 @@ class BrokerCommissionListResponseDTO(BaseModel):
     success: bool
     commissions: List[BrokerCommissionOutDTO]
     summary: BrokerCommissionSummaryDTO
+
+
+class SessionInitRequestDTO(BaseModel):
+    referrer: Optional[str] = Field(None, max_length=2000)
+    utm_source: Optional[str] = Field(None, max_length=120)
+    utm_medium: Optional[str] = Field(None, max_length=120)
+    utm_campaign: Optional[str] = Field(None, max_length=120)
+    device_type: Optional[str] = Field(None, max_length=40)
+
+
+class SessionInitResponseDTO(BaseModel):
+    session_id: str
+    lead_id: str
+
+
+class ChatMessageRequestDTO(BaseModel):
+    session_id: str
+    text: Optional[str] = Field(None, max_length=4000)
+    audio_b64: Optional[str] = Field(None, description="Base64-encoded audio for voice input")
+    intent: Optional[str] = Field(None, description="e.g. 'request_callback'")
+    precise_lat: Optional[float] = None
+    precise_long: Optional[float] = None
+
+
+class CallbackConfirmedDTO(BaseModel):
+    name: str
+    phone: str
+    preferred_time: str
+
+
+class ChatMessageResponseDTO(BaseModel):
+    session_id: str
+    reply: str
+    callback_confirmed: Optional[CallbackConfirmedDTO] = None
+    guardrail_passed: Optional[bool] = None
+    llm_provider: Optional[str] = None
+
+
+class CallbackRequestOutDTO(BaseModel):
+    id: str
+    lead_id: str
+    visitor_name: str
+    phone: str
+    preferred_time: str
+    status: str
+    requested_at: Optional[datetime]
+    actioned_at: Optional[datetime]
