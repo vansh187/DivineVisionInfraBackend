@@ -39,7 +39,11 @@ class llmGroq:
         # not crash the request. Callers only ever need to handle GroqError.
         try:
             chat_messages = [{"role": "system", "content": system_instruction}] + messages
-            kwargs = {"model": CHAT_MODEL, "messages": chat_messages, "timeout": self._timeout}
+            # openai/gpt-oss-120b is a reasoning model - without reasoning_format="hidden", its
+            # chain-of-thought can bleed into `content` instead of staying in the separate
+            # `.reasoning` field (observed in production: raw internal deliberation text got
+            # sent to a visitor). "hidden" guarantees `content` is the final answer only.
+            kwargs = {"model": CHAT_MODEL, "messages": chat_messages, "timeout": self._timeout, "reasoning_format": "hidden"}
             if tools:
                 kwargs["tools"] = self._to_openai_tools(tools)
                 kwargs["tool_choice"] = "auto"
@@ -76,6 +80,7 @@ class llmGroq:
                 model=CHAT_MODEL,
                 messages=[{"role": "system", "content": system_instruction}, {"role": "user", "content": user_content}],
                 response_format={"type": "json_object"},
+                reasoning_format="hidden",
                 timeout=self._timeout,
             )
             return json.loads(resp.choices[0].message.content)
@@ -99,6 +104,7 @@ class llmGroq:
                     {"role": "user", "content": f"CONTEXT:\n{context_text}\n\nANSWER:\n{answer}"},
                 ],
                 response_format={"type": "json_object"},
+                reasoning_format="hidden",
                 timeout=self._timeout,
             )
             data = json.loads(resp.choices[0].message.content)

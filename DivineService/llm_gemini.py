@@ -62,7 +62,14 @@ class llmGemini:
                 else:
                     contents.append(types.Content(role=m["role"], parts=[types.Part(text=m["text"])]))
 
-            config_kwargs = {"system_instruction": system_instruction}
+            # A low thinking level keeps this fast (thinking otherwise adds latency that was
+            # already tight against the SDK's 10s timeout floor) and more stable - at default
+            # thinking, this model was observed returning an empty text part with only a
+            # thought_signature and finish_reason=MALFORMED_FUNCTION_CALL on some turns.
+            config_kwargs = {
+                "system_instruction": system_instruction,
+                "thinking_config": types.ThinkingConfig(thinking_level="low", include_thoughts=False),
+            }
             if tools:
                 declarations = [
                     types.FunctionDeclaration(name=t["name"], description=t["description"], parameters=_to_schema(t["parameters"]))
