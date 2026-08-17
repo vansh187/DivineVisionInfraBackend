@@ -52,6 +52,22 @@ TOOL_SCHEMAS = [
 ]
 
 
+def looks_degenerate(text: str) -> bool:
+    # Reasoning models occasionally degenerate into repetitive punctuation/filler ("...",
+    # "**", em-dashes) on low-information turns (observed in production on a plain "ok"
+    # reply) instead of raising a clean error - nothing in the API contract flags this, so
+    # it has to be caught by inspecting the text itself before it ever reaches a visitor.
+    # Word tokens with no Latin or Devanagari alphanumeric character count as "junk"; a
+    # short reply naturally has a few (an emoji, a dash) but a degenerate one is mostly junk.
+    if not text:
+        return False
+    words = text.split()
+    if len(words) < 8:
+        return False
+    junk = sum(1 for w in words if not re.search(r"[A-Za-z0-9ऀ-ॿ]", w))
+    return (junk / len(words)) > 0.35
+
+
 def valid_phone(raw: str) -> bool:
     digits = re.sub(r"\D", "", raw or "")
     if len(digits) == 12 and digits.startswith("91"):
@@ -247,6 +263,9 @@ class serviceChatbot:
                 continue
 
             draft_reply = step["text"] or SAFE_FALLBACK_REPLY
+            if looks_degenerate(draft_reply):
+                logger.warning("degenerate_reply_detected: provider=%s", provider)
+                return self._final_text_only(provider, latest_text, retrieved_chunks, used_kb)
             if not used_kb:
                 return {"reply": draft_reply, "llm_provider": provider}
 
@@ -267,18 +286,25 @@ class serviceChatbot:
             context_note = f"\n\nRelevant knowledge base info you already looked up:\n{joined}"
         prompt = f"The visitor just said: \"{latest_text}\"{context_note}\n\nReply now, directly, in plain text."
 
-        for attempt_provider in ([provider, "groq"] if provider == "gemini" else ["groq"]):
+        # Try the given provider first, then the other one - a degenerate/garbled reply is
+        # treated the same as a provider failure here: never send it, just try the next option.
+        for attempt_provider in ([provider, "groq"] if provider == "gemini" else ["groq", "gemini"]):
             try:
                 if attempt_provider == "gemini":
                     step = self._gemini.generate(SYSTEM_INSTRUCTION, [{"role": "user", "text": prompt}])
                 else:
                     step = self._groq.generate(SYSTEM_INSTRUCTION, [{"role": "user", "content": prompt}])
                 draft_reply = step["text"] or SAFE_FALLBACK_REPLY
+                if looks_degenerate(draft_reply):
+                    logger.warning("degenerate_reply_detected: provider=%s (final_text_only)", attempt_provider)
+                    continue
                 if not used_kb:
                     return {"reply": draft_reply, "llm_provider": attempt_provider}
                 return self._apply_guardrail(draft_reply, retrieved_chunks, attempt_provider)
             except (GeminiError, GroqError):
                 continue
+
+        return {"reply": SAFE_FALLBACK_REPLY if used_kb else DEGRADED_FALLBACK_REPLY, "llm_provider": None}
 
         return {"reply": DEGRADED_FALLBACK_REPLY, "llm_provider": None}
 
