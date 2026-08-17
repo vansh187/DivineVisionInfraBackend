@@ -21,7 +21,11 @@ class llmGroq:
         if not api_key:
             raise RuntimeError("GROQ_API_KEY environment variable must be set")
         self._client = Groq(api_key=api_key)
-        self._timeout = float(os.getenv("GROQ_TIMEOUT_SECONDS", "6"))
+        # openai/gpt-oss-120b is a reasoning model - even with reasoning_format="hidden" it
+        # still spends real wall-clock time thinking before the hidden reasoning is stripped,
+        # so 6s was too tight once a turn chains more than one Groq call (a tool round plus a
+        # second round for the final answer, or the guardrail judge call on top of that).
+        self._timeout = float(os.getenv("GROQ_TIMEOUT_SECONDS", "15"))
 
     def _to_openai_tools(self, tools: list) -> list:
         return [
@@ -39,7 +43,11 @@ class llmGroq:
         # not crash the request. Callers only ever need to handle GroqError.
         try:
             chat_messages = [{"role": "system", "content": system_instruction}] + messages
-            kwargs = {"model": CHAT_MODEL, "messages": chat_messages, "timeout": self._timeout}
+            # openai/gpt-oss-120b is a reasoning model - without reasoning_format="hidden", its
+            # chain-of-thought can bleed into `content` instead of staying in the separate
+            # `.reasoning` field (observed in production: raw internal deliberation text got
+            # sent to a visitor). "hidden" guarantees `content` is the final answer only.
+            kwargs = {"model": CHAT_MODEL, "messages": chat_messages, "timeout": self._timeout, "reasoning_format": "hidden"}
             if tools:
                 kwargs["tools"] = self._to_openai_tools(tools)
                 kwargs["tool_choice"] = "auto"
@@ -76,6 +84,7 @@ class llmGroq:
                 model=CHAT_MODEL,
                 messages=[{"role": "system", "content": system_instruction}, {"role": "user", "content": user_content}],
                 response_format={"type": "json_object"},
+                reasoning_format="hidden",
                 timeout=self._timeout,
             )
             return json.loads(resp.choices[0].message.content)
@@ -99,6 +108,7 @@ class llmGroq:
                     {"role": "user", "content": f"CONTEXT:\n{context_text}\n\nANSWER:\n{answer}"},
                 ],
                 response_format={"type": "json_object"},
+                reasoning_format="hidden",
                 timeout=self._timeout,
             )
             data = json.loads(resp.choices[0].message.content)

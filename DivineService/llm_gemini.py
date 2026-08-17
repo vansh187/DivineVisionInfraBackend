@@ -1,4 +1,5 @@
 import os
+import time
 import logging
 from google import genai
 from google.genai import types
@@ -11,9 +12,20 @@ GENERATE_MODEL = "gemini-3.6-flash"
 EMBED_MODEL = "gemini-embedding-001"
 EMBED_DIMENSIONS = 768
 
+# Once a 429/quota error is seen, skip Gemini entirely for this long rather than paying a
+# full connect+read round-trip (which, for a genuinely exhausted daily quota, fails on every
+# single turn) before falling back to Groq. Short enough that a quota reset or a transient
+# rate-limit clears within a couple of turns; long enough to actually save the wasted calls.
+QUOTA_COOLDOWN_SECONDS = 120
+
 
 class GeminiError(Exception):
     """Raised on any Gemini transport/API failure - callers fall back to Groq on this."""
+
+
+def _looks_like_quota_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return "resource_exhausted" in text or "429" in text or "quota" in text
 
 
 def _to_schema(json_schema: dict) -> types.Schema:
@@ -32,6 +44,11 @@ class llmGemini:
         # The Gemini SDK rejects a deadline shorter than 10s outright, so the floor is enforced here.
         timeout_ms = int(max(10.0, float(os.getenv("GEMINI_TIMEOUT_SECONDS", "10"))) * 1000)
         self._client = genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=timeout_ms))
+        self._quota_cooldown_until = 0.0
+
+    def _raise_if_in_cooldown(self):
+        if time.time() < self._quota_cooldown_until:
+            raise GeminiError("gemini_quota_cooldown_active")
 
     def generate(self, system_instruction: str, messages: list, tools: list = None):
         """
@@ -40,6 +57,7 @@ class llmGemini:
         tools: list of {"name", "description", "parameters": <json-schema dict>}
         Returns {"text": str|None, "function_call": {"name": str, "args": dict}|None}
         """
+        self._raise_if_in_cooldown()
         # The whole method - request building, the API call, and response parsing - is one
         # try/except: a malformed response shape (e.g. `.text` raising on a mixed-part
         # candidate, a known google-genai quirk) must trigger the same Gemini->Groq fallback
@@ -62,7 +80,14 @@ class llmGemini:
                 else:
                     contents.append(types.Content(role=m["role"], parts=[types.Part(text=m["text"])]))
 
-            config_kwargs = {"system_instruction": system_instruction}
+            # A low thinking level keeps this fast (thinking otherwise adds latency that was
+            # already tight against the SDK's 10s timeout floor) and more stable - at default
+            # thinking, this model was observed returning an empty text part with only a
+            # thought_signature and finish_reason=MALFORMED_FUNCTION_CALL on some turns.
+            config_kwargs = {
+                "system_instruction": system_instruction,
+                "thinking_config": types.ThinkingConfig(thinking_level="low", include_thoughts=False),
+            }
             if tools:
                 declarations = [
                     types.FunctionDeclaration(name=t["name"], description=t["description"], parameters=_to_schema(t["parameters"]))
@@ -86,10 +111,13 @@ class llmGemini:
                     }}
             return {"text": response.text or "", "function_call": None}
         except Exception as e:
+            if _looks_like_quota_error(e):
+                self._quota_cooldown_until = time.time() + QUOTA_COOLDOWN_SECONDS
             logger.warning("gemini_generate_failed: %s", e)
             raise GeminiError(str(e)) from e
 
     def embed(self, text: str) -> list:
+        self._raise_if_in_cooldown()
         try:
             result = self._client.models.embed_content(
                 model=EMBED_MODEL, contents=text,
@@ -97,5 +125,7 @@ class llmGemini:
             )
             return list(result.embeddings[0].values)
         except Exception as e:
+            if _looks_like_quota_error(e):
+                self._quota_cooldown_until = time.time() + QUOTA_COOLDOWN_SECONDS
             logger.warning("gemini_embed_failed: %s", e)
             raise GeminiError(str(e)) from e
