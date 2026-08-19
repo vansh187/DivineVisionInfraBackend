@@ -101,6 +101,56 @@ def upload_pan_photo(
         raise HTTPException(status_code=500, detail="internal_error")
 
 
+@router.post("/project-booking-application", response_model=DocumentOutDTO)
+def upload_project_booking_application(
+    file: UploadFile = File(...),
+    document_type: str = Form(...),
+    project_id: str = Form(...),
+    payment_id: str = Form(...),
+    razorpay_order_id: str = Form(None),
+    razorpay_payment_id: str = Form(None),
+    form_data: str = Form(None),
+    current_user: dict = Depends(get_current_user),
+):
+    # Plain def, not async def: this does blocking network calls (Supabase Storage upload +
+    # sign, plus a DB round-trip for the payment lookup). See upload_aadhaar_photo above -
+    # FastAPI threadpools sync routes automatically, so this doesn't block the event loop.
+    try:
+        file_bytes = file.file.read()
+        doc, signed_url, expires_in = _doc_service.upload_booking_application(
+            file_bytes,
+            file.content_type,
+            document_type,
+            project_id,
+            payment_id,
+            razorpay_order_id,
+            razorpay_payment_id,
+            form_data,
+            owner_id=current_user["sub"],
+            owner_role=current_user["role"],
+        )
+        return DocumentOutDTO(
+            id=doc.id,
+            owner_id=doc.owner_id,
+            owner_role=doc.owner_role,
+            document_type=doc.document_type,
+            status=doc.status,
+            created_date=doc.created_date,
+            signed_url=signed_url,
+            signed_url_expires_in=expires_in,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="forbidden")
+    except IntegrityError:
+        raise HTTPException(status_code=409, detail="conflict")
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    except Exception:
+        raise HTTPException(status_code=500, detail="internal_error")
+
+
 @router.get("/{document_id}", response_model=DocumentOutDTO)
 def get_document(document_id: str, current_user: dict = Depends(get_current_user)):
     try:

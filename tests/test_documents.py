@@ -352,3 +352,73 @@ def test_upload_pan_photo_returns_502_when_storage_not_configured(mock_upload):
     )
     assert r.status_code == 502
     assert r.json()["detail"] == "storage_not_configured"
+
+
+# ---------- POST /documents/project-booking-application ----------
+
+_FAKE_PDF_BYTES = b"%PDF-1.4\n%fake booking application\n%%EOF"
+
+
+def _booking_form_data(**overrides):
+    data = {
+        "document_type": "project_booking_application",
+        "project_id": "ops-divine-greens",
+        "payment_id": "pay_record_123",
+        "razorpay_order_id": "order_Rzp123",
+        "razorpay_payment_id": "pay_Rzp456",
+        "form_data": '{"projectId":"ops-divine-greens","applicantName":"Jane","termsAccepted":"Yes"}',
+    }
+    data.update(overrides)
+    return data
+
+
+def test_upload_booking_application_requires_auth():
+    r = client.post(
+        "/documents/project-booking-application",
+        files={"file": ("booking.pdf", _FAKE_PDF_BYTES, "application/pdf")},
+        data=_booking_form_data(),
+    )
+    assert r.status_code == 401
+
+
+def test_upload_booking_application_rejects_empty_file():
+    r = client.post(
+        "/documents/project-booking-application",
+        files={"file": ("booking.pdf", b"", "application/pdf")},
+        data=_booking_form_data(),
+        headers=_auth_headers(),
+    )
+    assert r.status_code == 400
+    assert r.json()["detail"] == "empty_file"
+
+
+def test_upload_booking_application_rejects_non_pdf_bytes():
+    r = client.post(
+        "/documents/project-booking-application",
+        files={"file": ("booking.pdf", b"not actually a pdf", "application/pdf")},
+        data=_booking_form_data(),
+        headers=_auth_headers(),
+    )
+    assert r.status_code == 400
+    assert r.json()["detail"] == "unsupported_file_type"
+
+
+def test_upload_booking_application_missing_project_id_is_422():
+    r = client.post(
+        "/documents/project-booking-application",
+        files={"file": ("booking.pdf", _FAKE_PDF_BYTES, "application/pdf")},
+        data={k: v for k, v in _booking_form_data().items() if k != "project_id"},
+        headers=_auth_headers(),
+    )
+    assert r.status_code == 422
+
+
+def test_upload_booking_application_rejects_payment_not_found():
+    r = client.post(
+        "/documents/project-booking-application",
+        files={"file": ("booking.pdf", _FAKE_PDF_BYTES, "application/pdf")},
+        data=_booking_form_data(payment_id="does-not-exist"),
+        headers=_auth_headers(),
+    )
+    assert r.status_code == 400
+    assert r.json()["detail"] == "payment_not_found"

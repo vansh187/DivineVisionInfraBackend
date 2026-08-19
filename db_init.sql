@@ -37,11 +37,17 @@ CREATE TABLE IF NOT EXISTS divine_documents (
   form_data jsonb NOT NULL,
   storage_path text NOT NULL,
   status varchar(20) NOT NULL DEFAULT 'generated',
+  storage_bucket varchar(100),
+  project_id varchar(100),
+  payment_id varchar(36),
+  razorpay_order_id varchar(64),
+  razorpay_payment_id varchar(64),
   created_date timestamptz DEFAULT now(),
   last_updated_date timestamptz DEFAULT now()
 );
 
 CREATE INDEX IF NOT EXISTS idx_divine_documents_owner_id ON divine_documents (owner_id);
+CREATE INDEX IF NOT EXISTS idx_divine_documents_payment_id ON divine_documents (payment_id);
 
 CREATE TABLE IF NOT EXISTS divine_kyc_verifications (
   id varchar(36) PRIMARY KEY,

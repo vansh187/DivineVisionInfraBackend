@@ -1,4 +1,5 @@
 import io
+import json
 import os
 import re
 import uuid
@@ -7,15 +8,22 @@ import numpy as np
 import requests
 from fpdf import FPDF
 from fpdf.enums import XPos, YPos
-from Divinepersistence import persistenceDocument
+from Divinepersistence import persistenceDocument, persistencePayment
 from DivineDTO.models import DocumentGenerateRequestDTO
 
 DEFAULT_SIGNED_URL_EXPIRY_SECONDS = 3600
 MAX_PHOTO_UPLOAD_BYTES = 8 * 1024 * 1024  # 8 MB, matches the KYC upload limit
+MAX_BOOKING_APPLICATION_UPLOAD_BYTES = 15 * 1024 * 1024  # 15 MB, generous for a scanned/signed PDF
+MAX_FORM_DATA_FIELDS = 200  # guards against a pathological form_data payload bloating the DB row
 
 _UNSAFE_PATH_CHARS = re.compile(r"[^a-zA-Z0-9_-]+")
 _ALLOWED_PHOTO_TYPES = {"image/jpeg": "jpg", "image/png": "png"}
 _ALLOWED_PHOTO_SIDES = {"front", "back"}
+_ALLOWED_BOOKING_APPLICATION_CONTENT_TYPES = {"application/pdf", "application/octet-stream"}
+_PDF_MAGIC = b"%PDF-"
+_BOOKING_FORMS_BUCKET_ENV = "SUPABASE_BOOKING_FORMS_BUCKET"
+_DEFAULT_BOOKING_FORMS_BUCKET = "Booking_Forms"
+_PAID_PAYMENT_STATUS = "paid"
 
 # document_type this applies to - other document_type values (e.g. the "kyc"
 # placeholder used in older tests) generate without requiring/attaching anything,
@@ -41,11 +49,13 @@ def _pdf_safe_text(value) -> str:
 
 
 class serviceDocument:
-    def __init__(self, persistence: persistenceDocument = None):
+    def __init__(self, persistence: persistenceDocument = None, payment_persistence: persistencePayment = None):
         self._persistence = persistence or persistenceDocument()
+        self._payment_persistence = payment_persistence or persistencePayment()
         self._supabase_url = os.getenv("SUPABASE_URL")
         self._service_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
         self._bucket = os.getenv("SUPABASE_STORAGE_BUCKET", "documents")
+        self._booking_forms_bucket = os.getenv(_BOOKING_FORMS_BUCKET_ENV, _DEFAULT_BOOKING_FORMS_BUCKET)
 
     def _render_pdf(self, document_type: str, form_data: dict, attachments: dict = None) -> bytes:
         pdf = FPDF()
@@ -71,10 +81,10 @@ class serviceDocument:
 
         return bytes(pdf.output())
 
-    def _upload_to_storage(self, object_path: str, file_bytes: bytes, content_type: str = "application/pdf") -> None:
+    def _upload_to_storage(self, object_path: str, file_bytes: bytes, content_type: str = "application/pdf", bucket: str = None) -> None:
         if not self._supabase_url or not self._service_key:
             raise RuntimeError("storage_not_configured")
-        upload_url = f"{self._supabase_url}/storage/v1/object/{self._bucket}/{object_path}"
+        upload_url = f"{self._supabase_url}/storage/v1/object/{bucket or self._bucket}/{object_path}"
         try:
             resp = requests.post(
                 upload_url,
@@ -91,12 +101,12 @@ class serviceDocument:
         if resp.status_code not in (200, 201):
             raise RuntimeError(f"storage_upload_failed:{resp.status_code}")
 
-    def _delete_from_storage(self, object_path: str) -> None:
+    def _delete_from_storage(self, object_path: str, bucket: str = None) -> None:
         """Best-effort cleanup for an uploaded object that never made it into a DB row. Never raises."""
         if not self._supabase_url or not self._service_key:
             return
         try:
-            delete_url = f"{self._supabase_url}/storage/v1/object/{self._bucket}/{object_path}"
+            delete_url = f"{self._supabase_url}/storage/v1/object/{bucket or self._bucket}/{object_path}"
             requests.delete(
                 delete_url,
                 headers={"Authorization": f"Bearer {self._service_key}"},
@@ -105,10 +115,10 @@ class serviceDocument:
         except Exception:
             pass
 
-    def _sign_url(self, object_path: str, expires_in: int = DEFAULT_SIGNED_URL_EXPIRY_SECONDS) -> str:
+    def _sign_url(self, object_path: str, expires_in: int = DEFAULT_SIGNED_URL_EXPIRY_SECONDS, bucket: str = None) -> str:
         if not self._supabase_url or not self._service_key:
             raise RuntimeError("storage_not_configured")
-        sign_url = f"{self._supabase_url}/storage/v1/object/sign/{self._bucket}/{object_path}"
+        sign_url = f"{self._supabase_url}/storage/v1/object/sign/{bucket or self._bucket}/{object_path}"
         try:
             resp = requests.post(
                 sign_url,
@@ -180,6 +190,7 @@ class serviceDocument:
                 form_data=dto.form_data,
                 storage_path=object_path,
                 status="generated",
+                storage_bucket=self._bucket,
             )
         except Exception:
             self._delete_from_storage(object_path)
@@ -224,6 +235,7 @@ class serviceDocument:
                 form_data={"content_type": content_type},
                 storage_path=object_path,
                 status="uploaded",
+                storage_bucket=self._bucket,
             )
         except Exception:
             self._delete_from_storage(object_path)
@@ -240,6 +252,99 @@ class serviceDocument:
     def upload_pan_photo(self, file_bytes: bytes, content_type: str, owner_id: str, owner_role: str):
         return self._upload_photo(file_bytes, content_type, "pan_card", owner_id, owner_role)
 
+    def upload_booking_application(
+        self,
+        file_bytes: bytes,
+        content_type: str,
+        document_type: str,
+        project_id: str,
+        payment_id: str,
+        razorpay_order_id: str,
+        razorpay_payment_id: str,
+        form_data_raw: str,
+        owner_id: str,
+        owner_role: str,
+    ):
+        """Stores a signed booking-application PDF in the Booking_Forms bucket, linked to the
+        payment record that unlocked it. Unlike generate(), the PDF already exists client-side
+        (it's a filled/signed form) - this endpoint only validates, stores, and links it."""
+        if not file_bytes:
+            raise ValueError("empty_file")
+        if len(file_bytes) > MAX_BOOKING_APPLICATION_UPLOAD_BYTES:
+            raise ValueError("file_too_large")
+        if (content_type or "").lower() not in _ALLOWED_BOOKING_APPLICATION_CONTENT_TYPES:
+            raise ValueError("unsupported_file_type")
+        # Content-Type is a client-supplied header, not a guarantee of what the bytes actually
+        # are - confirm the file starts with the PDF magic bytes rather than trusting the header.
+        if not file_bytes.startswith(_PDF_MAGIC):
+            raise ValueError("unsupported_file_type")
+
+        if not document_type or not document_type.strip():
+            raise ValueError("document_type_required")
+        if not project_id or not project_id.strip():
+            raise ValueError("project_id_required")
+        if not payment_id or not payment_id.strip():
+            raise ValueError("payment_id_required")
+
+        try:
+            form_data = json.loads(form_data_raw) if form_data_raw else {}
+        except (TypeError, ValueError):
+            raise ValueError("invalid_form_data")
+        if not isinstance(form_data, dict):
+            raise ValueError("invalid_form_data")
+        if len(form_data) > MAX_FORM_DATA_FIELDS:
+            raise ValueError("form_data_too_large")
+
+        payment = self._payment_persistence.get_by_id(payment_id)
+        if not payment:
+            raise ValueError("payment_not_found")
+        if payment.owner_id != owner_id:
+            raise PermissionError("forbidden")
+        if payment.status != _PAID_PAYMENT_STATUS:
+            raise ValueError("payment_not_completed")
+        # Cross-check the Razorpay identifiers the client sent against what's actually on the
+        # payment record - including when the record has none (e.g. a cash payment, which is
+        # legitimately status="paid" with razorpay_order_id/razorpay_payment_id both NULL).
+        # Requiring an exact match even against None means a client can't attach an unverified,
+        # self-reported order/payment id to a cash payment's document by supplying one while the
+        # record has none - the client-supplied values are never trusted for storage either;
+        # only payment.razorpay_order_id / payment.razorpay_payment_id are persisted below.
+        if razorpay_order_id and razorpay_order_id != payment.razorpay_order_id:
+            raise ValueError("payment_mismatch")
+        if razorpay_payment_id and razorpay_payment_id != payment.razorpay_payment_id:
+            raise ValueError("payment_mismatch")
+
+        document_id = str(uuid.uuid4())
+        safe_type = _safe_path_segment(document_type)
+        object_path = f"{owner_id}/{safe_type}_{document_id}.pdf"
+
+        self._upload_to_storage(object_path, file_bytes, "application/pdf", bucket=self._booking_forms_bucket)
+
+        try:
+            doc = self._persistence.create_document(
+                id=document_id,
+                owner_id=owner_id,
+                owner_role=owner_role,
+                document_type=document_type,
+                form_data=form_data,
+                storage_path=object_path,
+                status="generated",
+                storage_bucket=self._booking_forms_bucket,
+                project_id=project_id,
+                payment_id=payment_id,
+                # Always the payment record's own values, never the client-supplied
+                # razorpay_order_id/razorpay_payment_id params - those were only used above to
+                # verify the caller's claim matches, not as a data source to persist.
+                razorpay_order_id=payment.razorpay_order_id,
+                razorpay_payment_id=payment.razorpay_payment_id,
+            )
+        except Exception:
+            self._delete_from_storage(object_path, bucket=self._booking_forms_bucket)
+            raise
+
+        signed_url = self._sign_url(object_path, bucket=self._booking_forms_bucket)
+        return doc, signed_url, DEFAULT_SIGNED_URL_EXPIRY_SECONDS
+
     def get(self, document_id: str, requester_id: str, requester_role: str = None):
         doc = self._persistence.get_by_id(document_id)
         if not doc:
@@ -250,5 +355,10 @@ class serviceDocument:
         # incidental, in case that ID scheme is ever changed.
         if doc.owner_id != requester_id or (requester_role is not None and doc.owner_role != requester_role):
             raise PermissionError("forbidden")
-        signed_url = self._sign_url(doc.storage_path)
+        # Every row records the bucket it was actually written to at upload time (storage_bucket).
+        # Rows created before that column existed have it NULL - those all predate the
+        # Booking_Forms bucket, so they fall back to the default bucket, not an inference off
+        # some other column that could coincidentally change meaning later.
+        bucket = getattr(doc, "storage_bucket", None) or self._bucket
+        signed_url = self._sign_url(doc.storage_path, bucket=bucket)
         return doc, signed_url, DEFAULT_SIGNED_URL_EXPIRY_SECONDS

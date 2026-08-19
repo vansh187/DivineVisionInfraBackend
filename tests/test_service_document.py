@@ -373,3 +373,238 @@ def test_get_succeeds_when_owner_id_and_role_both_match():
     with patch.object(serviceDocument, "_sign_url", return_value="url"):
         doc, signed_url, expires_in = svc.get("doc1", requester_id="C00001", requester_role="customer")
     assert signed_url == "url"
+
+
+def test_get_signs_against_the_bucket_recorded_on_the_row():
+    svc, persistence = _service()
+    persistence.get_by_id.return_value = MagicMock(
+        owner_id="C00001", owner_role="customer", storage_path="p", storage_bucket="Booking_Forms"
+    )
+    with patch.object(serviceDocument, "_sign_url", return_value="url") as mock_sign:
+        svc.get("doc1", requester_id="C00001", requester_role="customer")
+    assert mock_sign.call_args.kwargs["bucket"] == "Booking_Forms"
+
+
+def test_get_falls_back_to_default_bucket_when_row_has_no_storage_bucket():
+    # Rows created before the storage_bucket column existed (or before a migration backfilled
+    # it) have it NULL - those all predate Booking_Forms, so falling back to the default bucket
+    # is correct, not an inference off some unrelated column.
+    svc, persistence = _service()
+    persistence.get_by_id.return_value = MagicMock(
+        owner_id="C00001", owner_role="customer", storage_path="p", storage_bucket=None
+    )
+    with patch.object(serviceDocument, "_sign_url", return_value="url") as mock_sign:
+        svc.get("doc1", requester_id="C00001", requester_role="customer")
+    assert mock_sign.call_args.kwargs["bucket"] == svc._bucket
+
+
+# ---------- upload_booking_application() ----------
+
+_PDF_BYTES = b"%PDF-1.4\n%fake pdf content\n%%EOF"
+
+
+def _booking_service(payment=None):
+    persistence = MagicMock()
+    payment_persistence = MagicMock()
+    payment_persistence.get_by_id.return_value = payment
+    svc = serviceDocument(persistence, payment_persistence)
+    svc._supabase_url = "https://fake.supabase.co"
+    svc._service_key = "fake-service-key"
+    svc._bucket = "documents"
+    svc._booking_forms_bucket = "Booking_Forms"
+    return svc, persistence, payment_persistence
+
+
+def _paid_payment(**overrides):
+    defaults = dict(
+        id="pay1", owner_id="C00001", status="paid",
+        razorpay_order_id="order_Rzp123", razorpay_payment_id="pay_Rzp456",
+    )
+    defaults.update(overrides)
+    return MagicMock(**defaults)
+
+
+def test_upload_booking_application_rejects_empty_file():
+    svc, _, _ = _booking_service(_paid_payment())
+    try:
+        svc.upload_booking_application(
+            b"", "application/pdf", "project_booking_application", "proj1", "pay1", None, None, "{}",
+            owner_id="C00001", owner_role="customer",
+        )
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert str(e) == "empty_file"
+
+
+def test_upload_booking_application_rejects_non_pdf_bytes():
+    svc, _, _ = _booking_service(_paid_payment())
+    try:
+        svc.upload_booking_application(
+            b"not a pdf", "application/pdf", "project_booking_application", "proj1", "pay1", None, None, "{}",
+            owner_id="C00001", owner_role="customer",
+        )
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert str(e) == "unsupported_file_type"
+
+
+def test_upload_booking_application_rejects_oversized_file():
+    svc, _, _ = _booking_service(_paid_payment())
+    huge = _PDF_BYTES + b"0" * (16 * 1024 * 1024)
+    try:
+        svc.upload_booking_application(
+            huge, "application/pdf", "project_booking_application", "proj1", "pay1", None, None, "{}",
+            owner_id="C00001", owner_role="customer",
+        )
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert str(e) == "file_too_large"
+
+
+def test_upload_booking_application_rejects_invalid_form_data_json():
+    svc, _, _ = _booking_service(_paid_payment())
+    try:
+        svc.upload_booking_application(
+            _PDF_BYTES, "application/pdf", "project_booking_application", "proj1", "pay1", None, None, "{not json",
+            owner_id="C00001", owner_role="customer",
+        )
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert str(e) == "invalid_form_data"
+
+
+def test_upload_booking_application_rejects_missing_payment():
+    svc, _, _ = _booking_service(payment=None)
+    try:
+        svc.upload_booking_application(
+            _PDF_BYTES, "application/pdf", "project_booking_application", "proj1", "pay1", None, None, "{}",
+            owner_id="C00001", owner_role="customer",
+        )
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert str(e) == "payment_not_found"
+
+
+def test_upload_booking_application_rejects_payment_owned_by_someone_else():
+    svc, _, _ = _booking_service(_paid_payment(owner_id="C99999"))
+    try:
+        svc.upload_booking_application(
+            _PDF_BYTES, "application/pdf", "project_booking_application", "proj1", "pay1", None, None, "{}",
+            owner_id="C00001", owner_role="customer",
+        )
+        assert False, "expected PermissionError"
+    except PermissionError as e:
+        assert str(e) == "forbidden"
+
+
+def test_upload_booking_application_rejects_unpaid_payment():
+    svc, _, _ = _booking_service(_paid_payment(status="created"))
+    try:
+        svc.upload_booking_application(
+            _PDF_BYTES, "application/pdf", "project_booking_application", "proj1", "pay1", None, None, "{}",
+            owner_id="C00001", owner_role="customer",
+        )
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert str(e) == "payment_not_completed"
+
+
+def test_upload_booking_application_rejects_mismatched_razorpay_order_id():
+    svc, _, _ = _booking_service(_paid_payment())
+    try:
+        svc.upload_booking_application(
+            _PDF_BYTES, "application/pdf", "project_booking_application", "proj1", "pay1",
+            "order_totally_different", None, "{}",
+            owner_id="C00001", owner_role="customer",
+        )
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert str(e) == "payment_mismatch"
+
+
+def test_upload_booking_application_rejects_client_supplied_razorpay_id_against_cash_payment():
+    # A cash payment is legitimately status="paid" with both razorpay ids NULL (see
+    # service_payment.record_cash_payment). A client sending a self-reported razorpay_order_id
+    # for such a payment must be rejected, not silently accepted and persisted, since nothing
+    # verifies the client's claim against anything real in that case.
+    svc, _, _ = _booking_service(_paid_payment(razorpay_order_id=None, razorpay_payment_id=None))
+    try:
+        svc.upload_booking_application(
+            _PDF_BYTES, "application/pdf", "project_booking_application", "proj1", "pay1",
+            "order_self_reported", None, "{}",
+            owner_id="C00001", owner_role="customer",
+        )
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert str(e) == "payment_mismatch"
+
+
+@patch.object(serviceDocument, "_sign_url", return_value="url")
+@patch.object(serviceDocument, "_upload_to_storage")
+def test_upload_booking_application_succeeds_for_cash_payment_when_no_razorpay_ids_supplied(mock_upload, mock_sign):
+    svc, persistence, _ = _booking_service(_paid_payment(razorpay_order_id=None, razorpay_payment_id=None))
+    persistence.create_document.return_value = MagicMock(id="doc1")
+
+    svc.upload_booking_application(
+        _PDF_BYTES, "application/pdf", "project_booking_application", "proj1", "pay1", None, None, "{}",
+        owner_id="C00001", owner_role="customer",
+    )
+
+    _, kwargs = persistence.create_document.call_args
+    assert kwargs["razorpay_order_id"] is None
+    assert kwargs["razorpay_payment_id"] is None
+
+
+@patch.object(serviceDocument, "_sign_url", return_value="https://fake.supabase.co/signed")
+@patch.object(serviceDocument, "_upload_to_storage")
+def test_upload_booking_application_happy_path_uses_booking_forms_bucket(mock_upload, mock_sign):
+    svc, persistence, payment_persistence = _booking_service(_paid_payment())
+    persistence.create_document.return_value = MagicMock(
+        id="doc1", owner_id="C00001", owner_role="customer",
+        document_type="project_booking_application", status="generated", created_date=None,
+    )
+
+    doc, signed_url, expires_in = svc.upload_booking_application(
+        _PDF_BYTES, "application/pdf", "project_booking_application", "ops-divine-greens", "pay1",
+        "order_Rzp123", "pay_Rzp456", '{"applicantName": "Jane"}',
+        owner_id="C00001", owner_role="customer",
+    )
+
+    assert doc.id == "doc1"
+    assert signed_url == "https://fake.supabase.co/signed"
+    assert expires_in == 3600
+    mock_upload.assert_called_once()
+    assert mock_upload.call_args.kwargs["bucket"] == "Booking_Forms"
+    mock_sign.assert_called_once()
+    assert mock_sign.call_args.kwargs["bucket"] == "Booking_Forms"
+
+    _, kwargs = persistence.create_document.call_args
+    assert kwargs["project_id"] == "ops-divine-greens"
+    assert kwargs["payment_id"] == "pay1"
+    # Persisted from the payment record itself, not the client-supplied form fields (those are
+    # only used to verify the caller's claim - see the mismatch tests below).
+    assert kwargs["razorpay_order_id"] == "order_Rzp123"
+    assert kwargs["razorpay_payment_id"] == "pay_Rzp456"
+    assert kwargs["form_data"] == {"applicantName": "Jane"}
+    assert kwargs["storage_bucket"] == "Booking_Forms"
+
+
+@patch.object(serviceDocument, "_sign_url")
+@patch.object(serviceDocument, "_delete_from_storage")
+@patch.object(serviceDocument, "_upload_to_storage")
+def test_upload_booking_application_cleans_up_storage_when_persistence_fails(mock_upload, mock_delete, mock_sign):
+    svc, persistence, _ = _booking_service(_paid_payment())
+    persistence.create_document.side_effect = RuntimeError("db exploded")
+
+    try:
+        svc.upload_booking_application(
+            _PDF_BYTES, "application/pdf", "project_booking_application", "proj1", "pay1", None, None, "{}",
+            owner_id="C00001", owner_role="customer",
+        )
+        assert False, "expected the persistence error to propagate"
+    except RuntimeError as e:
+        assert str(e) == "db exploded"
+
+    mock_delete.assert_called_once()
+    assert mock_delete.call_args.kwargs["bucket"] == "Booking_Forms"
+    mock_sign.assert_not_called()
