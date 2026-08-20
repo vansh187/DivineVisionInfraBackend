@@ -372,6 +372,27 @@ def test_customer_login_accepts_single_payload_with_email_and_password():
     assert "vanshduggal123" not in [m["content"] for m in persistence.messages]
 
 
+def test_customer_login_accepts_legacy_frontend_username_key_when_value_is_email():
+    persistence = FakeChatbotPersistence()
+    customer_auth = FakeAuthService("customer")
+    service = serviceChatbot(
+        persistence=persistence, gemini=object(), groq=object(), customer_service=customer_auth,
+    )
+
+    service.handle_message("session-1", text="login as customer")
+    result = service.handle_message(
+        "session-1",
+        text='{"username":"vansh.demo\\@gmail.com","password":"vanshdemo123"}',
+    )
+
+    assert result["auth_token"] == "customer-token"
+    assert result["auth_role"] == "customer"
+    assert customer_auth.logins[-1].email == "vansh.demo@gmail.com"
+    assert customer_auth.logins[-1].password == "vanshdemo123"
+    assert "[password hidden]" in [m["content"] for m in persistence.messages]
+    assert "vanshdemo123" not in [m["content"] for m in persistence.messages]
+
+
 def test_extract_email_accepts_escaped_at_symbol():
     assert extract_email("vansh.duggal\\@gmail.com") == "vansh.duggal@gmail.com"
 

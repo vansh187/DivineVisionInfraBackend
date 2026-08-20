@@ -83,6 +83,32 @@ def test_login_returns_valid_jwt_with_customer_role():
     assert "exp" in payload
 
 
+def test_login_accepts_email_in_username_field():
+    svc, persistence = _service()
+    real_hash = svc._hash_password("correct-password")
+    persistence.get_by_email.return_value = MagicMock(id="C00001", username="cust1", password_hash=real_hash)
+    token = svc.login(UserLoginDTO(username="cust1@example.com", password="correct-password"))
+
+    payload = jwt.decode(token, "testsecret", algorithms=["HS256"])
+    assert payload["sub"] == "C00001"
+    assert payload["username"] == "cust1"
+    assert payload["role"] == "customer"
+    persistence.get_by_username.assert_not_called()
+    persistence.get_by_email.assert_called_once_with("cust1@example.com")
+
+
+def test_login_accepts_escaped_email_in_username_field():
+    svc, persistence = _service()
+    real_hash = svc._hash_password("correct-password")
+    persistence.get_by_email.return_value = MagicMock(id="C00001", username="cust1", password_hash=real_hash)
+    token = svc.login(UserLoginDTO(username="cust1\\@example.com", password="correct-password"))
+
+    payload = jwt.decode(token, "testsecret", algorithms=["HS256"])
+    assert payload["sub"] == "C00001"
+    assert payload["role"] == "customer"
+    persistence.get_by_email.assert_called_once_with("cust1@example.com")
+
+
 def test_login_by_email_returns_valid_jwt_with_customer_role():
     svc, persistence = _service()
     real_hash = svc._hash_password("correct-password")
@@ -110,6 +136,7 @@ def test_login_by_email_rejects_missing_email_or_password():
 def test_login_by_email_rejects_unknown_email():
     svc, persistence = _service()
     persistence.get_by_email.return_value = None
+    persistence.get_by_username.return_value = None
 
     with pytest.raises(ValueError):
         svc.login_by_email("ghost@example.com", "correct-password")

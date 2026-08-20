@@ -195,7 +195,7 @@ def extract_auth_credentials(raw: str) -> dict:
     text = raw or ""
     email = extract_email(text)
     password = None
-    password_match = re.search(r'\bpassword\b\s*[:=]\s*["\']?([^"\'},\s]+)', text, re.IGNORECASE)
+    password_match = re.search(r'["\']?\bpassword\b["\']?\s*[:=]\s*["\']?([^"\'},\s]+)', text, re.IGNORECASE)
     if password_match:
         password = password_match.group(1).strip()
     return {"email": email, "password": password}

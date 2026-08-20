@@ -1,4 +1,5 @@
 import os
+import re
 from datetime import datetime, timedelta
 from passlib.context import CryptContext
 import jwt
@@ -9,6 +10,7 @@ from DivineDTO.models import UserCreateDTO, UserLoginDTO
 load_dotenv()
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+EMAIL_RE = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
 
 
 class serviceCustomer:
@@ -41,7 +43,10 @@ class serviceCustomer:
         return user
 
     def login(self, dto: UserLoginDTO) -> str:
-        user = self._persistence.get_by_username(dto.username)
+        username = (dto.username or "").strip().replace("\\@", "@")
+        if EMAIL_RE.fullmatch(username):
+            return self.login_by_email(username, dto.password)
+        user = self._persistence.get_by_username(username)
         if not user:
             raise ValueError("invalid_credentials")
         if not self._verify_password(dto.password, user.password_hash):
