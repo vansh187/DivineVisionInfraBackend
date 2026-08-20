@@ -54,6 +54,45 @@ AUTH_LOGIN_BUTTONS = {
     "customer": {"label": "Login as Customer", "value": "login_customer", "action": "chatbot_auth"},
     "broker": {"label": "Login as Broker", "value": "login_broker", "action": "chatbot_auth"},
 }
+AUTH_ROLE_ALIASES = {
+    "customer": (
+        "customer", "cust", "buyer", "client", "user", "member", "grahak", "customer account",
+        "customer portal", "customer panel", "customer dashboard",
+    ),
+    "broker": (
+        "broker", "agent", "channel partner", "cp", "dealer", "sales partner", "property dealer",
+        "broker account", "broker portal", "broker panel", "broker dashboard",
+    ),
+}
+AUTH_LOGIN_PHRASES = (
+    "login", "log in", "signin", "sign in", "sign me in", "let me in", "open my account",
+    "access account", "account access", "enter account", "portal login", "dashboard login",
+    "login karna", "login karo", "login krna", "login krdo", "login kar do", "signin karna",
+)
+AUTH_SIGNUP_PHRASES = (
+    "signup", "sign up", "register", "registration", "create account", "new account",
+    "open account", "make account", "create my account", "register me", "join as", "create", "make",
+    "signup karna", "sign up karna", "register karna", "account banana", "account banao",
+    "naya account", "new registration",
+)
+AUTH_FLOW_VALUES = {
+    "login_customer": ("login", "customer"),
+    "customer_login": ("login", "customer"),
+    "signin_customer": ("login", "customer"),
+    "customer_signin": ("login", "customer"),
+    "signup_customer": ("signup", "customer"),
+    "customer_signup": ("signup", "customer"),
+    "register_customer": ("signup", "customer"),
+    "customer_register": ("signup", "customer"),
+    "login_broker": ("login", "broker"),
+    "broker_login": ("login", "broker"),
+    "signin_broker": ("login", "broker"),
+    "broker_signin": ("login", "broker"),
+    "signup_broker": ("signup", "broker"),
+    "broker_signup": ("signup", "broker"),
+    "register_broker": ("signup", "broker"),
+    "broker_register": ("signup", "broker"),
+}
 
 TOOL_SCHEMAS = [
     {
@@ -261,21 +300,21 @@ def selected_auth_flow(raw: str):
     text = _contact_text(raw)
     if not text:
         return None
-    if "login_customer" in text or "customer_login" in text:
-        return ("login", "customer")
-    if "login_broker" in text or "broker_login" in text:
-        return ("login", "broker")
-    if "signup_customer" in text or "customer_signup" in text:
-        return ("signup", "customer")
-    if "signup_broker" in text or "broker_signup" in text:
-        return ("signup", "broker")
+    normalized_value = re.sub(r"[\s-]+", "_", text)
+    if normalized_value in AUTH_FLOW_VALUES:
+        return AUTH_FLOW_VALUES[normalized_value]
+    for value, flow in AUTH_FLOW_VALUES.items():
+        if value in normalized_value:
+            return flow
+
     role = None
-    if "customer" in text or "buyer" in text:
-        role = "customer"
-    elif "broker" in text or "agent" in text:
-        role = "broker"
-    wants_signup = any(word in text for word in ("signup", "sign up", "register", "create account", "new account"))
-    wants_login = any(word in text for word in ("login", "log in", "signin", "sign in"))
+    for candidate_role, aliases in AUTH_ROLE_ALIASES.items():
+        if any(alias in text for alias in aliases):
+            role = candidate_role
+            break
+
+    wants_signup = any(phrase in text for phrase in AUTH_SIGNUP_PHRASES)
+    wants_login = any(phrase in text for phrase in AUTH_LOGIN_PHRASES)
     if wants_signup and role:
         return ("signup", role)
     if wants_login and role:
@@ -344,6 +383,11 @@ class serviceChatbot:
 
         text = (text or "").strip()
 
+        auth_flow = selected_auth_flow(text)
+        if auth_flow and getattr(session, "auth_state", None):
+            self._persist_turn(session_id, "user", text)
+            return self._start_auth_flow(session, auth_flow)
+
         if getattr(session, "auth_state", None):
             return self._advance_auth_flow(session, text)
 
@@ -360,7 +404,6 @@ class serviceChatbot:
         if not text:
             return {"session_id": session_id, "reply": "Sorry, I didn't catch that — could you type your question?"}
 
-        auth_flow = selected_auth_flow(text)
         if auth_flow:
             self._persist_turn(session_id, "user", text)
             return self._start_auth_flow(session, auth_flow)

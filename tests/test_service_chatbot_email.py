@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from DivineService.service_chatbot import (
     extract_phone,
     normalize_phone,
+    selected_auth_flow,
     serviceChatbot,
     valid_phone,
     wants_email_contact,
@@ -299,6 +300,56 @@ def test_broker_login_flow_returns_token_and_masks_password():
     assert persistence.session.auth_state is None
     assert "[password hidden]" in [m["content"] for m in persistence.messages]
     assert "correct-password" not in [m["content"] for m in persistence.messages]
+
+
+def test_explicit_customer_login_restarts_stale_auth_state():
+    persistence = FakeChatbotPersistence()
+    persistence.session.auth_state = "login_customer_password"
+    persistence.session.auth_payload = {"mode": "login", "role": "customer", "username": "olduser"}
+    customer_auth = FakeAuthService("customer")
+    service = serviceChatbot(
+        persistence=persistence, gemini=object(), groq=object(), customer_service=customer_auth,
+    )
+
+    result = service.handle_message("session-1", text="login as customer")
+
+    assert "username" in result["reply"].lower()
+    assert persistence.session.auth_state == "login_customer_username"
+    assert persistence.session.auth_payload == {"mode": "login", "role": "customer"}
+    assert customer_auth.logins == []
+
+
+def test_auth_flow_detection_handles_common_login_and_signup_variants():
+    cases = {
+        "login as customer": ("login", "customer"),
+        "customer login": ("login", "customer"),
+        "login-customer": ("login", "customer"),
+        "customer_login": ("login", "customer"),
+        "sign me in as customer": ("login", "customer"),
+        "customer portal login": ("login", "customer"),
+        "mujhe customer login karna hai": ("login", "customer"),
+        "login as broker": ("login", "broker"),
+        "broker login": ("login", "broker"),
+        "broker_login": ("login", "broker"),
+        "agent sign in": ("login", "broker"),
+        "channel partner portal login": ("login", "broker"),
+        "mujhe broker login karna hai": ("login", "broker"),
+        "signup as customer": ("signup", "customer"),
+        "customer signup": ("signup", "customer"),
+        "register customer": ("signup", "customer"),
+        "create customer account": ("signup", "customer"),
+        "buyer registration": ("signup", "customer"),
+        "customer account banana hai": ("signup", "customer"),
+        "signup as broker": ("signup", "broker"),
+        "broker signup": ("signup", "broker"),
+        "register broker": ("signup", "broker"),
+        "create broker account": ("signup", "broker"),
+        "agent registration": ("signup", "broker"),
+        "broker account banana hai": ("signup", "broker"),
+    }
+
+    for phrase, expected in cases.items():
+        assert selected_auth_flow(phrase) == expected
 
 
 def test_generic_login_request_returns_auth_choice_buttons():
