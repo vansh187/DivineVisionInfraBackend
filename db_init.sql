@@ -196,6 +196,8 @@ CREATE TABLE IF NOT EXISTS divine_chatbot_sessions (
   callback_name varchar(200),
   callback_phone varchar(20),
   callback_time varchar(100),
+  auth_state varchar(80),
+  auth_payload text,
   created_date timestamptz DEFAULT now(),
   last_activity_date timestamptz DEFAULT now()
 );

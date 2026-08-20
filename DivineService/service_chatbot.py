@@ -8,6 +8,9 @@ import unicodedata
 from datetime import datetime, timezone
 
 from Divinepersistence import persistenceChatbot
+from DivineDTO.models import UserCreateDTO, UserLoginDTO
+from DivineService.service_broker import serviceBroker
+from DivineService.service_customer import serviceCustomer
 from DivineService.llm_gemini import llmGemini, GeminiError
 from DivineService.llm_groq import llmGroq, GroqError
 
@@ -38,9 +41,18 @@ BOOKING_PROJECT_BUTTONS = [
 ]
 CUSTOMER_LOGIN_BUTTON = {
     "label": "Login as Customer",
-    "value": "customer_login",
-    "action": "open_customer_login",
-    "url": "/customer/login",
+    "value": "login_customer",
+    "action": "chatbot_auth",
+}
+AUTH_FLOW_BUTTONS = [
+    {"label": "Customer Signup", "value": "signup_customer", "action": "chatbot_auth"},
+    {"label": "Customer Login", "value": "login_customer", "action": "chatbot_auth"},
+    {"label": "Broker Signup", "value": "signup_broker", "action": "chatbot_auth"},
+    {"label": "Broker Login", "value": "login_broker", "action": "chatbot_auth"},
+]
+AUTH_LOGIN_BUTTONS = {
+    "customer": {"label": "Login as Customer", "value": "login_customer", "action": "chatbot_auth"},
+    "broker": {"label": "Login as Broker", "value": "login_broker", "action": "chatbot_auth"},
 }
 
 TOOL_SCHEMAS = [
@@ -245,11 +257,42 @@ def selected_booking_project(raw: str) -> str:
     return None
 
 
+def selected_auth_flow(raw: str):
+    text = _contact_text(raw)
+    if not text:
+        return None
+    if "login_customer" in text or "customer_login" in text:
+        return ("login", "customer")
+    if "login_broker" in text or "broker_login" in text:
+        return ("login", "broker")
+    if "signup_customer" in text or "customer_signup" in text:
+        return ("signup", "customer")
+    if "signup_broker" in text or "broker_signup" in text:
+        return ("signup", "broker")
+    role = None
+    if "customer" in text or "buyer" in text:
+        role = "customer"
+    elif "broker" in text or "agent" in text:
+        role = "broker"
+    wants_signup = any(word in text for word in ("signup", "sign up", "register", "create account", "new account"))
+    wants_login = any(word in text for word in ("login", "log in", "signin", "sign in"))
+    if wants_signup and role:
+        return ("signup", role)
+    if wants_login and role:
+        return ("login", role)
+    if wants_signup or wants_login:
+        return ("choose", None)
+    return None
+
+
 class serviceChatbot:
-    def __init__(self, persistence: persistenceChatbot = None, gemini: llmGemini = None, groq: llmGroq = None):
+    def __init__(self, persistence: persistenceChatbot = None, gemini: llmGemini = None, groq: llmGroq = None,
+                 customer_service: serviceCustomer = None, broker_service: serviceBroker = None):
         self._persistence = persistence or persistenceChatbot()
         self._gemini = gemini or llmGemini()
         self._groq = groq or llmGroq()
+        self._customer_service = customer_service
+        self._broker_service = broker_service
 
     # ---- Session init ---------------------------------------------------
     def init_session(self, referrer: str = None, utm_source: str = None, utm_medium: str = None,
@@ -291,6 +334,9 @@ class serviceChatbot:
 
         text = (text or "").strip()
 
+        if getattr(session, "auth_state", None):
+            return self._advance_auth_flow(session, text)
+
         if intent == "request_callback" and not session.callback_state:
             session = self._persistence.update_session_callback_state(session_id, "awaiting_name")
             reply = "Sure! May I know your name?"
@@ -303,6 +349,11 @@ class serviceChatbot:
 
         if not text:
             return {"session_id": session_id, "reply": "Sorry, I didn't catch that — could you type your question?"}
+
+        auth_flow = selected_auth_flow(text)
+        if auth_flow:
+            self._persist_turn(session_id, "user", text)
+            return self._start_auth_flow(session, auth_flow)
 
         booking_project = selected_booking_project(text)
         if booking_project:
@@ -457,6 +508,228 @@ class serviceChatbot:
         # Unreachable in practice - callback_state is DB-constrained to the four known
         # values and "complete" is handled above before any persistence happens.
         return {"session_id": session_id, "reply": DEGRADED_FALLBACK_REPLY}
+
+    # ---- Auth state machine (deterministic, no LLM) -------------------------
+    def _start_auth_flow(self, session, auth_flow):
+        mode, role = auth_flow
+        session_id = session.id
+        if mode == "choose":
+            reply = "Sure, please choose what you want to do."
+            self._persist_turn(session_id, "assistant", reply)
+            return {"session_id": session_id, "reply": reply, "buttons": AUTH_FLOW_BUTTONS}
+        if mode == "signup":
+            if not self._safe_update_session_auth_state(session_id, f"signup_{role}_first_name", {"mode": mode, "role": role}):
+                reply = "Sorry, I'm having trouble starting signup right now. Please try again in a moment."
+                self._persist_turn(session_id, "assistant", reply)
+                return {"session_id": session_id, "reply": reply}
+            reply = f"Sure, let's create your {role} account. What is your first name?"
+            self._persist_turn(session_id, "assistant", reply)
+            return {"session_id": session_id, "reply": reply}
+        if not self._safe_update_session_auth_state(session_id, f"login_{role}_username", {"mode": mode, "role": role}):
+            reply = "Sorry, I'm having trouble starting login right now. Please try again in a moment."
+            self._persist_turn(session_id, "assistant", reply)
+            return {"session_id": session_id, "reply": reply}
+        reply = f"Sure, please enter your {role} username."
+        self._persist_turn(session_id, "assistant", reply)
+        return {"session_id": session_id, "reply": reply}
+
+    def _advance_auth_flow(self, session, text: str):
+        session_id = session.id
+        state = session.auth_state
+        payload = self._auth_payload(session)
+
+        if state.endswith("_password"):
+            self._persist_turn(session_id, "user", "[password hidden]")
+        else:
+            self._persist_turn(session_id, "user", text)
+
+        parts = state.split("_")
+        if len(parts) < 3 or parts[0] not in ("signup", "login") or parts[1] not in ("customer", "broker"):
+            return self._auth_error(session_id)
+        mode, role, field = parts[0], parts[1], "_".join(parts[2:])
+
+        if mode == "signup":
+            return self._advance_signup_flow(session, text, role, field, payload)
+        if mode == "login":
+            return self._advance_login_flow(session, text, role, field, payload)
+
+        self._safe_update_session_auth_state(session_id, None, None)
+        reply = DEGRADED_FALLBACK_REPLY
+        self._persist_turn(session_id, "assistant", reply)
+        return {"session_id": session_id, "reply": reply}
+
+    def _advance_signup_flow(self, session, text: str, role: str, field: str, payload: dict):
+        session_id = session.id
+        value = (text or "").strip()
+        if field in ("first_name", "last_name", "email", "phone") and value.lower() in ("skip", "na", "n/a", "none", "no"):
+            value = None
+
+        if field == "first_name":
+            if not value:
+                reply = "Please enter your first name, or type skip."
+                self._persist_turn(session_id, "assistant", reply)
+                return {"session_id": session_id, "reply": reply}
+            payload["first_name"] = value
+            self._safe_update_session_auth_state(session_id, f"signup_{role}_last_name", payload)
+            reply = "What is your last name? You can type skip if you don't want to add it."
+            self._persist_turn(session_id, "assistant", reply)
+            return {"session_id": session_id, "reply": reply}
+
+        if field == "last_name":
+            payload["last_name"] = value
+            self._safe_update_session_auth_state(session_id, f"signup_{role}_email", payload)
+            reply = "Please enter your email address. You can type skip if you don't want to add it."
+            self._persist_turn(session_id, "assistant", reply)
+            return {"session_id": session_id, "reply": reply}
+
+        if field == "email":
+            if value and not valid_email(value):
+                reply = "Please enter a valid email address, or type skip."
+                self._persist_turn(session_id, "assistant", reply)
+                return {"session_id": session_id, "reply": reply}
+            payload["email"] = value
+            self._safe_update_session_auth_state(session_id, f"signup_{role}_phone", payload)
+            reply = "Please enter your phone number. You can type skip if you don't want to add it."
+            self._persist_turn(session_id, "assistant", reply)
+            return {"session_id": session_id, "reply": reply}
+
+        if field == "phone":
+            if value:
+                phone = extract_phone(value)
+                if not phone:
+                    reply = "Please enter a valid phone number, or type skip."
+                    self._persist_turn(session_id, "assistant", reply)
+                    return {"session_id": session_id, "reply": reply}
+                payload["phone"] = phone
+            else:
+                payload["phone"] = None
+            self._safe_update_session_auth_state(session_id, f"signup_{role}_username", payload)
+            reply = "Please choose a username."
+            self._persist_turn(session_id, "assistant", reply)
+            return {"session_id": session_id, "reply": reply}
+
+        if field == "username":
+            if len(value) < 3:
+                reply = "Username should be at least 3 characters."
+                self._persist_turn(session_id, "assistant", reply)
+                return {"session_id": session_id, "reply": reply}
+            payload["username"] = value
+            self._safe_update_session_auth_state(session_id, f"signup_{role}_password", payload)
+            reply = "Please enter a password with at least 8 characters."
+            self._persist_turn(session_id, "assistant", reply)
+            return {"session_id": session_id, "reply": reply}
+
+        if field == "password":
+            if len(value) < 8:
+                reply = "Password should be at least 8 characters. Please enter a stronger password."
+                self._persist_turn(session_id, "assistant", reply)
+                return {"session_id": session_id, "reply": reply}
+            payload["password"] = value
+            return self._create_auth_account(session, role, payload)
+
+        return self._auth_error(session_id)
+
+    def _advance_login_flow(self, session, text: str, role: str, field: str, payload: dict):
+        session_id = session.id
+        value = (text or "").strip()
+        if field == "username":
+            if not value:
+                reply = "Please enter your username."
+                self._persist_turn(session_id, "assistant", reply)
+                return {"session_id": session_id, "reply": reply}
+            payload["username"] = value
+            self._safe_update_session_auth_state(session_id, f"login_{role}_password", payload)
+            reply = "Please enter your password."
+            self._persist_turn(session_id, "assistant", reply)
+            return {"session_id": session_id, "reply": reply}
+        if field == "password":
+            if not value:
+                reply = "Please enter your password."
+                self._persist_turn(session_id, "assistant", reply)
+                return {"session_id": session_id, "reply": reply}
+            payload["password"] = value
+            return self._login_auth_account(session, role, payload)
+        return self._auth_error(session_id)
+
+    def _create_auth_account(self, session, role: str, payload: dict):
+        session_id = session.id
+        try:
+            dto = UserCreateDTO(**payload)
+            user = self._auth_service(role).signup(dto)
+        except ValueError as e:
+            if str(e) == "username_taken":
+                self._safe_update_session_auth_state(session_id, f"signup_{role}_username", {
+                    k: v for k, v in payload.items() if k not in ("username", "password")
+                })
+                reply = "That username is already taken. Please choose another username."
+            else:
+                self._safe_update_session_auth_state(session_id, None, None)
+                reply = "Sorry, I could not create the account. Please try again."
+            self._persist_turn(session_id, "assistant", reply)
+            return {"session_id": session_id, "reply": reply}
+        except Exception as e:
+            logger.warning("chatbot_auth_signup_failed: %s", e)
+            self._safe_update_session_auth_state(session_id, None, None)
+            reply = "Sorry, I could not create the account right now. Please try again in a moment."
+            self._persist_turn(session_id, "assistant", reply)
+            return {"session_id": session_id, "reply": reply}
+
+        self._safe_update_session_auth_state(session_id, None, None)
+        reply = f"Your {role} account has been created. Do you want to login now?"
+        self._persist_turn(session_id, "assistant", reply)
+        return {
+            "session_id": session_id,
+            "reply": reply,
+            "account_created": {"role": role, "username": user.username},
+            "buttons": [AUTH_LOGIN_BUTTONS[role]],
+        }
+
+    def _login_auth_account(self, session, role: str, payload: dict):
+        session_id = session.id
+        try:
+            token = self._auth_service(role).login(UserLoginDTO(**payload))
+        except ValueError:
+            self._safe_update_session_auth_state(session_id, f"login_{role}_username", {"mode": "login", "role": role})
+            reply = "Invalid username or password. Please enter your username again."
+            self._persist_turn(session_id, "assistant", reply)
+            return {"session_id": session_id, "reply": reply}
+        except Exception as e:
+            logger.warning("chatbot_auth_login_failed: %s", e)
+            self._safe_update_session_auth_state(session_id, None, None)
+            reply = "Sorry, I could not login right now. Please try again in a moment."
+            self._persist_turn(session_id, "assistant", reply)
+            return {"session_id": session_id, "reply": reply}
+
+        self._safe_update_session_auth_state(session_id, None, None)
+        reply = f"You are logged in as {role}."
+        self._persist_turn(session_id, "assistant", reply)
+        return {"session_id": session_id, "reply": reply, "auth_token": token, "auth_role": role}
+
+    def _auth_service(self, role: str):
+        if role == "customer":
+            if not self._customer_service:
+                self._customer_service = serviceCustomer()
+            return self._customer_service
+        if not self._broker_service:
+            self._broker_service = serviceBroker()
+        return self._broker_service
+
+    def _auth_payload(self, session) -> dict:
+        raw = getattr(session, "auth_payload", None)
+        if isinstance(raw, dict):
+            return dict(raw)
+        if not raw:
+            return {}
+        try:
+            return json.loads(raw)
+        except (TypeError, ValueError):
+            return {}
+
+    def _auth_error(self, session_id: str):
+        self._safe_update_session_auth_state(session_id, None, None)
+        reply = DEGRADED_FALLBACK_REPLY
+        self._persist_turn(session_id, "assistant", reply)
+        return {"session_id": session_id, "reply": reply}
 
     # ---- Agent loop (Gemini primary, Groq fallback) -------------------------
     def _run_agent_loop(self, session, latest_text: str):
@@ -651,6 +924,13 @@ class serviceChatbot:
             return self._persistence.update_session_callback_state(session_id, state)
         except Exception as e:
             logger.warning("chatbot_email_state_update_failed: %s", e)
+            return None
+
+    def _safe_update_session_auth_state(self, session_id: str, state, payload: dict = None):
+        try:
+            return self._persistence.update_session_auth_state(session_id, state, payload)
+        except Exception as e:
+            logger.warning("chatbot_auth_state_update_failed: %s", e)
             return None
 
     # ---- Callback requests (broker-facing) -----------------------------

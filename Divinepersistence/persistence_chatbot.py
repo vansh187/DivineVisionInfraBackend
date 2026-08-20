@@ -1,3 +1,4 @@
+import json
 from sqlalchemy import text
 from datetime import datetime, timezone
 from .persistence_db import SessionLocal, engine, RowWrapper, load_queries
@@ -163,6 +164,23 @@ class persistenceChatbot:
                     "callback_time": callback_time, "last_activity_date": datetime.now(timezone.utc),
                 }
                 result = db.execute(text(self._q("update_session_callback_state")), params)
+                row = result.mappings().first()
+                db.commit()
+                return RowWrapper(row) if row else None
+            except Exception:
+                db.rollback()
+                raise
+
+    def update_session_auth_state(self, id: str, auth_state, auth_payload: dict = None):
+        with self._session_factory() as db:
+            try:
+                params = {
+                    "id": id,
+                    "auth_state": auth_state,
+                    "auth_payload": json.dumps(auth_payload or {}) if auth_state else None,
+                    "last_activity_date": datetime.now(timezone.utc),
+                }
+                result = db.execute(text(self._q("update_session_auth_state")), params)
                 row = result.mappings().first()
                 db.commit()
                 return RowWrapper(row) if row else None

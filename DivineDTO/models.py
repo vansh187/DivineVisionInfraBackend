@@ -247,6 +247,9 @@ class ChatMessageResponseDTO(BaseModel):
     reply: str
     buttons: Optional[List[ChatbotButtonDTO]] = None
     callback_confirmed: Optional[CallbackConfirmedDTO] = None
+    account_created: Optional[Dict[str, Any]] = None
+    auth_token: Optional[str] = None
+    auth_role: Optional[str] = None
     guardrail_passed: Optional[bool] = None
     llm_provider: Optional[str] = None
 
