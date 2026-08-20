@@ -6,6 +6,7 @@ from DivineService.service_chatbot import (
     selected_auth_flow,
     serviceChatbot,
     valid_phone,
+    extract_email,
     wants_email_contact,
     wants_phone_contact,
     wants_plot_booking,
@@ -347,6 +348,32 @@ def test_broker_login_flow_returns_token_and_masks_password():
     assert persistence.session.auth_state is None
     assert "[password hidden]" in [m["content"] for m in persistence.messages]
     assert "correct-password" not in [m["content"] for m in persistence.messages]
+
+
+def test_customer_login_accepts_single_payload_with_email_and_password():
+    persistence = FakeChatbotPersistence()
+    customer_auth = FakeAuthService("customer")
+    service = serviceChatbot(
+        persistence=persistence, gemini=object(), groq=object(), customer_service=customer_auth,
+    )
+
+    service.handle_message("session-1", text="login as customer")
+    result = service.handle_message(
+        "session-1",
+        text='{email: "vansh.duggal\\@gmail.com", password: "vanshduggal123"}',
+    )
+
+    assert result["auth_token"] == "customer-token"
+    assert result["auth_role"] == "customer"
+    assert customer_auth.logins[-1].email == "vansh.duggal@gmail.com"
+    assert customer_auth.logins[-1].password == "vanshduggal123"
+    assert persistence.session.auth_state is None
+    assert "[password hidden]" in [m["content"] for m in persistence.messages]
+    assert "vanshduggal123" not in [m["content"] for m in persistence.messages]
+
+
+def test_extract_email_accepts_escaped_at_symbol():
+    assert extract_email("vansh.duggal\\@gmail.com") == "vansh.duggal@gmail.com"
 
 
 def test_login_flow_rejects_invalid_email_without_advancing():

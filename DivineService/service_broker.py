@@ -51,7 +51,8 @@ class serviceBroker:
     def login_by_email(self, email: str, password: str) -> str:
         if not email or not password:
             raise ValueError("invalid_credentials")
-        user = self._persistence.get_by_email((email or "").strip())
+        email = (email or "").strip()
+        user = self._persistence.get_by_email(email)
         if not user:
             raise ValueError("invalid_credentials")
         if not self._verify_password(password, user.password_hash):

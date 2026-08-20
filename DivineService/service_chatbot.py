@@ -183,12 +183,22 @@ EMAIL_RE = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECAS
 def valid_email(raw: str) -> bool:
     if not raw:
         return False
-    return bool(EMAIL_RE.fullmatch(raw.strip()))
+    return bool(EMAIL_RE.fullmatch(raw.strip().replace("\\@", "@")))
 
 
 def extract_email(raw: str) -> str:
-    match = EMAIL_RE.search(raw or "")
+    match = EMAIL_RE.search((raw or "").replace("\\@", "@"))
     return match.group(0).strip() if match else None
+
+
+def extract_auth_credentials(raw: str) -> dict:
+    text = raw or ""
+    email = extract_email(text)
+    password = None
+    password_match = re.search(r'\bpassword\b\s*[:=]\s*["\']?([^"\'},\s]+)', text, re.IGNORECASE)
+    if password_match:
+        password = password_match.group(1).strip()
+    return {"email": email, "password": password}
 
 
 def _contact_text(raw: str) -> str:
@@ -590,8 +600,9 @@ class serviceChatbot:
         session_id = session.id
         state = session.auth_state
         payload = self._auth_payload(session)
+        credentials = extract_auth_credentials(text)
 
-        if state.endswith("_password"):
+        if state.endswith("_password") or credentials.get("password"):
             self._persist_turn(session_id, "user", "[password hidden]")
         else:
             self._persist_turn(session_id, "user", text)
@@ -607,7 +618,7 @@ class serviceChatbot:
         if mode == "signup":
             return self._advance_signup_flow(session, text, role, field, payload)
         if mode == "login":
-            return self._advance_login_flow(session, text, role, field, payload)
+            return self._advance_login_flow(session, text, role, field, payload, credentials)
 
         self._safe_update_session_auth_state(session_id, None, None)
         reply = DEGRADED_FALLBACK_REPLY
@@ -710,11 +721,16 @@ class serviceChatbot:
 
         return self._auth_error(session_id)
 
-    def _advance_login_flow(self, session, text: str, role: str, field: str, payload: dict):
+    def _advance_login_flow(self, session, text: str, role: str, field: str, payload: dict, credentials: dict = None):
         session_id = session.id
         value = (text or "").strip()
+        credentials = credentials or {}
+        if credentials.get("email") and credentials.get("password"):
+            payload["email"] = credentials["email"]
+            payload["password"] = credentials["password"]
+            return self._login_auth_account(session, role, payload)
         if field == "email":
-            email = extract_email(value)
+            email = credentials.get("email") or extract_email(value)
             if not email or not valid_email(email):
                 reply = "Please enter a valid email address."
                 self._persist_turn(session_id, "assistant", reply)
