@@ -32,6 +32,17 @@ MAX_TOOL_ROUNDS = 3
 HISTORY_TURN_LIMIT = 20
 GUARDRAIL_THRESHOLD = float(os.getenv("CHATBOT_GUARDRAIL_THRESHOLD", "0.5"))
 
+BOOKING_PROJECT_BUTTONS = [
+    {"label": "OPS Project", "value": "book_project_ops", "action": "select_booking_project"},
+    {"label": "Suraksha Project", "value": "book_project_suraksha", "action": "select_booking_project"},
+]
+CUSTOMER_LOGIN_BUTTON = {
+    "label": "Login as Customer",
+    "value": "customer_login",
+    "action": "open_customer_login",
+    "url": "/customer/login",
+}
+
 TOOL_SCHEMAS = [
     {
         "name": "search_knowledge_base",
@@ -198,6 +209,42 @@ def wants_phone_contact(raw: str) -> bool:
     )
 
 
+def wants_plot_booking(raw: str) -> bool:
+    text = _contact_text(raw)
+    if not text:
+        return False
+    if "site visit" in text:
+        return False
+    booking_words = (
+        "book", "booking", "reserve", "apply", "application", "purchase", "buy",
+        "allot", "allotment", "interested", "lena", "len", "kharid", "kharidna",
+    )
+    property_words = (
+        "plot", "plots", "land", "property", "unit", "sq ft", "sqft", "sq. ft",
+        "square feet", "square foot", "sq feet", "sq foot", "sft", "sf",
+        "sq yd", "sqyd", "sq. yd", "square yard", "square yards", "yard", "yards", "gaj",
+        "marla", "marlas",
+    )
+    area_pattern = re.compile(
+        r"\b\d+(?:\.\d+)?\s*(?:sq\.?\s*ft|sqft|square\s*(?:feet|foot)|sq\.?\s*yd|sqyd|"
+        r"square\s*yards?|sft|sf|yards?|gaj|marlas?)\b"
+    )
+    has_booking_intent = any(word in text for word in booking_words)
+    has_plot_or_size = any(word in text for word in property_words) or bool(area_pattern.search(text))
+    return has_booking_intent and has_plot_or_size
+
+
+def selected_booking_project(raw: str) -> str:
+    text = _contact_text(raw)
+    if not text:
+        return None
+    if "book_project_ops" in text or "ops project" in text or "ops divine" in text:
+        return "OPS Project"
+    if "book_project_suraksha" in text or "suraksha project" in text or "suraksha" in text:
+        return "Suraksha Project"
+    return None
+
+
 class serviceChatbot:
     def __init__(self, persistence: persistenceChatbot = None, gemini: llmGemini = None, groq: llmGroq = None):
         self._persistence = persistence or persistenceChatbot()
@@ -256,6 +303,22 @@ class serviceChatbot:
 
         if not text:
             return {"session_id": session_id, "reply": "Sorry, I didn't catch that — could you type your question?"}
+
+        booking_project = selected_booking_project(text)
+        if booking_project:
+            reply = (
+                f"Great, you selected {booking_project}. Please login as a customer so you can fill the "
+                "plot booking application form."
+            )
+            self._persist_turn(session_id, "user", text)
+            self._persist_turn(session_id, "assistant", reply)
+            return {"session_id": session_id, "reply": reply, "buttons": [CUSTOMER_LOGIN_BUTTON]}
+
+        if wants_plot_booking(text):
+            reply = "Sure, which project would you like to book the plot in?"
+            self._persist_turn(session_id, "user", text)
+            self._persist_turn(session_id, "assistant", reply)
+            return {"session_id": session_id, "reply": reply, "buttons": BOOKING_PROJECT_BUTTONS}
 
         if wants_email_contact(text):
             email = extract_email(text)

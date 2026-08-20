@@ -58,7 +58,8 @@ def send_message(dto: ChatMessageRequestDTO):
             callback_confirmed = CallbackConfirmedDTO(**result["callback_confirmed"])
 
         return ChatMessageResponseDTO(
-            session_id=result["session_id"], reply=result["reply"], callback_confirmed=callback_confirmed,
+            session_id=result["session_id"], reply=result["reply"], buttons=result.get("buttons"),
+            callback_confirmed=callback_confirmed,
             guardrail_passed=result.get("guardrail_passed"), llm_provider=result.get("llm_provider"),
         )
     except HTTPException:

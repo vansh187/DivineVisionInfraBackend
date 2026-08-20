@@ -7,6 +7,7 @@ from DivineService.service_chatbot import (
     valid_phone,
     wants_email_contact,
     wants_phone_contact,
+    wants_plot_booking,
 )
 
 
@@ -118,6 +119,58 @@ def test_phone_normalization_handles_noisy_indian_mobile_strings():
     assert extract_phone("2bhk query, phone 9876543210") == "9876543210"
     assert normalize_phone("my mobile: +91 98765 43210") == "9876543210"
     assert valid_phone("12345") is False
+
+
+def test_plot_booking_request_returns_project_buttons():
+    persistence = FakeChatbotPersistence()
+    service = serviceChatbot(persistence=persistence, gemini=object(), groq=object())
+
+    result = service.handle_message("session-1", text="i want book the 250 sq ft plot")
+
+    assert wants_plot_booking("i want book the 250 sq ft plot") is True
+    assert "which project" in result["reply"].lower()
+    assert result["buttons"] == [
+        {"label": "OPS Project", "value": "book_project_ops", "action": "select_booking_project"},
+        {"label": "Suraksha Project", "value": "book_project_suraksha", "action": "select_booking_project"},
+    ]
+
+
+def test_plot_booking_detection_handles_any_size_and_common_phrases():
+    booking_phrases = [
+        "i want book the 250 sq ft plot",
+        "book 500 sqft plot",
+        "reserve 1200 square feet land",
+        "I want to buy 900 sq. ft unit",
+        "plot booking karni hai 100 gaj ki",
+        "application form chahiye for 750 sq yd plot",
+        "interested in 600sft property",
+        "kharidna hai 1000 square foot plot",
+        "book 5 marla plot",
+        "10 marlas ki booking karni hai",
+    ]
+
+    for phrase in booking_phrases:
+        assert wants_plot_booking(phrase) is True
+
+    assert wants_plot_booking("I want to book a site visit") is False
+    assert wants_plot_booking("what is the price of 250 sq ft plot?") is False
+
+
+def test_booking_project_selection_returns_customer_login_button():
+    for selected_project in ("book_project_ops", "Suraksha Project"):
+        persistence = FakeChatbotPersistence()
+        service = serviceChatbot(persistence=persistence, gemini=object(), groq=object())
+
+        result = service.handle_message("session-1", text=selected_project)
+
+        assert "login as a customer" in result["reply"].lower()
+        assert "application form" in result["reply"].lower()
+        assert result["buttons"] == [{
+            "label": "Login as Customer",
+            "value": "customer_login",
+            "action": "open_customer_login",
+            "url": "/customer/login",
+        }]
 
 
 def test_invalid_email_keeps_asking_without_throwing():

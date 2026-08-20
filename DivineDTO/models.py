@@ -235,9 +235,17 @@ class CallbackConfirmedDTO(BaseModel):
     preferred_time: str
 
 
+class ChatbotButtonDTO(BaseModel):
+    label: str
+    value: str
+    action: str
+    url: Optional[str] = None
+
+
 class ChatMessageResponseDTO(BaseModel):
     session_id: str
     reply: str
+    buttons: Optional[List[ChatbotButtonDTO]] = None
     callback_confirmed: Optional[CallbackConfirmedDTO] = None
     guardrail_passed: Optional[bool] = None
     llm_provider: Optional[str] = None
