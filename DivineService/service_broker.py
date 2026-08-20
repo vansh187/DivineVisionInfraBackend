@@ -46,6 +46,19 @@ class serviceBroker:
             raise ValueError("invalid_credentials")
         if not self._verify_password(dto.password, user.password_hash):
             raise ValueError("invalid_credentials")
+        return self._token_for_user(user)
+
+    def login_by_email(self, email: str, password: str) -> str:
+        if not email or not password:
+            raise ValueError("invalid_credentials")
+        user = self._persistence.get_by_email((email or "").strip())
+        if not user:
+            raise ValueError("invalid_credentials")
+        if not self._verify_password(password, user.password_hash):
+            raise ValueError("invalid_credentials")
+        return self._token_for_user(user)
+
+    def _token_for_user(self, user) -> str:
         from datetime import timezone
         payload = {
             "sub": user.id,

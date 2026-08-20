@@ -33,6 +33,13 @@ class FakeAuthService:
         self.logins.append(dto)
         return f"{self.role}-token"
 
+    def login_by_email(self, email, password):
+        if self.invalid_login:
+            raise ValueError("invalid_credentials")
+        login = SimpleNamespace(email=email, password=password)
+        self.logins.append(login)
+        return f"{self.role}-token"
+
 
 class FakeChatbotPersistence:
     def __init__(self):
@@ -253,11 +260,48 @@ def test_customer_can_login_by_replying_yes_after_signup():
     assert "password" in prompt["reply"].lower()
     assert result["auth_token"] == "customer-token"
     assert result["auth_role"] == "customer"
-    assert customer_auth.logins[-1].username == "vanshdemo"
+    assert customer_auth.logins[-1].email == "vansh@example.com"
     assert customer_auth.logins[-1].password == "vanshdemo123"
     assert persistence.session.auth_state is None
     assert "[password hidden]" in [m["content"] for m in persistence.messages]
     assert "vanshdemo123" not in [m["content"] for m in persistence.messages]
+
+
+def test_post_signup_no_clears_login_prompt_state():
+    persistence = FakeChatbotPersistence()
+    persistence.session.auth_state = "post_signup_customer_confirm"
+    persistence.session.auth_payload = {"mode": "post_signup", "role": "customer", "email": "vansh@example.com"}
+    service = serviceChatbot(persistence=persistence, gemini=object(), groq=object())
+
+    result = service.handle_message("session-1", text="no")
+
+    assert "no problem" in result["reply"].lower()
+    assert persistence.session.auth_state is None
+
+
+def test_post_signup_unclear_reply_keeps_yes_no_prompt():
+    persistence = FakeChatbotPersistence()
+    persistence.session.auth_state = "post_signup_broker_confirm"
+    persistence.session.auth_payload = {"mode": "post_signup", "role": "broker", "email": "broker@example.com"}
+    service = serviceChatbot(persistence=persistence, gemini=object(), groq=object())
+
+    result = service.handle_message("session-1", text="maybe later maybe now")
+
+    assert "reply yes" in result["reply"].lower()
+    assert result["buttons"] == [{"label": "Login as Broker", "value": "login_broker", "action": "chatbot_auth"}]
+    assert persistence.session.auth_state == "post_signup_broker_confirm"
+
+
+def test_post_signup_missing_email_returns_fallback_without_throwing():
+    persistence = FakeChatbotPersistence()
+    persistence.session.auth_state = "post_signup_customer_confirm"
+    persistence.session.auth_payload = {"mode": "post_signup", "role": "customer"}
+    service = serviceChatbot(persistence=persistence, gemini=object(), groq=object())
+
+    result = service.handle_message("session-1", text="yes")
+
+    assert result["reply"]
+    assert persistence.session.auth_state is None
 
 
 def test_broker_signup_flow_accepts_skipped_optional_fields():
@@ -276,6 +320,9 @@ def test_broker_signup_flow_accepts_skipped_optional_fields():
     result = service.handle_message("session-1", text="anotherstrongpass")
 
     assert result["account_created"] == {"role": "broker", "username": "ravi_broker"}
+    assert "email address" in result["reply"].lower()
+    assert "buttons" not in result
+    assert persistence.session.auth_state is None
     assert broker_auth.created[-1].first_name == "Ravi"
     assert broker_auth.created[-1].last_name is None
     assert broker_auth.created[-1].email is None
@@ -289,23 +336,53 @@ def test_broker_login_flow_returns_token_and_masks_password():
         persistence=persistence, gemini=object(), groq=object(), broker_service=broker_auth,
     )
 
-    assert "username" in service.handle_message("session-1", text="login as broker")["reply"].lower()
-    assert "password" in service.handle_message("session-1", text="broker1")["reply"].lower()
+    assert "email" in service.handle_message("session-1", text="login as broker")["reply"].lower()
+    assert "password" in service.handle_message("session-1", text="broker1@example.com")["reply"].lower()
     result = service.handle_message("session-1", text="correct-password")
 
     assert result["auth_token"] == "broker-token"
     assert result["auth_role"] == "broker"
-    assert broker_auth.logins[-1].username == "broker1"
+    assert broker_auth.logins[-1].email == "broker1@example.com"
     assert broker_auth.logins[-1].password == "correct-password"
     assert persistence.session.auth_state is None
     assert "[password hidden]" in [m["content"] for m in persistence.messages]
     assert "correct-password" not in [m["content"] for m in persistence.messages]
 
 
+def test_login_flow_rejects_invalid_email_without_advancing():
+    persistence = FakeChatbotPersistence()
+    service = serviceChatbot(persistence=persistence, gemini=object(), groq=object())
+
+    service.handle_message("session-1", text="login as customer")
+    result = service.handle_message("session-1", text="not-an-email")
+
+    assert "valid email" in result["reply"].lower()
+    assert persistence.session.auth_state == "login_customer_email"
+
+
+def test_login_flow_invalid_credentials_restarts_at_email_and_masks_password():
+    persistence = FakeChatbotPersistence()
+    customer_auth = FakeAuthService("customer")
+    customer_auth.invalid_login = True
+    service = serviceChatbot(
+        persistence=persistence, gemini=object(), groq=object(), customer_service=customer_auth,
+    )
+
+    service.handle_message("session-1", text="login as customer")
+    service.handle_message("session-1", text="buyer@example.com")
+    result = service.handle_message("session-1", text="wrong-password")
+
+    assert "invalid email or password" in result["reply"].lower()
+    assert persistence.session.auth_state == "login_customer_email"
+    assert persistence.session.auth_payload == {"mode": "login", "role": "customer"}
+    assert "[password hidden]" in [m["content"] for m in persistence.messages]
+    assert "wrong-password" not in [m["content"] for m in persistence.messages]
+
+
 def test_explicit_customer_login_restarts_stale_auth_state():
     persistence = FakeChatbotPersistence()
     persistence.session.auth_state = "login_customer_password"
-    persistence.session.auth_payload = {"mode": "login", "role": "customer", "username": "olduser"}
+    persistence.session.auth_payload = {"mode": "login", "role": "customer", "email": "old@example.com"}
     customer_auth = FakeAuthService("customer")
     service = serviceChatbot(
         persistence=persistence, gemini=object(), groq=object(), customer_service=customer_auth,
@@ -313,8 +390,8 @@ def test_explicit_customer_login_restarts_stale_auth_state():
 
     result = service.handle_message("session-1", text="login as customer")
 
-    assert "username" in result["reply"].lower()
-    assert persistence.session.auth_state == "login_customer_username"
+    assert "email" in result["reply"].lower()
+    assert persistence.session.auth_state == "login_customer_email"
     assert persistence.session.auth_payload == {"mode": "login", "role": "customer"}
     assert customer_auth.logins == []
 

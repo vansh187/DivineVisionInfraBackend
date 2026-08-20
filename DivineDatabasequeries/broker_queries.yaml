@@ -5,5 +5,7 @@ create_broker: |
   RETURNING *;
 get_by_username: |
   SELECT * FROM divine_broker_users WHERE username = :username LIMIT 1;
+get_by_email: |
+  SELECT * FROM divine_broker_users WHERE lower(email) = lower(:email) LIMIT 1;
 get_by_id: |
   SELECT * FROM divine_broker_users WHERE id = :id LIMIT 1;

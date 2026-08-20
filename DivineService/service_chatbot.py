@@ -8,7 +8,7 @@ import unicodedata
 from datetime import datetime, timezone
 
 from Divinepersistence import persistenceChatbot
-from DivineDTO.models import UserCreateDTO, UserLoginDTO
+from DivineDTO.models import UserCreateDTO
 from DivineService.service_broker import serviceBroker
 from DivineService.service_customer import serviceCustomer
 from DivineService.llm_gemini import llmGemini, GeminiError
@@ -578,11 +578,11 @@ class serviceChatbot:
             reply = f"Sure, let's create your {role} account. What is your first name?"
             self._persist_turn(session_id, "assistant", reply)
             return {"session_id": session_id, "reply": reply}
-        if not self._safe_update_session_auth_state(session_id, f"login_{role}_username", {"mode": mode, "role": role}):
+        if not self._safe_update_session_auth_state(session_id, f"login_{role}_email", {"mode": mode, "role": role}):
             reply = "Sorry, I'm having trouble starting login right now. Please try again in a moment."
             self._persist_turn(session_id, "assistant", reply)
             return {"session_id": session_id, "reply": reply}
-        reply = f"Sure, please enter your {role} username."
+        reply = f"Sure, please enter your {role} email address."
         self._persist_turn(session_id, "assistant", reply)
         return {"session_id": session_id, "reply": reply}
 
@@ -617,17 +617,17 @@ class serviceChatbot:
     def _advance_post_signup_flow(self, session, text: str, payload: dict):
         session_id = session.id
         role = payload.get("role")
-        username = payload.get("username")
-        if role not in ("customer", "broker") or not username:
+        email = payload.get("email")
+        if role not in ("customer", "broker") or not email:
             return self._auth_error(session_id)
         if is_affirmative(text):
             if not self._safe_update_session_auth_state(
-                session_id, f"login_{role}_password", {"mode": "login", "role": role, "username": username}
+                session_id, f"login_{role}_password", {"mode": "login", "role": role, "email": email}
             ):
                 reply = "Sorry, I'm having trouble starting login right now. Please try again in a moment."
                 self._persist_turn(session_id, "assistant", reply)
                 return {"session_id": session_id, "reply": reply}
-            reply = f"Great, please enter the password for {username}."
+            reply = f"Great, please enter the password for {email}."
             self._persist_turn(session_id, "assistant", reply)
             return {"session_id": session_id, "reply": reply}
         if is_negative(text):
@@ -713,12 +713,13 @@ class serviceChatbot:
     def _advance_login_flow(self, session, text: str, role: str, field: str, payload: dict):
         session_id = session.id
         value = (text or "").strip()
-        if field == "username":
-            if not value:
-                reply = "Please enter your username."
+        if field == "email":
+            email = extract_email(value)
+            if not email or not valid_email(email):
+                reply = "Please enter a valid email address."
                 self._persist_turn(session_id, "assistant", reply)
                 return {"session_id": session_id, "reply": reply}
-            payload["username"] = value
+            payload["email"] = email
             self._safe_update_session_auth_state(session_id, f"login_{role}_password", payload)
             reply = "Please enter your password."
             self._persist_turn(session_id, "assistant", reply)
@@ -755,8 +756,20 @@ class serviceChatbot:
             self._persist_turn(session_id, "assistant", reply)
             return {"session_id": session_id, "reply": reply}
 
+        if not payload.get("email"):
+            self._safe_update_session_auth_state(session_id, None, None)
+            reply = f"Your {role} account has been created. To login from chatbot next time, please use an account with an email address."
+            self._persist_turn(session_id, "assistant", reply)
+            return {
+                "session_id": session_id,
+                "reply": reply,
+                "account_created": {"role": role, "username": user.username},
+            }
+
         self._safe_update_session_auth_state(
-            session_id, f"post_signup_{role}_confirm", {"mode": "post_signup", "role": role, "username": user.username}
+            session_id, f"post_signup_{role}_confirm", {
+                "mode": "post_signup", "role": role, "username": user.username, "email": payload.get("email"),
+            }
         )
         reply = f"Your {role} account has been created. Do you want to login now?"
         self._persist_turn(session_id, "assistant", reply)
@@ -770,10 +783,10 @@ class serviceChatbot:
     def _login_auth_account(self, session, role: str, payload: dict):
         session_id = session.id
         try:
-            token = self._auth_service(role).login(UserLoginDTO(**payload))
+            token = self._auth_service(role).login_by_email(payload.get("email"), payload.get("password"))
         except ValueError:
-            self._safe_update_session_auth_state(session_id, f"login_{role}_username", {"mode": "login", "role": role})
-            reply = "Invalid username or password. Please enter your username again."
+            self._safe_update_session_auth_state(session_id, f"login_{role}_email", {"mode": "login", "role": role})
+            reply = "Invalid email or password. Please enter your email address again."
             self._persist_turn(session_id, "assistant", reply)
             return {"session_id": session_id, "reply": reply}
         except Exception as e:
