@@ -285,6 +285,16 @@ def selected_auth_flow(raw: str):
     return None
 
 
+def is_affirmative(raw: str) -> bool:
+    text = _contact_text(raw)
+    return text in ("yes", "y", "yeah", "yep", "sure", "ok", "okay", "haan", "ha", "han", "ji", "yes login")
+
+
+def is_negative(raw: str) -> bool:
+    text = _contact_text(raw)
+    return text in ("no", "n", "nope", "nah", "nahi", "na", "not now", "later")
+
+
 class serviceChatbot:
     def __init__(self, persistence: persistenceChatbot = None, gemini: llmGemini = None, groq: llmGroq = None,
                  customer_service: serviceCustomer = None, broker_service: serviceBroker = None):
@@ -543,6 +553,9 @@ class serviceChatbot:
         else:
             self._persist_turn(session_id, "user", text)
 
+        if state.startswith("post_signup_"):
+            return self._advance_post_signup_flow(session, text, payload)
+
         parts = state.split("_")
         if len(parts) < 3 or parts[0] not in ("signup", "login") or parts[1] not in ("customer", "broker"):
             return self._auth_error(session_id)
@@ -557,6 +570,31 @@ class serviceChatbot:
         reply = DEGRADED_FALLBACK_REPLY
         self._persist_turn(session_id, "assistant", reply)
         return {"session_id": session_id, "reply": reply}
+
+    def _advance_post_signup_flow(self, session, text: str, payload: dict):
+        session_id = session.id
+        role = payload.get("role")
+        username = payload.get("username")
+        if role not in ("customer", "broker") or not username:
+            return self._auth_error(session_id)
+        if is_affirmative(text):
+            if not self._safe_update_session_auth_state(
+                session_id, f"login_{role}_password", {"mode": "login", "role": role, "username": username}
+            ):
+                reply = "Sorry, I'm having trouble starting login right now. Please try again in a moment."
+                self._persist_turn(session_id, "assistant", reply)
+                return {"session_id": session_id, "reply": reply}
+            reply = f"Great, please enter the password for {username}."
+            self._persist_turn(session_id, "assistant", reply)
+            return {"session_id": session_id, "reply": reply}
+        if is_negative(text):
+            self._safe_update_session_auth_state(session_id, None, None)
+            reply = "No problem. You can login anytime from this chat."
+            self._persist_turn(session_id, "assistant", reply)
+            return {"session_id": session_id, "reply": reply}
+        reply = "Please reply yes to login now, or no to do it later."
+        self._persist_turn(session_id, "assistant", reply)
+        return {"session_id": session_id, "reply": reply, "buttons": [AUTH_LOGIN_BUTTONS[role]]}
 
     def _advance_signup_flow(self, session, text: str, role: str, field: str, payload: dict):
         session_id = session.id
@@ -674,7 +712,9 @@ class serviceChatbot:
             self._persist_turn(session_id, "assistant", reply)
             return {"session_id": session_id, "reply": reply}
 
-        self._safe_update_session_auth_state(session_id, None, None)
+        self._safe_update_session_auth_state(
+            session_id, f"post_signup_{role}_confirm", {"mode": "post_signup", "role": role, "username": user.username}
+        )
         reply = f"Your {role} account has been created. Do you want to login now?"
         self._persist_turn(session_id, "assistant", reply)
         return {

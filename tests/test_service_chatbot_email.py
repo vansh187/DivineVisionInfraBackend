@@ -226,9 +226,37 @@ def test_customer_signup_flow_collects_form_fields_and_offers_login():
     assert customer_auth.created[-1].email == "vansh@example.com"
     assert customer_auth.created[-1].phone == "9876543210"
     assert customer_auth.created[-1].password == "strongpassword"
-    assert persistence.session.auth_state is None
+    assert persistence.session.auth_state == "post_signup_customer_confirm"
     assert "[password hidden]" in [m["content"] for m in persistence.messages]
     assert "strongpassword" not in [m["content"] for m in persistence.messages]
+
+
+def test_customer_can_login_by_replying_yes_after_signup():
+    persistence = FakeChatbotPersistence()
+    customer_auth = FakeAuthService("customer")
+    service = serviceChatbot(
+        persistence=persistence, gemini=object(), groq=object(), customer_service=customer_auth,
+    )
+
+    service.handle_message("session-1", text="signup as a customer")
+    service.handle_message("session-1", text="Vansh")
+    service.handle_message("session-1", text="Demo")
+    service.handle_message("session-1", text="vansh@example.com")
+    service.handle_message("session-1", text="9876543210")
+    service.handle_message("session-1", text="vanshdemo")
+    created = service.handle_message("session-1", text="vanshdemo123")
+    prompt = service.handle_message("session-1", text="yes")
+    result = service.handle_message("session-1", text="vanshdemo123")
+
+    assert "do you want to login now" in created["reply"].lower()
+    assert "password" in prompt["reply"].lower()
+    assert result["auth_token"] == "customer-token"
+    assert result["auth_role"] == "customer"
+    assert customer_auth.logins[-1].username == "vanshdemo"
+    assert customer_auth.logins[-1].password == "vanshdemo123"
+    assert persistence.session.auth_state is None
+    assert "[password hidden]" in [m["content"] for m in persistence.messages]
+    assert "vanshdemo123" not in [m["content"] for m in persistence.messages]
 
 
 def test_broker_signup_flow_accepts_skipped_optional_fields():
