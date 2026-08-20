@@ -37,11 +37,17 @@ CREATE TABLE IF NOT EXISTS divine_documents (
   form_data jsonb NOT NULL,
   storage_path text NOT NULL,
   status varchar(20) NOT NULL DEFAULT 'generated',
+  storage_bucket varchar(100),
+  project_id varchar(100),
+  payment_id varchar(36),
+  razorpay_order_id varchar(64),
+  razorpay_payment_id varchar(64),
   created_date timestamptz DEFAULT now(),
   last_updated_date timestamptz DEFAULT now()
 );
 
 CREATE INDEX IF NOT EXISTS idx_divine_documents_owner_id ON divine_documents (owner_id);
+CREATE INDEX IF NOT EXISTS idx_divine_documents_payment_id ON divine_documents (payment_id);
 
 CREATE TABLE IF NOT EXISTS divine_kyc_verifications (
   id varchar(36) PRIMARY KEY,
@@ -152,6 +158,7 @@ CREATE TABLE IF NOT EXISTS divine_chatbot_leads (
   channel varchar(10) NOT NULL DEFAULT 'web' CHECK (channel IN ('web')),
   visitor_name varchar(200),
   visitor_phone varchar(20),
+  visitor_email varchar(255),
   linked_customer_id varchar(6) REFERENCES divine_customer_users(id),
   lead_temperature varchar(10) NOT NULL DEFAULT 'cold' CHECK (lead_temperature IN ('hot','warm','cold')),
   assigned_broker_id varchar(6) REFERENCES divine_broker_users(id),
@@ -161,6 +168,7 @@ CREATE TABLE IF NOT EXISTS divine_chatbot_leads (
   last_updated_date timestamptz DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_chatbot_leads_phone ON divine_chatbot_leads (visitor_phone);
+CREATE INDEX IF NOT EXISTS idx_chatbot_leads_email ON divine_chatbot_leads (visitor_email);
 CREATE INDEX IF NOT EXISTS idx_chatbot_leads_temperature ON divine_chatbot_leads (lead_temperature);
 
 CREATE TABLE IF NOT EXISTS divine_chatbot_lead_sources (
@@ -184,10 +192,12 @@ CREATE INDEX IF NOT EXISTS idx_chatbot_lead_sources_lead_id ON divine_chatbot_le
 CREATE TABLE IF NOT EXISTS divine_chatbot_sessions (
   id varchar(36) PRIMARY KEY,
   lead_id varchar(36) REFERENCES divine_chatbot_leads(id),
-  callback_state varchar(20) CHECK (callback_state IN ('awaiting_name','awaiting_phone','awaiting_time','complete')),
+  callback_state varchar(20) CHECK (callback_state IN ('awaiting_name','awaiting_phone','awaiting_time','complete','awaiting_email','email_complete')),
   callback_name varchar(200),
   callback_phone varchar(20),
   callback_time varchar(100),
+  auth_state varchar(80),
+  auth_payload text,
   created_date timestamptz DEFAULT now(),
   last_activity_date timestamptz DEFAULT now()
 );

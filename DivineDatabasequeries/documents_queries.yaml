@@ -1,7 +1,7 @@
 # SQL queries for the documents API
 create_document: |
-  INSERT INTO divine_documents(id, owner_id, owner_role, document_type, form_data, storage_path, status, created_date, last_updated_date)
-  VALUES (:id, :owner_id, :owner_role, :document_type, :form_data, :storage_path, :status, :created_date, :last_updated_date)
+  INSERT INTO divine_documents(id, owner_id, owner_role, document_type, form_data, storage_path, status, storage_bucket, project_id, payment_id, razorpay_order_id, razorpay_payment_id, created_date, last_updated_date)
+  VALUES (:id, :owner_id, :owner_role, :document_type, :form_data, :storage_path, :status, :storage_bucket, :project_id, :payment_id, :razorpay_order_id, :razorpay_payment_id, :created_date, :last_updated_date)
   RETURNING *;
 get_by_id: |
   SELECT * FROM divine_documents WHERE id = :id LIMIT 1;

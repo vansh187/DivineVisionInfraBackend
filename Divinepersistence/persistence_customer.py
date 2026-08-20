@@ -30,6 +30,7 @@ class persistenceCustomer:
             'VALUES (:id, :username, :first_name, :last_name, :email, :phone, :password_hash, :created_by, :created_date, :last_updated_by, :last_updated_date) RETURNING *;'
         ))
         queries.setdefault("get_by_username", 'SELECT * FROM divine_customer_users WHERE username = :username LIMIT 1;')
+        queries.setdefault("get_by_email", 'SELECT * FROM divine_customer_users WHERE lower(email) = lower(:email) LIMIT 1;')
         queries.setdefault("get_by_id", 'SELECT * FROM divine_customer_users WHERE id = :id LIMIT 1;')
         self._queries = queries
         self._engine = engine
@@ -75,6 +76,15 @@ class persistenceCustomer:
         with self._session_factory() as db:
             query = self._queries.get("get_by_username")
             result = db.execute(text(query), {"username": username})
+            row = result.mappings().first()
+            if not row:
+                return None
+            return RowWrapper(row)
+
+    def get_by_email(self, email: str):
+        with self._session_factory() as db:
+            query = self._queries.get("get_by_email")
+            result = db.execute(text(query), {"email": email})
             row = result.mappings().first()
             if not row:
                 return None
