@@ -4,6 +4,7 @@ import json
 import uuid
 import logging
 import ipaddress
+import unicodedata
 from datetime import datetime, timezone
 
 from Divinepersistence import persistenceChatbot
@@ -70,15 +71,45 @@ def looks_degenerate(text: str) -> bool:
     return (junk / len(words)) > 0.35
 
 
+def _digits_only(raw: str) -> str:
+    digits = []
+    for char in raw or "":
+        try:
+            digits.append(str(unicodedata.digit(char)))
+        except (TypeError, ValueError):
+            continue
+    return "".join(digits)
+
+
+def extract_phone(raw: str) -> str:
+    digits = _digits_only(raw)
+    if len(digits) >= 12:
+        for i in range(len(digits) - 11):
+            candidate = digits[i:i + 12]
+            if candidate.startswith("91") and candidate[2] in "6789":
+                return candidate[2:]
+    if len(digits) >= 10:
+        for i in range(len(digits) - 9):
+            candidate = digits[i:i + 10]
+            if candidate[0] in "6789":
+                return candidate
+    return None
+
+
 def valid_phone(raw: str) -> bool:
-    digits = re.sub(r"\D", "", raw or "")
+    digits = _digits_only(raw)
     if len(digits) == 12 and digits.startswith("91"):
         digits = digits[2:]
-    return len(digits) == 10 and digits[0] in "6789"
+    if len(digits) == 10:
+        return digits[0] in "6789"
+    return extract_phone(raw) is not None
 
 
 def normalize_phone(raw: str) -> str:
-    digits = re.sub(r"\D", "", raw or "")
+    extracted = extract_phone(raw)
+    if extracted:
+        return extracted
+    digits = _digits_only(raw)
     if len(digits) == 12 and digits.startswith("91"):
         digits = digits[2:]
     return digits
@@ -98,26 +129,73 @@ def extract_email(raw: str) -> str:
     return match.group(0).strip() if match else None
 
 
-def wants_email_contact(raw: str) -> bool:
+def _contact_text(raw: str) -> str:
     text = (raw or "").lower()
+    text = re.sub(r"\be\s*[-_.]?\s*mail\b", "email", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def wants_email_contact(raw: str) -> bool:
+    text = _contact_text(raw)
     if not text:
         return False
-    question_markers = ("what is your", "what's your", "tell me your", "do you have", "company email")
+    question_markers = (
+        "what is your", "what's your", "tell me your", "do you have", "company email",
+        "your email", "aapka email", "apka email",
+    )
     if any(marker in text for marker in question_markers):
         return False
-    email_words = ("email", "e-mail", "mail")
+    email_words = ("email", "mail")
     connect_words = (
-        "connect", "contact", "reach", "message", "send", "share", "talk", "reply",
-        "bhejo", "bhej", "karo", "karna", "sampark",
+        "connect", "contact", "reach", "message", "send", "share", "talk", "reply", "ping",
+        "communicate", "dm", "bhejo", "bhej", "karo", "karna", "sampark", "baat",
     )
     first_person_markers = (
         "i ", "i'", "me", "my", "mujhe", "mujko", "mere", "meri", "mera", "humko", "hamko",
     )
     if not any(marker in text for marker in first_person_markers):
-        return False
+        preference_phrases = (
+            "via email", "by email", "through email", "on email", "over email",
+            "email par", "email pe", "email se", "mail par", "mail pe", "mail se",
+            "email only", "mail only", "no phone", "dont call", "don't call",
+        )
+        return any(phrase in text for phrase in preference_phrases) and any(word in text for word in email_words)
     if "email me" in text or "mail me" in text:
         return True
     return any(word in text for word in email_words) and any(word in text for word in connect_words)
+
+
+def wants_phone_contact(raw: str) -> bool:
+    text = _contact_text(raw)
+    if not text:
+        return False
+    question_markers = (
+        "what is your phone", "what is your number", "what's your phone", "what's your number",
+        "company phone", "company number", "your mobile", "aapka number", "apka number",
+    )
+    if any(marker in text for marker in question_markers):
+        return False
+    phone_words = ("phone", "number", "mobile", "call", "whatsapp", "fone")
+    connect_words = (
+        "connect", "contact", "reach", "message", "send", "share", "talk", "reply", "call",
+        "karo", "karna", "sampark", "baat",
+    )
+    first_person_markers = (
+        "i ", "i'", "me", "my", "mujhe", "mujko", "mere", "meri", "mera", "humko", "hamko",
+    )
+    preference_phrases = (
+        "via phone", "by phone", "through phone", "on phone", "over phone",
+        "phone par", "phone pe", "mobile par", "mobile pe", "call me", "call back",
+        "whatsapp me", "whatsapp par", "whatsapp pe",
+    )
+    if any(phrase in text for phrase in preference_phrases):
+        return True
+    return (
+        any(marker in text for marker in first_person_markers)
+        and any(word in text for word in phone_words)
+        and any(word in text for word in connect_words)
+    )
 
 
 class serviceChatbot:
@@ -227,6 +305,17 @@ class serviceChatbot:
         self._persist_turn(session_id, "user", text)
 
         if state == "awaiting_email":
+            if wants_phone_contact(text):
+                phone = extract_phone(text)
+                if phone:
+                    self._persistence.update_session_callback_state(session_id, "awaiting_time", callback_phone=phone)
+                    reply = "What time works best for you? Morning, afternoon, or evening?"
+                    self._persist_turn(session_id, "assistant", reply)
+                    return {"session_id": session_id, "reply": reply}
+                self._persistence.update_session_callback_state(session_id, "awaiting_phone")
+                reply = "Sure, please share your phone number and our team will call you."
+                self._persist_turn(session_id, "assistant", reply)
+                return {"session_id": session_id, "reply": reply}
             email = extract_email(text)
             if not email or not valid_email(email):
                 reply = "Could you share a valid email address?"
@@ -252,6 +341,26 @@ class serviceChatbot:
             return {"session_id": session_id, "reply": reply}
 
         if state == "awaiting_phone":
+            if wants_email_contact(text):
+                email = extract_email(text)
+                if email:
+                    if not self._save_lead_email(session.lead_id, email):
+                        reply = "Sorry, I'm having trouble saving your email right now. Could you try again in a moment?"
+                        self._persist_turn(session_id, "assistant", reply)
+                        return {"session_id": session_id, "reply": reply}
+                    self._safe_update_session_callback_state(session_id, "email_complete")
+                    if getattr(session, "callback_name", None):
+                        self._persistence.update_lead_fields(session.lead_id, visitor_name=session.callback_name)
+                    reply = f"Thanks! I have saved {email}. Our team will connect with you by email shortly."
+                    self._persist_turn(session_id, "assistant", reply)
+                    return {"session_id": session_id, "reply": reply, "email_confirmed": {"email": email}}
+                if not self._safe_update_session_callback_state(session_id, "awaiting_email"):
+                    reply = "Sorry, I'm having trouble starting the email request right now. Could you try again in a moment?"
+                    self._persist_turn(session_id, "assistant", reply)
+                    return {"session_id": session_id, "reply": reply}
+                reply = "Sure, please share your email address and our team will connect with you there."
+                self._persist_turn(session_id, "assistant", reply)
+                return {"session_id": session_id, "reply": reply}
             if not valid_phone(text):
                 reply = "Could you share a valid 10-digit number?"
                 self._persist_turn(session_id, "assistant", reply)
