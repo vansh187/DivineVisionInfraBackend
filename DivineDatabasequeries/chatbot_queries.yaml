@@ -13,6 +13,12 @@ update_lead_fields: |
       last_updated_date = :last_updated_date
   WHERE id = :id
   RETURNING *;
+update_lead_email: |
+  UPDATE divine_chatbot_leads
+  SET visitor_email = :visitor_email,
+      last_updated_date = :last_updated_date
+  WHERE id = :id
+  RETURNING *;
 
 create_lead_source: |
   INSERT INTO divine_chatbot_lead_sources(id, lead_id, ip_address, ip_geo_city, ip_geo_region, precise_lat, precise_long, maps_link, referrer, utm_source, utm_medium, utm_campaign, device_type, captured_at)

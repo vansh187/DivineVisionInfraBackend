@@ -19,7 +19,8 @@ SYSTEM_INSTRUCTION = (
     "general knowledge. If the knowledge base has no relevant information, say so plainly "
     "and offer a callback instead of guessing. Keep replies short, warm, and in the "
     "visitor's own language/register (Hindi/Hinglish/English as they write). Use "
-    "upsert_crm_lead when the visitor shares their name or phone number. Use "
+    "upsert_crm_lead when the visitor shares their name, phone number, or email address. "
+    "Only ask for email if the visitor explicitly says they want to connect by email. Use "
     "extract_lead_signals after a few substantive turns to capture budget/timeline signals."
 )
 
@@ -38,10 +39,11 @@ TOOL_SCHEMAS = [
     },
     {
         "name": "upsert_crm_lead",
-        "description": "Save or update the visitor's name and/or phone number on their lead record.",
+        "description": "Save or update the visitor's name, phone number, and/or email address on their lead record.",
         "parameters": {"type": "object", "properties": {
             "name": {"type": "string", "description": "visitor's name, if known"},
             "phone": {"type": "string", "description": "visitor's phone number, if known"},
+            "email": {"type": "string", "description": "visitor's email address, if known"},
         }, "required": []},
     },
     {
@@ -80,6 +82,42 @@ def normalize_phone(raw: str) -> str:
     if len(digits) == 12 and digits.startswith("91"):
         digits = digits[2:]
     return digits
+
+
+EMAIL_RE = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
+
+
+def valid_email(raw: str) -> bool:
+    if not raw:
+        return False
+    return bool(EMAIL_RE.fullmatch(raw.strip()))
+
+
+def extract_email(raw: str) -> str:
+    match = EMAIL_RE.search(raw or "")
+    return match.group(0).strip() if match else None
+
+
+def wants_email_contact(raw: str) -> bool:
+    text = (raw or "").lower()
+    if not text:
+        return False
+    question_markers = ("what is your", "what's your", "tell me your", "do you have", "company email")
+    if any(marker in text for marker in question_markers):
+        return False
+    email_words = ("email", "e-mail", "mail")
+    connect_words = (
+        "connect", "contact", "reach", "message", "send", "share", "talk", "reply",
+        "bhejo", "bhej", "karo", "karna", "sampark",
+    )
+    first_person_markers = (
+        "i ", "i'", "me", "my", "mujhe", "mujko", "mere", "meri", "mera", "humko", "hamko",
+    )
+    if not any(marker in text for marker in first_person_markers):
+        return False
+    if "email me" in text or "mail me" in text:
+        return True
+    return any(word in text for word in email_words) and any(word in text for word in connect_words)
 
 
 class serviceChatbot:
@@ -141,6 +179,26 @@ class serviceChatbot:
         if not text:
             return {"session_id": session_id, "reply": "Sorry, I didn't catch that — could you type your question?"}
 
+        if wants_email_contact(text):
+            email = extract_email(text)
+            self._persist_turn(session_id, "user", text)
+            if email:
+                if not self._save_lead_email(session.lead_id, email):
+                    reply = "Sorry, I'm having trouble saving your email right now. Could you try again in a moment?"
+                    self._persist_turn(session_id, "assistant", reply)
+                    return {"session_id": session_id, "reply": reply}
+                self._safe_update_session_callback_state(session_id, "email_complete")
+                reply = f"Thanks! I have saved {email}. Our team will connect with you by email shortly."
+                self._persist_turn(session_id, "assistant", reply)
+                return {"session_id": session_id, "reply": reply, "email_confirmed": {"email": email}}
+            if not self._safe_update_session_callback_state(session_id, "awaiting_email"):
+                reply = "Sorry, I'm having trouble starting the email request right now. Could you try again in a moment?"
+                self._persist_turn(session_id, "assistant", reply)
+                return {"session_id": session_id, "reply": reply}
+            reply = "Sure, please share your email address and our team will connect with you there."
+            self._persist_turn(session_id, "assistant", reply)
+            return {"session_id": session_id, "reply": reply}
+
         self._persist_turn(session_id, "user", text)
         result = self._run_agent_loop(session, text)
         self._persist_turn(
@@ -162,7 +220,26 @@ class serviceChatbot:
             self._persistence.update_session_callback_state(session_id, None)
             return self.handle_message(session_id, text=text)
 
+        if state == "email_complete":
+            self._safe_update_session_callback_state(session_id, None)
+            return self.handle_message(session_id, text=text)
+
         self._persist_turn(session_id, "user", text)
+
+        if state == "awaiting_email":
+            email = extract_email(text)
+            if not email or not valid_email(email):
+                reply = "Could you share a valid email address?"
+                self._persist_turn(session_id, "assistant", reply)
+                return {"session_id": session_id, "reply": reply}
+            if not self._save_lead_email(session.lead_id, email):
+                reply = "Sorry, I'm having trouble saving your email right now. Could you try again in a moment?"
+                self._persist_turn(session_id, "assistant", reply)
+                return {"session_id": session_id, "reply": reply}
+            self._safe_update_session_callback_state(session_id, "email_complete")
+            reply = f"Thanks! I have saved {email}. Our team will connect with you by email shortly."
+            self._persist_turn(session_id, "assistant", reply)
+            return {"session_id": session_id, "reply": reply, "email_confirmed": {"email": email}}
 
         if state == "awaiting_name":
             if not text:
@@ -329,7 +406,7 @@ class serviceChatbot:
             if name == "search_knowledge_base":
                 return self._tool_search_knowledge_base(args.get("query", ""))
             if name == "upsert_crm_lead":
-                return self._tool_upsert_crm_lead(session, args.get("name"), args.get("phone"))
+                return self._tool_upsert_crm_lead(session, args.get("name"), args.get("phone"), args.get("email"))
             if name == "extract_lead_signals":
                 return self._tool_extract_lead_signals(session)
         except Exception as e:
@@ -349,12 +426,17 @@ class serviceChatbot:
         sources = [r.title for r in rows if r.similarity and r.similarity > 0.3]
         return {"chunks": chunks, "sources": sources}
 
-    def _tool_upsert_crm_lead(self, session, name: str, phone: str) -> dict:
+    def _tool_upsert_crm_lead(self, session, name: str, phone: str, email: str = None) -> dict:
         if phone and not valid_phone(phone):
             return {"error": "invalid_phone"}
-        self._persistence.update_lead_fields(
-            session.lead_id, visitor_name=name, visitor_phone=normalize_phone(phone) if phone else None,
-        )
+        if email and not valid_email(email):
+            return {"error": "invalid_email"}
+        if name or phone:
+            self._persistence.update_lead_fields(
+                session.lead_id, visitor_name=name, visitor_phone=normalize_phone(phone) if phone else None,
+            )
+        if email and not self._save_lead_email(session.lead_id, email.strip()):
+            return {"error": "email_save_failed"}
         return {"lead_id": session.lead_id}
 
     def _tool_extract_lead_signals(self, session) -> dict:
@@ -383,6 +465,21 @@ class serviceChatbot:
         if data.get("temperature"):
             self._persistence.update_lead_fields(session.lead_id, lead_temperature=data["temperature"])
         return data
+
+    def _save_lead_email(self, lead_id: str, email: str) -> bool:
+        try:
+            self._persistence.update_lead_email(lead_id, email.strip())
+            return True
+        except Exception as e:
+            logger.warning("chatbot_email_save_failed: %s", e)
+            return False
+
+    def _safe_update_session_callback_state(self, session_id: str, state):
+        try:
+            return self._persistence.update_session_callback_state(session_id, state)
+        except Exception as e:
+            logger.warning("chatbot_email_state_update_failed: %s", e)
+            return None
 
     # ---- Callback requests (broker-facing) -----------------------------
     def list_callback_requests(self, limit: int = 100):

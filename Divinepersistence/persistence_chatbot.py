@@ -72,6 +72,22 @@ class persistenceChatbot:
                 db.rollback()
                 raise
 
+    def update_lead_email(self, id: str, visitor_email: str):
+        with self._session_factory() as db:
+            try:
+                params = {
+                    "id": id,
+                    "visitor_email": visitor_email,
+                    "last_updated_date": datetime.now(timezone.utc),
+                }
+                result = db.execute(text(self._q("update_lead_email")), params)
+                row = result.mappings().first()
+                db.commit()
+                return RowWrapper(row) if row else None
+            except Exception:
+                db.rollback()
+                raise
+
     def create_lead_source(self, id: str, lead_id: str, ip_address: str = None, ip_geo_city: str = None,
                             ip_geo_region: str = None, precise_lat: float = None, precise_long: float = None,
                             maps_link: str = None, referrer: str = None, utm_source: str = None,
