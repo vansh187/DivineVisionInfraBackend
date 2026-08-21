@@ -1,5 +1,7 @@
 import logging
 import os
+import uuid
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Query
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
@@ -101,4 +103,53 @@ def oauth_callback(
         )
     except Exception as e:
         logger.warning("zoho_oauth_callback_failed: %s", e)
+        return JSONResponse({"detail": "internal_error"}, status_code=500)
+
+
+@router.get("/status")
+def status(key: str = Query(...)):
+    """Reports whether Zoho sync is configured, WITHOUT exposing any secret values -
+    just presence/absence of each piece. Useful to confirm bootstrap succeeded without
+    needing to open Zoho's UI or the .env file."""
+    try:
+        if not _setup_token_valid(key):
+            return JSONResponse({"detail": "forbidden"}, status_code=403)
+        return {
+            "zoho_client_configured": bool(os.getenv("ZOHO_CLIENT_KEY") and os.getenv("ZOHO_SECRET_KEY")),
+            "zoho_refresh_token_set": bool(os.getenv("ZOHO_REFRESH_TOKEN")),
+            "render_persistence_configured": bool(os.getenv("RENDER_API_KEY") and os.getenv("RENDER_SERVICE_ID")),
+        }
+    except Exception as e:
+        logger.warning("zoho_status_check_failed: %s", e)
+        return JSONResponse({"detail": "internal_error"}, status_code=500)
+
+
+@router.post("/test-push")
+def test_push(key: str = Query(...)):
+    """Writes ONE real dummy record into Zoho CRM's Leads module (visible in your Zoho
+    account, easy to spot/delete: name 'Zoho Integration Test', email
+    zoho-integration-test+<uuid>@example.com) to confirm end-to-end connectivity -
+    token refresh, API domain resolution, and the upsert call all actually work against
+    your live Zoho account, not just against this backend's own code."""
+    try:
+        if not _setup_token_valid(key):
+            return JSONResponse({"detail": "forbidden"}, status_code=403)
+
+        marker = uuid.uuid4().hex[:8]
+        test_email = f"zoho-integration-test+{marker}@example.com"
+        pushed = _zoho_service.push_lead(
+            lead_id=f"diagnostic-{marker}",
+            visitor_name="Zoho Integration Test",
+            visitor_email=test_email,
+            lead_temperature="cold",
+        )
+        return {
+            "pushed": pushed,
+            "test_email": test_email,
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+            "hint": "pushed=false usually means ZOHO_REFRESH_TOKEN isn't set yet - run /oauth/start first."
+                    if not pushed else "Check Zoho CRM > Leads for this record to confirm.",
+        }
+    except Exception as e:
+        logger.warning("zoho_test_push_failed: %s", e)
         return JSONResponse({"detail": "internal_error"}, status_code=500)
