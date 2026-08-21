@@ -13,6 +13,7 @@ from DivineService.service_broker import serviceBroker
 from DivineService.service_customer import serviceCustomer
 from DivineService.llm_gemini import llmGemini, GeminiError
 from DivineService.llm_groq import llmGroq, GroqError
+from DivineService.service_zoho import serviceZoho
 
 logger = logging.getLogger(__name__)
 
@@ -346,12 +347,18 @@ def is_negative(raw: str) -> bool:
 
 class serviceChatbot:
     def __init__(self, persistence: persistenceChatbot = None, gemini: llmGemini = None, groq: llmGroq = None,
-                 customer_service: serviceCustomer = None, broker_service: serviceBroker = None):
+                 customer_service: serviceCustomer = None, broker_service: serviceBroker = None,
+                 zoho: serviceZoho = None):
         self._persistence = persistence or persistenceChatbot()
         self._gemini = gemini or llmGemini()
         self._groq = groq or llmGroq()
         self._customer_service = customer_service
         self._broker_service = broker_service
+        try:
+            self._zoho = zoho or serviceZoho()
+        except Exception as e:
+            logger.warning("zoho_service_init_failed: %s", e)
+            self._zoho = None
 
     # ---- Session init ---------------------------------------------------
     def init_session(self, referrer: str = None, utm_source: str = None, utm_medium: str = None,
@@ -558,7 +565,24 @@ class serviceChatbot:
                 id=str(uuid.uuid4()), lead_id=session.lead_id,
                 visitor_name=updated.callback_name, phone=updated.callback_phone, preferred_time=updated.callback_time,
             )
-            self._persistence.update_lead_fields(session.lead_id, visitor_name=updated.callback_name, visitor_phone=updated.callback_phone)
+            lead_row = self._persistence.update_lead_fields(
+                session.lead_id, visitor_name=updated.callback_name, visitor_phone=updated.callback_phone,
+            )
+            try:
+                if self._zoho:
+                    # Push the full current lead row (not just the fields that just changed)
+                    # so the Zoho upsert dedups correctly against a record created earlier
+                    # from a different identifier (e.g. email captured before phone).
+                    self._zoho.push_lead_async(
+                        lead_id=session.lead_id,
+                        visitor_name=getattr(lead_row, "visitor_name", None) or updated.callback_name,
+                        visitor_phone=getattr(lead_row, "visitor_phone", None) or updated.callback_phone,
+                        visitor_email=getattr(lead_row, "visitor_email", None),
+                        lead_temperature=getattr(lead_row, "lead_temperature", None),
+                    )
+            except Exception as e:
+                # Best-effort CRM sync - must never block the visitor's callback confirmation.
+                logger.warning("zoho_lead_sync_failed lead_id=%s error=%s", session.lead_id, e)
 
             reply = (f"Got it, {updated.callback_name}! We'll call you at {updated.callback_phone} around "
                      f"{updated.callback_time}. Our team will be in touch shortly.")
@@ -1025,11 +1049,26 @@ class serviceChatbot:
 
     def _save_lead_email(self, lead_id: str, email: str) -> bool:
         try:
-            self._persistence.update_lead_email(lead_id, email.strip())
-            return True
+            lead_row = self._persistence.update_lead_email(lead_id, email.strip())
         except Exception as e:
             logger.warning("chatbot_email_save_failed: %s", e)
             return False
+        try:
+            if self._zoho:
+                # Push the full current lead row (not just the email that just changed)
+                # so the Zoho upsert dedups correctly against a record created earlier
+                # from a different identifier (e.g. phone captured before email).
+                self._zoho.push_lead_async(
+                    lead_id=lead_id,
+                    visitor_name=getattr(lead_row, "visitor_name", None),
+                    visitor_phone=getattr(lead_row, "visitor_phone", None),
+                    visitor_email=(getattr(lead_row, "visitor_email", None) or email.strip()),
+                    lead_temperature=getattr(lead_row, "lead_temperature", None),
+                )
+        except Exception as e:
+            # Best-effort CRM sync - must never fail the visitor's email capture.
+            logger.warning("zoho_lead_sync_failed lead_id=%s error=%s", lead_id, e)
+        return True
 
     def _safe_update_session_callback_state(self, session_id: str, state):
         try:

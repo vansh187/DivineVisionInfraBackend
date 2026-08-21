@@ -8,5 +8,6 @@ from .service_visit import serviceVisit
 from .service_market_trend import serviceMarketTrend
 from .service_broker_commission import serviceBrokerCommission
 from .service_chatbot import serviceChatbot
+from .service_zoho import serviceZoho
 
-__all__ = ["serviceCustomer", "serviceBroker", "serviceDocument", "serviceKyc", "serviceHealth", "servicePayment", "serviceVisit", "serviceMarketTrend", "serviceBrokerCommission", "serviceChatbot"]
+__all__ = ["serviceCustomer", "serviceBroker", "serviceDocument", "serviceKyc", "serviceHealth", "servicePayment", "serviceVisit", "serviceMarketTrend", "serviceBrokerCommission", "serviceChatbot", "serviceZoho"]
