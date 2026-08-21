@@ -315,11 +315,56 @@ class serviceZoho:
                 except Exception as e:
                     logger.warning("zoho_token_invalidate_check_failed: %s", e)
                 return False
+            logger.info(
+                "zoho_upsert_succeeded module=%s action=%s record_id=%s",
+                module, entry.get("action"), (entry.get("details") or {}).get("id"),
+            )
             return True
         except Exception as e:
             # Final safety net - this method must never raise into the caller.
             logger.warning("zoho_upsert_unexpected_exception module=%s error=%s", module, e)
             return False
+
+    def find_by_email(self, module: str, email: str) -> dict:
+        """Diagnostic helper: looks up a record by email directly in Zoho (not our own
+        DB) so a sync can be verified/debugged without opening the Zoho UI. Never raises;
+        returns {"found": bool, "records": [...]} or {"found": False, "error": ...}."""
+        try:
+            if not email:
+                return {"found": False, "error": "missing_email"}
+            token = self._get_access_token()
+            if not token:
+                return {"found": False, "error": "not_configured_or_token_unavailable"}
+
+            url = f"{self._get_api_base()}/crm/v3/{module}/search"
+            try:
+                resp = requests.get(
+                    url,
+                    headers={"Authorization": f"Zoho-oauthtoken {token}"},
+                    params={"email": email},
+                    timeout=_REQUEST_TIMEOUT_SECONDS,
+                )
+            except requests.RequestException as e:
+                logger.warning("zoho_find_by_email_request_failed module=%s error=%s", module, e)
+                return {"found": False, "error": "request_failed"}
+
+            if resp.status_code == 204:
+                return {"found": False, "records": []}
+            if resp.status_code != 200:
+                logger.warning("zoho_find_by_email_failed module=%s status=%s body=%s", module, resp.status_code, resp.text[:300])
+                return {"found": False, "error": f"status_{resp.status_code}", "body": resp.text[:300]}
+
+            try:
+                payload = resp.json()
+                records = payload.get("data", []) if isinstance(payload, dict) else []
+            except Exception as e:
+                logger.warning("zoho_find_by_email_parse_failed module=%s error=%s", module, e)
+                return {"found": False, "error": "invalid_response"}
+
+            return {"found": bool(records), "records": records}
+        except Exception as e:
+            logger.warning("zoho_find_by_email_exception module=%s error=%s", module, e)
+            return {"found": False, "error": "unexpected_exception"}
 
     @staticmethod
     def _split_name(full_name: str):

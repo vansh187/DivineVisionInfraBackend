@@ -124,6 +124,23 @@ def status(key: str = Query(...)):
         return JSONResponse({"detail": "internal_error"}, status_code=500)
 
 
+@router.get("/lookup")
+def lookup(key: str = Query(...), email: str = Query(...), module: str = Query("Contacts")):
+    """Diagnostic: checks whether a record with this email actually exists in Zoho right
+    now (queries Zoho directly, not our own DB) - lets a specific signup/lead be
+    confirmed or ruled out without opening the Zoho UI. module defaults to Contacts
+    (customer/broker signups); pass module=Leads to check chatbot leads instead."""
+    try:
+        if not _setup_token_valid(key):
+            return JSONResponse({"detail": "forbidden"}, status_code=403)
+        if module not in ("Contacts", "Leads"):
+            return JSONResponse({"detail": "invalid_module"}, status_code=400)
+        return _zoho_service.find_by_email(module, email)
+    except Exception as e:
+        logger.warning("zoho_lookup_failed: %s", e)
+        return JSONResponse({"detail": "internal_error"}, status_code=500)
+
+
 @router.post("/test-push")
 def test_push(key: str = Query(...)):
     """Writes ONE real dummy record into Zoho CRM's Leads module (visible in your Zoho
