@@ -2,9 +2,10 @@ import logging
 import os
 import threading
 import time
+from pathlib import Path
 
 import requests
-from dotenv import load_dotenv
+from dotenv import load_dotenv, set_key
 
 load_dotenv()
 
@@ -14,6 +15,7 @@ _TOKEN_URL_TMPL = "https://{domain}/oauth/v2/token"
 _UPSERT_URL_TMPL = "{api_base}/crm/v3/{module}/upsert"
 _TOKEN_REFRESH_MARGIN_SECONDS = 60
 _REQUEST_TIMEOUT_SECONDS = 8
+_ENV_FILE_PATH = Path(__file__).resolve().parent.parent / ".env"
 
 
 class serviceZoho:
@@ -129,6 +131,95 @@ class serviceZoho:
         except Exception as e:
             logger.warning("zoho_api_base_resolve_failed: %s", e)
             return "https://www.zohoapis.in"
+
+    # ---- One-time OAuth bootstrap ---------------------------------------------
+    def complete_oauth_setup(self, code: str, redirect_uri: str, accounts_server: str = None) -> dict:
+        """Exchanges a ONE-TIME Zoho grant/authorization code for a long-lived refresh
+        token, then activates it immediately (updates this process's environment and
+        in-memory cache) and best-effort persists it to the local .env file so it
+        survives a restart in dev. On a hosted platform without a writable/authoritative
+        .env file (e.g. Render), env_file_updated will be False - the caller is expected
+        to also copy refresh_token into that platform's own env var dashboard.
+
+        Never raises - always returns a dict with at least {"success": bool}."""
+        try:
+            if not code:
+                return {"success": False, "error": "missing_code"}
+            if not self._client_id or not self._client_secret:
+                return {"success": False, "error": "zoho_client_not_configured"}
+
+            domain = None
+            try:
+                if accounts_server:
+                    domain = accounts_server.split("://", 1)[-1].strip("/")
+            except Exception as e:
+                logger.warning("zoho_accounts_server_parse_failed: %s", e)
+            domain = domain or self._accounts_domain
+
+            try:
+                url = _TOKEN_URL_TMPL.format(domain=domain)
+                resp = requests.post(
+                    url,
+                    params={
+                        "grant_type": "authorization_code",
+                        "client_id": self._client_id,
+                        "client_secret": self._client_secret,
+                        "redirect_uri": redirect_uri,
+                        "code": code,
+                    },
+                    timeout=_REQUEST_TIMEOUT_SECONDS,
+                )
+            except requests.RequestException as e:
+                logger.warning("zoho_oauth_setup_request_failed: %s", e)
+                return {"success": False, "error": "request_failed"}
+
+            try:
+                payload = resp.json()
+            except Exception as e:
+                logger.warning("zoho_oauth_setup_response_parse_failed: %s", e)
+                return {"success": False, "error": "invalid_response"}
+
+            if resp.status_code != 200 or not isinstance(payload, dict) or not payload.get("refresh_token"):
+                logger.warning("zoho_oauth_setup_failed status=%s body=%s", resp.status_code, payload)
+                error = payload.get("error") if isinstance(payload, dict) else None
+                return {"success": False, "error": error or "no_refresh_token_returned"}
+
+            refresh_token = payload["refresh_token"]
+            api_domain = payload.get("api_domain")
+
+            # Activate immediately in THIS process, no restart needed.
+            try:
+                self._refresh_token = refresh_token
+                os.environ["ZOHO_REFRESH_TOKEN"] = refresh_token
+                serviceZoho._cached_token = None
+                serviceZoho._cached_token_expiry = 0.0
+                if api_domain:
+                    serviceZoho._cached_api_base = api_domain
+            except Exception as e:
+                logger.warning("zoho_oauth_setup_activate_failed: %s", e)
+
+            env_file_updated = self._persist_refresh_token_to_env_file(refresh_token)
+
+            return {
+                "success": True,
+                "refresh_token": refresh_token,
+                "api_domain": api_domain,
+                "env_file_updated": env_file_updated,
+            }
+        except Exception as e:
+            logger.warning("zoho_oauth_setup_exception: %s", e)
+            return {"success": False, "error": "unexpected_exception"}
+
+    def _persist_refresh_token_to_env_file(self, refresh_token: str) -> bool:
+        try:
+            if not _ENV_FILE_PATH.exists():
+                logger.info("zoho_env_file_not_found path=%s - skipping local persist", _ENV_FILE_PATH)
+                return False
+            set_key(str(_ENV_FILE_PATH), "ZOHO_REFRESH_TOKEN", refresh_token)
+            return True
+        except Exception as e:
+            logger.warning("zoho_env_persist_failed: %s", e)
+            return False
 
     # ---- Generic upsert -----------------------------------------------------
     def _upsert(self, module: str, record: dict, duplicate_check_fields: list) -> bool:
