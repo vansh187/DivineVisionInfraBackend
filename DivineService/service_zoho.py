@@ -199,12 +199,14 @@ class serviceZoho:
                 logger.warning("zoho_oauth_setup_activate_failed: %s", e)
 
             env_file_updated = self._persist_refresh_token_to_env_file(refresh_token)
+            render_updated = self._persist_refresh_token_to_render(refresh_token)
 
             return {
                 "success": True,
                 "refresh_token": refresh_token,
                 "api_domain": api_domain,
                 "env_file_updated": env_file_updated,
+                "render_updated": render_updated,
             }
         except Exception as e:
             logger.warning("zoho_oauth_setup_exception: %s", e)
@@ -219,6 +221,41 @@ class serviceZoho:
             return True
         except Exception as e:
             logger.warning("zoho_env_persist_failed: %s", e)
+            return False
+
+    def _persist_refresh_token_to_render(self, refresh_token: str) -> bool:
+        """Best-effort: writes ZOHO_REFRESH_TOKEN into this service's Render env vars via
+        the Render API, so the token survives a restart/redeploy with no manual copy-paste.
+        Requires RENDER_API_KEY and RENDER_SERVICE_ID - without either, this is a silent
+        no-op (env_file persistence and the in-process activation above still happened)."""
+        try:
+            api_key = os.getenv("RENDER_API_KEY")
+            service_id = os.getenv("RENDER_SERVICE_ID")
+            if not api_key or not service_id:
+                logger.info("zoho_render_persist_skipped reason=render_not_configured")
+                return False
+
+            try:
+                resp = requests.put(
+                    f"https://api.render.com/v1/services/{service_id}/env-vars/ZOHO_REFRESH_TOKEN",
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                        "Accept": "application/json",
+                    },
+                    json={"value": refresh_token},
+                    timeout=_REQUEST_TIMEOUT_SECONDS,
+                )
+            except requests.RequestException as e:
+                logger.warning("zoho_render_persist_request_failed: %s", e)
+                return False
+
+            if resp.status_code not in (200, 201):
+                logger.warning("zoho_render_persist_failed status=%s body=%s", resp.status_code, resp.text[:300])
+                return False
+            return True
+        except Exception as e:
+            logger.warning("zoho_render_persist_exception: %s", e)
             return False
 
     # ---- Generic upsert -----------------------------------------------------

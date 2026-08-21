@@ -81,18 +81,22 @@ def oauth_callback(
         if not result.get("success"):
             return JSONResponse({"detail": "zoho_oauth_setup_failed", "reason": result.get("error")}, status_code=502)
 
-        note = (
-            "Saved to the local .env file automatically."
-            if result.get("env_file_updated")
-            else "Could not write a local .env file (normal on Render) - copy the token below "
-                 "into ZOHO_REFRESH_TOKEN in your Render dashboard so it survives a restart. "
-                 "It is already active for this running process right now."
-        )
+        notes = ["It is active for this running process right now - Zoho sync works immediately."]
+        if result.get("env_file_updated"):
+            notes.append("Saved to the local .env file automatically.")
+        if result.get("render_updated"):
+            notes.append("Saved to Render's env vars automatically - it will survive restarts/redeploys "
+                          "(Render is redeploying this service now to pick it up).")
+        elif not result.get("env_file_updated"):
+            notes.append("Could not persist it anywhere durable (no local .env file, and RENDER_API_KEY/"
+                          "RENDER_SERVICE_ID aren't set) - copy the token below into ZOHO_REFRESH_TOKEN "
+                          "in your Render dashboard yourself so it survives a restart.")
+
         return HTMLResponse(
             "<html><body style='font-family:sans-serif'>"
             "<h3>Zoho CRM connected</h3>"
-            f"<p>{note}</p>"
-            f"<p><b>ZOHO_REFRESH_TOKEN</b>: <code>{result.get('refresh_token')}</code></p>"
+            + "".join(f"<p>{n}</p>" for n in notes)
+            + f"<p><b>ZOHO_REFRESH_TOKEN</b>: <code>{result.get('refresh_token')}</code></p>"
             "</body></html>"
         )
     except Exception as e:
