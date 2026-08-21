@@ -89,6 +89,22 @@ class persistenceChatbot:
                 db.rollback()
                 raise
 
+    def update_lead_notify_updates(self, id: str, notify_updates_opt_in: bool):
+        with self._session_factory() as db:
+            try:
+                params = {
+                    "id": id,
+                    "notify_updates_opt_in": notify_updates_opt_in,
+                    "last_updated_date": datetime.now(timezone.utc),
+                }
+                result = db.execute(text(self._q("update_lead_notify_updates")), params)
+                row = result.mappings().first()
+                db.commit()
+                return RowWrapper(row) if row else None
+            except Exception:
+                db.rollback()
+                raise
+
     def create_lead_source(self, id: str, lead_id: str, ip_address: str = None, ip_geo_city: str = None,
                             ip_geo_region: str = None, precise_lat: float = None, precise_long: float = None,
                             maps_link: str = None, referrer: str = None, utm_source: str = None,
@@ -188,6 +204,23 @@ class persistenceChatbot:
                 db.rollback()
                 raise
 
+    def update_session_menu_state(self, id: str, menu_state, menu_payload: dict = None):
+        with self._session_factory() as db:
+            try:
+                params = {
+                    "id": id,
+                    "menu_state": menu_state,
+                    "menu_payload": json.dumps(menu_payload or {}) if menu_state else None,
+                    "last_activity_date": datetime.now(timezone.utc),
+                }
+                result = db.execute(text(self._q("update_session_menu_state")), params)
+                row = result.mappings().first()
+                db.commit()
+                return RowWrapper(row) if row else None
+            except Exception:
+                db.rollback()
+                raise
+
     # ---- Messages ---------------------------------------------------------
     def create_message(self, id: str, session_id: str, role: str, content: str, tool_name: str = None,
                         llm_provider: str = None, guardrail_score: float = None,
@@ -232,13 +265,40 @@ class persistenceChatbot:
                 db.rollback()
                 raise
 
+    def create_menu_qualification(self, id: str, lead_id: str, budget_min: float = None, budget_max: float = None,
+                                   unit_type: str = None, timeline_days: int = None, intent_signal: str = None,
+                                   temperature: str = None, buyer_type: str = None, working_profile_type: str = None,
+                                   location_preference: str = None, opportunity_type: str = None,
+                                   investment_size_band: str = None, investment_goal: str = None,
+                                   proceed_preference: str = None, source_flow: str = None):
+        with self._session_factory() as db:
+            try:
+                params = {
+                    "id": id, "lead_id": lead_id, "budget_min": budget_min, "budget_max": budget_max,
+                    "unit_type": unit_type, "timeline_days": timeline_days, "intent_signal": intent_signal,
+                    "temperature": temperature, "buyer_type": buyer_type, "working_profile_type": working_profile_type,
+                    "location_preference": location_preference, "opportunity_type": opportunity_type,
+                    "investment_size_band": investment_size_band, "investment_goal": investment_goal,
+                    "proceed_preference": proceed_preference, "source_flow": source_flow,
+                    "updated_date": datetime.now(timezone.utc),
+                }
+                result = db.execute(text(self._q("create_menu_qualification")), params)
+                row = result.mappings().first()
+                db.commit()
+                return RowWrapper(row)
+            except Exception:
+                db.rollback()
+                raise
+
     # ---- Callback requests -----------------------------------------------
-    def create_callback_request(self, id: str, lead_id: str, visitor_name: str, phone: str, preferred_time: str):
+    def create_callback_request(self, id: str, lead_id: str, visitor_name: str, phone: str, preferred_time: str,
+                                 notes: str = None, request_type: str = "callback"):
         with self._session_factory() as db:
             try:
                 params = {
                     "id": id, "lead_id": lead_id, "visitor_name": visitor_name,
                     "phone": phone, "preferred_time": preferred_time,
+                    "notes": notes, "request_type": request_type,
                     "requested_at": datetime.now(timezone.utc),
                 }
                 result = db.execute(text(self._q("create_callback_request")), params)

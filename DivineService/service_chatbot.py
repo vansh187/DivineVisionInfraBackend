@@ -22,11 +22,17 @@ SYSTEM_INSTRUCTION = (
     "Answer visitor questions about projects, pricing, RERA, and specs ONLY using the "
     "search_knowledge_base tool's results - never invent figures or claims from your own "
     "general knowledge. If the knowledge base has no relevant information, say so plainly "
-    "and offer a callback instead of guessing. Keep replies short, warm, and in the "
-    "visitor's own language/register (Hindi/Hinglish/English as they write). Use "
-    "upsert_crm_lead when the visitor shares their name, phone number, or email address. "
-    "Only ask for email if the visitor explicitly says they want to connect by email. Use "
-    "extract_lead_signals after a few substantive turns to capture budget/timeline signals."
+    "and offer a callback instead of guessing. "
+    "You are a knowledgeable, consultative sales assistant, not just an FAQ bot - when you "
+    "don't have specific data, don't just say you don't know: acknowledge the question, "
+    "share what you do know from the knowledge base, and route to a callback or site visit "
+    "for the specifics you can't confirm. When a visitor raises a concern or objection, "
+    "address it directly using knowledge base content before pivoting to a call-to-action. "
+    "Keep replies short, warm, and in the visitor's own language/register (Hindi/Hinglish/"
+    "English as they write). Use upsert_crm_lead when the visitor shares their name, phone "
+    "number, or email address. Only ask for email if the visitor explicitly says they want "
+    "to connect by email. Use extract_lead_signals after a few substantive turns to capture "
+    "budget/timeline signals."
 )
 
 SAFE_FALLBACK_REPLY = "I don't want to guess on that — let me get you an exact answer from our team. Would you like a callback?"
@@ -94,6 +100,142 @@ AUTH_FLOW_VALUES = {
     "register_broker": ("signup", "broker"),
     "broker_register": ("signup", "broker"),
 }
+
+# ---- Menu-driven sales flow (deterministic, no LLM) --------------------------
+# Button copy below is a first pass and expected to be refined with exact wording
+# from the business - the state sequencing/persistence is the stable part.
+MAIN_MENU_BUTTONS = [
+    {"label": "About Divine Vision", "value": "menu_about", "action": "chatbot_menu"},
+    {"label": "Chat with Sales", "value": "menu_sales", "action": "chatbot_menu"},
+    {"label": "Chat with Support", "value": "menu_support", "action": "chatbot_menu"},
+    {"label": "Only Browsing", "value": "menu_browsing", "action": "chatbot_menu"},
+]
+SALES_TRACK_BUTTONS = [
+    {"label": "Buy a Property / End Client", "value": "sales_end_client", "action": "chatbot_menu"},
+    {"label": "Investor / Dealer", "value": "sales_investor_dealer", "action": "chatbot_menu"},
+]
+PROFILE_TYPE_BUTTONS = [
+    {"label": "Individual Buyer", "value": "profile_individual_buyer", "action": "chatbot_menu"},
+    {"label": "Individual Investor", "value": "profile_individual_investor", "action": "chatbot_menu"},
+    {"label": "Channel Partner / Broker", "value": "profile_channel_partner", "action": "chatbot_menu"},
+    {"label": "Corporate / Institutional", "value": "profile_corporate", "action": "chatbot_menu"},
+]
+LOCATION_BUTTONS = [
+    {"label": "OPS Divine Greens area", "value": "loc_ops_divine_greens", "action": "chatbot_menu"},
+    {"label": "Suraksha Enclave area", "value": "loc_suraksha_enclave", "action": "chatbot_menu"},
+    {"label": "Other / Not sure yet", "value": "loc_other", "action": "chatbot_menu"},
+]
+OPPORTUNITY_TYPE_BUTTONS = [
+    {"label": "Residential Plot", "value": "opp_residential_plot", "action": "chatbot_menu"},
+    {"label": "Residential Unit / Flat", "value": "opp_residential_unit", "action": "chatbot_menu"},
+    {"label": "Commercial", "value": "opp_commercial", "action": "chatbot_menu"},
+]
+INVESTMENT_SIZE_BUTTONS = [
+    {"label": "Under 20 Lakh", "value": "size_under_20l", "action": "chatbot_menu"},
+    {"label": "20-50 Lakh", "value": "size_20_50l", "action": "chatbot_menu"},
+    {"label": "50 Lakh - 1 Cr", "value": "size_50l_1cr", "action": "chatbot_menu"},
+    {"label": "Above 1 Cr", "value": "size_above_1cr", "action": "chatbot_menu"},
+]
+INVESTMENT_GOAL_BUTTONS = [
+    {"label": "Long-term Investment", "value": "goal_long_term", "action": "chatbot_menu"},
+    {"label": "Short-term / Quick Resale", "value": "goal_short_term", "action": "chatbot_menu"},
+    {"label": "Rental Yield", "value": "goal_rental_yield", "action": "chatbot_menu"},
+    {"label": "Self Use / End Use", "value": "goal_self_use", "action": "chatbot_menu"},
+]
+PROCEED_BUTTONS = [
+    {"label": "Register My Interest", "value": "proceed_register", "action": "chatbot_menu"},
+    {"label": "Schedule a Site Visit", "value": "proceed_site_visit", "action": "chatbot_menu"},
+    {"label": "Send Me Regular Updates", "value": "proceed_updates", "action": "chatbot_menu"},
+    {"label": "Talk to Someone Now", "value": "proceed_talk_now", "action": "chatbot_menu"},
+]
+FIRST_TIME_BUTTONS = [
+    {"label": "Yes, first time", "value": "first_time_yes", "action": "chatbot_menu"},
+    {"label": "No, visited before", "value": "first_time_no", "action": "chatbot_menu"},
+]
+DECISION_BUTTONS = [
+    {"label": "I've Decided, Proceed", "value": "decision_proceed", "action": "chatbot_menu"},
+    {"label": "Call Me Back", "value": "decision_call_back", "action": "chatbot_menu"},
+    {"label": "WhatsApp Me", "value": "decision_whatsapp", "action": "chatbot_menu"},
+]
+YES_NO_BUTTONS = [
+    {"label": "Yes", "value": "yes", "action": "chatbot_menu"},
+    {"label": "No", "value": "no", "action": "chatbot_menu"},
+]
+
+# state -> (reply text asked upon entering the state, buttons or None)
+MENU_QUESTIONS = {
+    "main_menu": ("How can I help you today?", MAIN_MENU_BUTTONS),
+    "sales_track": ("Great! Are you looking to buy a property for yourself, or exploring as an investor/dealer?", SALES_TRACK_BUTTONS),
+    "sales_profile_type": ("Please select your working profile type.", PROFILE_TYPE_BUTTONS),
+    "sales_location": ("Which location are you currently exploring for investment?", LOCATION_BUTTONS),
+    "sales_opportunity_type": ("What type of opportunities are you looking for?", OPPORTUNITY_TYPE_BUTTONS),
+    "sales_investment_size": ("What is your typical investment size?", INVESTMENT_SIZE_BUTTONS),
+    "sales_investment_goal": ("What is your investment goal?", INVESTMENT_GOAL_BUTTONS),
+    "sales_proceed": ("How would you like to proceed?", PROCEED_BUTTONS),
+    "browsing_first_time": ("No problem! Is this your first time exploring our projects?", FIRST_TIME_BUTTONS),
+    "browsing_location": ("Which location are you exploring?", LOCATION_BUTTONS),
+    "browsing_budget": ("What's your approximate budget range?", INVESTMENT_SIZE_BUTTONS),
+    "browsing_investor_qual": ("Are you exploring this as an investor, or for personal/end use?", SALES_TRACK_BUTTONS),
+    "browsing_decision": ("How would you like to proceed?", DECISION_BUTTONS),
+    "support_updates_optin": ("Thanks, our team will get back to you shortly! Would you like to be notified about new updates and offers?", YES_NO_BUTTONS),
+}
+
+# state -> (menu_payload field the matched button value is stored under, next state)
+# Only states whose answer is "pick one button, store it, move to the next question" -
+# branching states (main_menu, support_*, browsing_decision, sales_proceed) are hand-written.
+MENU_LINEAR_TRANSITIONS = {
+    "sales_track": ("buyer_type", "sales_profile_type"),
+    "sales_profile_type": ("working_profile_type", "sales_location"),
+    "sales_location": ("location_preference", "sales_opportunity_type"),
+    "sales_opportunity_type": ("opportunity_type", "sales_investment_size"),
+    "sales_investment_size": ("investment_size_band", "sales_investment_goal"),
+    "sales_investment_goal": ("investment_goal", "sales_proceed"),
+    "browsing_first_time": ("first_time_response", "browsing_location"),
+    "browsing_location": ("location_preference", "browsing_budget"),
+    "browsing_budget": ("investment_size_band", "browsing_investor_qual"),
+    "browsing_investor_qual": ("buyer_type", "browsing_decision"),
+}
+
+# Both sales_track and browsing_investor_qual reuse SALES_TRACK_BUTTONS' values for the
+# buyer_type signal - map them to the DB's CHECK-constrained enum.
+BUYER_TYPE_VALUE_MAP = {"sales_end_client": "end_client", "sales_investor_dealer": "investor_dealer"}
+
+
+def _tokens_contain_subsequence(haystack_tokens: list, needle_tokens: list) -> bool:
+    # Whole-token containment, not raw substring containment - "no" must not match inside
+    # "noon" or "not_sure" or "know", the way naive `"no" in "noon"` would.
+    if not needle_tokens:
+        return False
+    n = len(needle_tokens)
+    return any(haystack_tokens[i:i + n] == needle_tokens for i in range(len(haystack_tokens) - n + 1))
+
+
+def _match_menu_button(raw: str, buttons: list):
+    text = _contact_text(raw)
+    if not text:
+        return None
+    normalized_value = re.sub(r"[\s-]+", "_", text)
+    value_tokens = [t for t in normalized_value.split("_") if t]
+
+    for b in buttons:
+        if b["value"] == normalized_value:
+            return b["value"]
+    for b in buttons:
+        needle = [t for t in b["value"].split("_") if t]
+        if _tokens_contain_subsequence(value_tokens, needle):
+            return b["value"]
+
+    text_tokens = text.split()
+    for b in buttons:
+        label_norm = _contact_text(b["label"])
+        if not label_norm:
+            continue
+        if label_norm == text:
+            return b["value"]
+        if _tokens_contain_subsequence(text_tokens, label_norm.split()):
+            return b["value"]
+    return None
+
 
 TOOL_SCHEMAS = [
     {
@@ -370,6 +512,13 @@ class serviceChatbot:
             utm_campaign=utm_campaign, device_type=device_type,
         )
         session = self._persistence.create_session(id=str(uuid.uuid4()), lead_id=lead.id)
+        try:
+            self._persistence.update_session_menu_state(session.id, "greeting_name", {})
+        except Exception as e:
+            # Best-effort: if this fails, the visitor just lands in the old free-text
+            # experience (menu_state stays NULL) instead of the guided funnel - never
+            # fail session creation over it.
+            logger.warning("menu_state_init_failed session_id=%s error=%s", session.id, e)
         return {"session_id": session.id, "lead_id": lead.id}
 
     # ---- Main entry point -------------------------------------------------
@@ -417,6 +566,21 @@ class serviceChatbot:
 
         if session.callback_state:
             return self._advance_callback_flow(session, text)
+
+        if auth_flow and auth_flow[1] and getattr(session, "menu_state", None):
+            # Explicit, UNAMBIGUOUS auth intent (mode + role both known, e.g. "login as
+            # customer") always wins over the menu funnel - without this, a fresh visitor
+            # typing that during greeting/menu capture would have it swallowed as their
+            # name or as an answer to the current menu question. Deliberately requires a
+            # role (auth_flow[1]) rather than firing on the weaker ("choose", None) case -
+            # selected_auth_flow does plain substring matching on bare words like "register"/
+            # "create", which collide with menu button values (e.g. "proceed_register").
+            self._safe_update_session_menu_state(session_id, None, None)
+            self._persist_turn(session_id, "user", text)
+            return self._start_auth_flow(session, auth_flow)
+
+        if getattr(session, "menu_state", None):
+            return self._advance_menu_flow(session, text)
 
         if not text:
             return {"session_id": session_id, "reply": "Sorry, I didn't catch that — could you type your question?"}
@@ -595,6 +759,315 @@ class serviceChatbot:
         # Unreachable in practice - callback_state is DB-constrained to the four known
         # values and "complete" is handled above before any persistence happens.
         return {"session_id": session_id, "reply": DEGRADED_FALLBACK_REPLY}
+
+    # ---- Menu-driven sales flow (deterministic, no LLM) ----------------------
+    def _advance_menu_flow(self, session, text: str):
+        session_id = session.id
+        state = getattr(session, "menu_state", None)
+        payload = self._menu_payload(session)
+
+        if state == "complete":
+            # Same convention as callback_state's "complete" - clear the state and hand
+            # this message to the normal handler, which will persist it itself.
+            self._safe_update_session_menu_state(session_id, None, None)
+            return self.handle_message(session_id, text=text)
+
+        if state == "greeting_name":
+            if not text:
+                # First turn of a fresh session (frontend calls /message once, even with
+                # empty text, right after session init) - show the greeting, don't persist
+                # an empty user turn, don't advance state yet.
+                reply = (
+                    "Hi! Welcome to Divine Vision Infratech. Hope you're doing well. I'd "
+                    "love to assist you. Please share your full name, phone number, and "
+                    "email id, so our project expert can assist you better. To start, "
+                    "what's your name?"
+                )
+                self._persist_turn(session_id, "assistant", reply)
+                return {"session_id": session_id, "reply": reply}
+            self._persist_turn(session_id, "user", text)
+            if not text.strip():
+                reply = "Please share your full name to continue."
+                self._persist_turn(session_id, "assistant", reply)
+                return {"session_id": session_id, "reply": reply}
+            payload["name"] = text.strip()
+            self._safe_update_session_menu_state(session_id, "greeting_phone", payload)
+            reply = "Thanks! Please share your phone number."
+            self._persist_turn(session_id, "assistant", reply)
+            return {"session_id": session_id, "reply": reply}
+
+        if state == "greeting_phone":
+            self._persist_turn(session_id, "user", text)
+            if not valid_phone(text):
+                reply = "That doesn't look like a valid phone number. Could you share a valid phone number?"
+                self._persist_turn(session_id, "assistant", reply)
+                return {"session_id": session_id, "reply": reply}
+            payload["phone"] = normalize_phone(text)
+            self._safe_update_session_menu_state(session_id, "greeting_email", payload)
+            reply = "Great! And your email address?"
+            self._persist_turn(session_id, "assistant", reply)
+            return {"session_id": session_id, "reply": reply}
+
+        if state == "greeting_email":
+            self._persist_turn(session_id, "user", text)
+            email = text.strip() if valid_email(text) else extract_email(text)
+            if not email:
+                reply = "Please share a valid email address so our project expert can reach you."
+                self._persist_turn(session_id, "assistant", reply)
+                return {"session_id": session_id, "reply": reply}
+            try:
+                self._persistence.update_lead_fields(
+                    session.lead_id, visitor_name=payload.get("name"), visitor_phone=payload.get("phone"),
+                )
+            except Exception as e:
+                logger.warning("menu_greeting_lead_update_failed lead_id=%s error=%s", session.lead_id, e)
+            if not self._save_lead_email(session.lead_id, email):
+                reply = "Sorry, I'm having trouble saving your details right now. Could you share your email again in a moment?"
+                self._persist_turn(session_id, "assistant", reply)
+                return {"session_id": session_id, "reply": reply}
+            self._safe_update_session_menu_state(session_id, "main_menu", {})
+            reply, buttons = MENU_QUESTIONS["main_menu"]
+            reply = "Thanks! " + reply
+            self._persist_turn(session_id, "assistant", reply)
+            return {"session_id": session_id, "reply": reply, "buttons": buttons}
+
+        if state == "main_menu":
+            self._persist_turn(session_id, "user", text)
+            matched = _match_menu_button(text, MAIN_MENU_BUTTONS)
+            if matched == "menu_about":
+                self._safe_update_session_menu_state(session_id, None, None)
+                reply = "Sure! Ask me anything about Divine Vision Infratech - our projects, RERA approvals, or anything else."
+                self._persist_turn(session_id, "assistant", reply)
+                return {"session_id": session_id, "reply": reply}
+            if matched == "menu_sales":
+                self._safe_update_session_menu_state(session_id, "sales_track", {})
+                reply, buttons = MENU_QUESTIONS["sales_track"]
+                self._persist_turn(session_id, "assistant", reply)
+                return {"session_id": session_id, "reply": reply, "buttons": buttons}
+            if matched == "menu_support":
+                self._safe_update_session_menu_state(session_id, "support_concern", {})
+                reply = "I'm sorry to hear that. Please share your concern and our support team will assist you shortly."
+                self._persist_turn(session_id, "assistant", reply)
+                return {"session_id": session_id, "reply": reply}
+            if matched == "menu_browsing":
+                self._safe_update_session_menu_state(session_id, "browsing_first_time", {})
+                reply, buttons = MENU_QUESTIONS["browsing_first_time"]
+                self._persist_turn(session_id, "assistant", reply)
+                return {"session_id": session_id, "reply": reply, "buttons": buttons}
+            reply, buttons = MENU_QUESTIONS["main_menu"]
+            reply = "Sorry, please choose one of the options below.\n" + reply
+            self._persist_turn(session_id, "assistant", reply)
+            return {"session_id": session_id, "reply": reply, "buttons": buttons}
+
+        if state == "support_concern":
+            self._persist_turn(session_id, "user", text)
+            if not text.strip():
+                reply = "Please share your concern so our support team can help."
+                self._persist_turn(session_id, "assistant", reply)
+                return {"session_id": session_id, "reply": reply}
+            payload["concern"] = text.strip()
+            try:
+                lead = self._persistence.get_lead_by_id(session.lead_id)
+                self._persistence.create_callback_request(
+                    id=str(uuid.uuid4()), lead_id=session.lead_id,
+                    visitor_name=getattr(lead, "visitor_name", None) or "Visitor",
+                    phone=getattr(lead, "visitor_phone", None) or "",
+                    preferred_time="As soon as possible", notes=payload["concern"], request_type="support",
+                )
+            except Exception as e:
+                logger.warning("menu_support_ticket_failed lead_id=%s error=%s", session.lead_id, e)
+                reply = "Sorry, I'm having trouble saving this right now. Could you try again in a moment?"
+                self._persist_turn(session_id, "assistant", reply)
+                return {"session_id": session_id, "reply": reply}
+            self._safe_update_session_menu_state(session_id, "support_updates_optin", payload)
+            reply, buttons = MENU_QUESTIONS["support_updates_optin"]
+            self._persist_turn(session_id, "assistant", reply)
+            return {"session_id": session_id, "reply": reply, "buttons": buttons}
+
+        if state == "support_updates_optin":
+            self._persist_turn(session_id, "user", text)
+            opt_in = None
+            if is_affirmative(text) or _match_menu_button(text, YES_NO_BUTTONS) == "yes":
+                opt_in = True
+            elif is_negative(text) or _match_menu_button(text, YES_NO_BUTTONS) == "no":
+                opt_in = False
+            if opt_in is None:
+                reply, buttons = MENU_QUESTIONS["support_updates_optin"]
+                reply = "Please reply yes or no - " + reply
+                self._persist_turn(session_id, "assistant", reply)
+                return {"session_id": session_id, "reply": reply, "buttons": buttons}
+            try:
+                self._persistence.update_lead_notify_updates(session.lead_id, opt_in)
+            except Exception as e:
+                logger.warning("menu_notify_updates_failed lead_id=%s error=%s", session.lead_id, e)
+            self._sync_lead_to_zoho(session.lead_id)
+            self._safe_update_session_menu_state(session_id, "complete", {})
+            reply = "Thank you! Our team will reach out to you soon. Is there anything else I can help with?"
+            self._persist_turn(session_id, "assistant", reply)
+            return {"session_id": session_id, "reply": reply}
+
+        if state == "browsing_decision":
+            self._persist_turn(session_id, "user", text)
+            matched = _match_menu_button(text, DECISION_BUTTONS)
+            if matched == "decision_call_back":
+                return self._start_callback_flow_prefilled(session)
+            if matched in ("decision_proceed", "decision_whatsapp"):
+                payload["proceed_preference"] = "whatsapp" if matched == "decision_whatsapp" else "proceed"
+                self._save_menu_qualification(session, payload, source_flow="menu_browsing")
+                self._sync_lead_to_zoho(session.lead_id)
+                self._safe_update_session_menu_state(session_id, "complete", {})
+                if matched == "decision_whatsapp":
+                    reply = "Great, our team will reach out to you on WhatsApp shortly!"
+                else:
+                    reply = "Thank you! Our project expert will reach out to you shortly."
+                self._persist_turn(session_id, "assistant", reply)
+                return {"session_id": session_id, "reply": reply}
+            reply, buttons = MENU_QUESTIONS["browsing_decision"]
+            reply = "Sorry, please choose one of the options below.\n" + reply
+            self._persist_turn(session_id, "assistant", reply)
+            return {"session_id": session_id, "reply": reply, "buttons": buttons}
+
+        if state == "sales_proceed":
+            self._persist_turn(session_id, "user", text)
+            matched = _match_menu_button(text, PROCEED_BUTTONS)
+            if matched == "proceed_talk_now":
+                payload["proceed_preference"] = matched
+                self._save_menu_qualification(session, payload, source_flow="menu_sales")
+                self._sync_lead_to_zoho(session.lead_id)
+                return self._start_callback_flow_prefilled(session)
+            if matched in ("proceed_register", "proceed_site_visit", "proceed_updates"):
+                payload["proceed_preference"] = matched
+                self._save_menu_qualification(session, payload, source_flow="menu_sales")
+                self._sync_lead_to_zoho(session.lead_id)
+                self._safe_update_session_menu_state(session_id, "complete", {})
+                replies = {
+                    "proceed_register": "Thanks! We've registered your interest - our team will be in touch soon.",
+                    "proceed_site_visit": "Great! Our team will contact you to schedule a site visit.",
+                    "proceed_updates": "You're all set! We'll keep you updated with the best matching opportunities.",
+                }
+                reply = replies[matched]
+                self._persist_turn(session_id, "assistant", reply)
+                return {"session_id": session_id, "reply": reply}
+            reply, buttons = MENU_QUESTIONS["sales_proceed"]
+            reply = "Sorry, please choose one of the options below.\n" + reply
+            self._persist_turn(session_id, "assistant", reply)
+            return {"session_id": session_id, "reply": reply, "buttons": buttons}
+
+        if state in MENU_LINEAR_TRANSITIONS:
+            self._persist_turn(session_id, "user", text)
+            return self._advance_linear_menu_step(session, state, text, payload)
+
+        # Unknown/corrupt state - reset and fall back, mirroring _auth_error's approach.
+        logger.warning("menu_state_unrecognized session_id=%s state=%s", session_id, state)
+        self._safe_update_session_menu_state(session_id, None, None)
+        reply = DEGRADED_FALLBACK_REPLY
+        self._persist_turn(session_id, "assistant", reply)
+        return {"session_id": session_id, "reply": reply}
+
+    def _advance_linear_menu_step(self, session, state: str, text: str, payload: dict):
+        session_id = session.id
+        _, buttons = MENU_QUESTIONS[state]
+        matched = _match_menu_button(text, buttons)
+        if not matched:
+            reply, buttons = MENU_QUESTIONS[state]
+            reply = "Sorry, please choose one of the options below.\n" + reply
+            self._persist_turn(session_id, "assistant", reply)
+            return {"session_id": session_id, "reply": reply, "buttons": buttons}
+
+        field, next_state = MENU_LINEAR_TRANSITIONS[state]
+        payload[field] = matched
+        self._safe_update_session_menu_state(session_id, next_state, payload)
+        reply, next_buttons = MENU_QUESTIONS[next_state]
+        self._persist_turn(session_id, "assistant", reply)
+        return {"session_id": session_id, "reply": reply, "buttons": next_buttons}
+
+    def _start_callback_flow_prefilled(self, session):
+        # Used when a visitor picks "Call me back"/"Talk to someone now" mid-menu - we
+        # already have their name/phone from the mandatory greeting capture, so skip
+        # straight to asking preferred time instead of re-asking name/phone.
+        session_id = session.id
+        lead = None
+        try:
+            lead = self._persistence.get_lead_by_id(session.lead_id)
+        except Exception as e:
+            logger.warning("menu_callback_lead_lookup_failed lead_id=%s error=%s", session.lead_id, e)
+        name = getattr(lead, "visitor_name", None) if lead else None
+        phone = getattr(lead, "visitor_phone", None) if lead else None
+        self._safe_update_session_menu_state(session_id, None, None)
+        if not (name and phone):
+            # Missing one somehow - fall back to the full callback flow rather than block.
+            if not self._safe_update_session_callback_state(session_id, "awaiting_name"):
+                reply = "Sorry, I'm having trouble starting this right now. Please try again in a moment."
+                self._persist_turn(session_id, "assistant", reply)
+                return {"session_id": session_id, "reply": reply}
+            reply = "Sure! May I know your name?"
+            self._persist_turn(session_id, "assistant", reply)
+            return {"session_id": session_id, "reply": reply}
+        try:
+            self._persistence.update_session_callback_state(
+                session_id, "awaiting_time", callback_name=name, callback_phone=phone,
+            )
+        except Exception as e:
+            logger.warning("menu_callback_prefill_failed session_id=%s error=%s", session_id, e)
+            reply = "Sorry, I'm having trouble starting this right now. Please try again in a moment."
+            self._persist_turn(session_id, "assistant", reply)
+            return {"session_id": session_id, "reply": reply}
+        reply = "Sure! What time works best for you? Morning, afternoon, or evening?"
+        self._persist_turn(session_id, "assistant", reply)
+        return {"session_id": session_id, "reply": reply}
+
+    def _save_menu_qualification(self, session, payload: dict, source_flow: str):
+        try:
+            buyer_type_raw = payload.get("buyer_type")
+            self._persistence.create_menu_qualification(
+                id=str(uuid.uuid4()), lead_id=session.lead_id,
+                buyer_type=BUYER_TYPE_VALUE_MAP.get(buyer_type_raw, buyer_type_raw),
+                working_profile_type=payload.get("working_profile_type"),
+                location_preference=payload.get("location_preference"),
+                opportunity_type=payload.get("opportunity_type"),
+                investment_size_band=payload.get("investment_size_band"),
+                investment_goal=payload.get("investment_goal"),
+                proceed_preference=payload.get("proceed_preference"),
+                source_flow=source_flow,
+            )
+        except Exception as e:
+            # Best-effort qualification snapshot - must never block lead capture/thank-you.
+            logger.warning("menu_qualification_save_failed lead_id=%s error=%s", session.lead_id, e)
+
+    def _sync_lead_to_zoho(self, lead_id: str):
+        try:
+            if not self._zoho:
+                return
+            lead = self._persistence.get_lead_by_id(lead_id)
+            if not lead:
+                return
+            self._zoho.push_lead_async(
+                lead_id=lead_id,
+                visitor_name=getattr(lead, "visitor_name", None),
+                visitor_phone=getattr(lead, "visitor_phone", None),
+                visitor_email=getattr(lead, "visitor_email", None),
+                lead_temperature=getattr(lead, "lead_temperature", None),
+            )
+        except Exception as e:
+            logger.warning("zoho_lead_sync_failed lead_id=%s error=%s", lead_id, e)
+
+    def _menu_payload(self, session) -> dict:
+        raw = getattr(session, "menu_payload", None)
+        if isinstance(raw, dict):
+            return dict(raw)
+        if not raw:
+            return {}
+        try:
+            return json.loads(raw)
+        except (TypeError, ValueError):
+            return {}
+
+    def _safe_update_session_menu_state(self, session_id: str, state, payload: dict = None):
+        try:
+            return self._persistence.update_session_menu_state(session_id, state, payload)
+        except Exception as e:
+            logger.warning("chatbot_menu_state_update_failed: %s", e)
+            return None
 
     # ---- Auth state machine (deterministic, no LLM) -------------------------
     def _start_auth_flow(self, session, auth_flow):
