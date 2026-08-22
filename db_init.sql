@@ -201,11 +201,21 @@ CREATE TABLE IF NOT EXISTS divine_chatbot_sessions (
   auth_payload text,
   menu_state varchar(80),
   menu_payload text,
+  loan_payload text,
   created_date timestamptz DEFAULT now(),
   last_activity_date timestamptz DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_chatbot_sessions_lead_id ON divine_chatbot_sessions (lead_id);
 CREATE INDEX IF NOT EXISTS idx_chatbot_sessions_last_activity ON divine_chatbot_sessions (last_activity_date DESC);
+
+CREATE TABLE IF NOT EXISTS divine_loan_reports (
+  id varchar(36) PRIMARY KEY,
+  session_id varchar(36) REFERENCES divine_chatbot_sessions(id),
+  lead_id varchar(36) REFERENCES divine_chatbot_leads(id),
+  snapshot_json text NOT NULL,
+  created_date timestamptz DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_loan_reports_session_id ON divine_loan_reports (session_id);
 
 CREATE TABLE IF NOT EXISTS divine_chatbot_messages (
   id varchar(36) PRIMARY KEY,

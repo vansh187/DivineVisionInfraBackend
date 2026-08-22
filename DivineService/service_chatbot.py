@@ -8,12 +8,19 @@ import unicodedata
 from datetime import datetime, timezone
 
 from Divinepersistence import persistenceChatbot
+from Divinepersistence.persistence_loan import persistenceLoan
 from DivineDTO.models import UserCreateDTO
 from DivineService.service_broker import serviceBroker
 from DivineService.service_customer import serviceCustomer
 from DivineService.llm_gemini import llmGemini, GeminiError
 from DivineService.llm_groq import llmGroq, GroqError
 from DivineService.service_zoho import serviceZoho
+from DivineService.loan_utils import normalize_indian_amount
+from DivineService.service_loan_calculator import calculate_emi, compare_tenures as _compare_tenures
+from DivineService.service_loan_eligibility import (
+    calculate_loan_eligibility, calculate_affordability, ILLUSTRATIVE_RATE_DEFAULT,
+)
+from DivineService.loan_knowledge import get_document_checklist
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +41,35 @@ SYSTEM_INSTRUCTION = (
     "to connect by email. Use extract_lead_signals after a few substantive turns to capture "
     "budget/timeline signals."
 )
+
+LOAN_SYSTEM_INSTRUCTION = (
+    "\n\nYou are also the Home Loan Assistant for this real-estate site. You help visitors "
+    "estimate EMI, home-loan eligibility, and property affordability using ONLY the loan "
+    "calculation tools provided (update_loan_profile, calculate_emi, calculate_loan_eligibility, "
+    "calculate_affordability, compare_tenures, get_document_checklist, "
+    "generate_eligibility_report). You must NEVER perform this arithmetic yourself - always "
+    "call the relevant tool and base your answer only on its returned numbers.\n"
+    "Rules:\n"
+    "- Ask only for the specific pieces of information a calculation actually needs, one or "
+    "two questions at a time, conversationally - never present a long form.\n"
+    "- Before asking for anything, call update_loan_profile with whatever the visitor already "
+    "stated in their message, and check what's already known this session - never re-ask for a "
+    "value already captured.\n"
+    "- If the visitor doesn't give an interest rate, the calculation tools use an illustrative "
+    "default and tell you what it was - always say plainly to the visitor: \"Illustrative rate "
+    "used for calculation: X%\" - never invent or claim to know current bank rates.\n"
+    "- NEVER say a loan is \"approved\" or guaranteed. Always use \"estimated\", \"indicative\", "
+    "\"approximate\", or \"based on the information provided\".\n"
+    "- NEVER state a specific bank's policy, a specific lender's approval odds, or a CIBIL/"
+    "credit score the visitor did not themselves provide.\n"
+    "- Every EMI or eligibility answer must end with: \"This is an indicative calculation and "
+    "actual lender terms may differ.\"\n"
+    "- When a calculation is complete, mention the visitor can download an eligibility report.\n"
+    "- For document questions, call get_document_checklist rather than listing documents from "
+    "memory, and note that exact requirements vary by lender.\n"
+    "- Keep the tone warm, human, and consultative - like a knowledgeable loan advisor, not a form."
+)
+SYSTEM_INSTRUCTION = SYSTEM_INSTRUCTION + LOAN_SYSTEM_INSTRUCTION
 
 SAFE_FALLBACK_REPLY = "I don't want to guess on that — let me get you an exact answer from our team. Would you like a callback?"
 DEGRADED_FALLBACK_REPLY = "Sorry, I'm having a little trouble right now. Could you try again in a moment, or would you like our team to call you back?"
@@ -109,6 +145,15 @@ MAIN_MENU_BUTTONS = [
     {"label": "Chat with Sales", "value": "menu_sales", "action": "chatbot_menu"},
     {"label": "Chat with Support", "value": "menu_support", "action": "chatbot_menu"},
     {"label": "Only Browsing", "value": "menu_browsing", "action": "chatbot_menu"},
+    {"label": "Home Loan / EMI Help", "value": "menu_loan", "action": "chatbot_menu"},
+]
+
+LOAN_ENTRY_SEED_TEXT = "I want to check my home loan eligibility"
+LOAN_INITIAL_BUTTONS = [
+    {"label": "Check Loan Eligibility", "value": "loan_eligibility", "action": "chatbot_message"},
+    {"label": "Calculate EMI", "value": "loan_emi", "action": "chatbot_message"},
+    {"label": "Check Property Affordability", "value": "loan_affordability", "action": "chatbot_message"},
+    {"label": "Documents Required", "value": "loan_documents", "action": "chatbot_message"},
 ]
 SALES_TRACK_BUTTONS = [
     {"label": "Buy a Property / End Client", "value": "sales_end_client", "action": "chatbot_menu"},
@@ -258,6 +303,73 @@ TOOL_SCHEMAS = [
         "parameters": {"type": "object", "properties": {}, "required": []},
     },
 ]
+
+LOAN_TOOL_SCHEMAS = [
+    {
+        "name": "update_loan_profile",
+        "description": "Save any financial details the visitor just mentioned (income, EMI, age, property price, etc.) so they aren't asked again this session.",
+        "parameters": {"type": "object", "properties": {
+            "monthly_income": {"type": "string", "description": "e.g. '1.5 lakh', '150000'"},
+            "co_applicant_income": {"type": "string"},
+            "existing_emi": {"type": "string"},
+            "age": {"type": "number"},
+            "employment_type": {"type": "string", "description": "'salaried' or 'self_employed'"},
+            "property_price": {"type": "string"},
+            "down_payment": {"type": "string"},
+            "requested_loan": {"type": "string"},
+            "interest_rate": {"type": "number", "description": "annual %, only if visitor stated one"},
+            "tenure_years": {"type": "number"},
+            "credit_score_band": {"type": "string", "description": "e.g. 'poor','fair','good','excellent', or a raw score like 740"},
+        }, "required": []},
+    },
+    {
+        "name": "calculate_emi",
+        "description": "Compute monthly EMI, total interest, and total repayment. Uses the visitor's saved loan profile fields (requested_loan, interest_rate, tenure_years) for any argument not explicitly given.",
+        "parameters": {"type": "object", "properties": {
+            "principal": {"type": "number"}, "annual_rate_pct": {"type": "number"}, "tenure_years": {"type": "number"},
+        }, "required": []},
+    },
+    {
+        "name": "calculate_loan_eligibility",
+        "description": "Estimate an indicative home-loan eligibility range from the visitor's saved income/EMI/credit profile.",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "calculate_affordability",
+        "description": "Check whether the visitor's saved profile can comfortably afford a given property price, and by how much it falls short if not.",
+        "parameters": {"type": "object", "properties": {
+            "property_price": {"type": "string"},
+        }, "required": []},
+    },
+    {
+        "name": "compare_tenures",
+        "description": "Return an EMI/interest/total-payment comparison across multiple tenure options for the visitor's loan amount.",
+        "parameters": {"type": "object", "properties": {
+            "tenure_options_years": {"type": "array", "items": {"type": "number"}},
+        }, "required": []},
+    },
+    {
+        "name": "get_document_checklist",
+        "description": "Return the standard home-loan document checklist for a given employment type.",
+        "parameters": {"type": "object", "properties": {
+            "employment_type": {"type": "string", "description": "'salaried' or 'self_employed'"},
+        }, "required": ["employment_type"]},
+    },
+    {
+        "name": "generate_eligibility_report",
+        "description": "Generate a downloadable PDF summary of the visitor's most recent loan calculation and profile.",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+]
+TOOL_SCHEMAS = TOOL_SCHEMAS + LOAN_TOOL_SCHEMAS
+
+LOAN_STRUCTURED_RESULT_TYPES = {
+    "calculate_emi": "emi_result",
+    "calculate_loan_eligibility": "eligibility_result",
+    "calculate_affordability": "affordability_result",
+    "compare_tenures": "tenure_comparison",
+    "generate_eligibility_report": "report_ready",
+}
 
 
 def looks_degenerate(text: str) -> bool:
@@ -490,12 +602,13 @@ def is_negative(raw: str) -> bool:
 class serviceChatbot:
     def __init__(self, persistence: persistenceChatbot = None, gemini: llmGemini = None, groq: llmGroq = None,
                  customer_service: serviceCustomer = None, broker_service: serviceBroker = None,
-                 zoho: serviceZoho = None):
+                 zoho: serviceZoho = None, loan_persistence: persistenceLoan = None):
         self._persistence = persistence or persistenceChatbot()
         self._gemini = gemini or llmGemini()
         self._groq = groq or llmGroq()
         self._customer_service = customer_service
         self._broker_service = broker_service
+        self._loan_persistence = loan_persistence or persistenceLoan()
         try:
             self._zoho = zoho or serviceZoho()
         except Exception as e:
@@ -558,6 +671,14 @@ class serviceChatbot:
             return self._advance_auth_flow(session, text)
 
         if intent == "request_callback" and not session.callback_state:
+            if getattr(session, "menu_state", None):
+                # A callback request can arrive mid-funnel (e.g. a persistent "Request a
+                # Callback" widget separate from the menu buttons) - without clearing
+                # menu_state here, _advance_callback_flow's "complete" branch recurses into
+                # handle_message once the callback flow finishes, and that recursive call
+                # would misinterpret the visitor's next free-text reply as an answer to the
+                # abandoned menu question instead of routing it normally.
+                self._safe_update_session_menu_state(session_id, None, None)
             session = self._persistence.update_session_callback_state(session_id, "awaiting_name")
             reply = "Sure! May I know your name?"
             self._persist_turn(session_id, "user", "[intent:request_callback]")
@@ -631,8 +752,14 @@ class serviceChatbot:
             session_id, "assistant", result["reply"], llm_provider=result.get("llm_provider"),
             guardrail_score=result.get("guardrail_score"), guardrail_passed=result.get("guardrail_passed"),
         )
-        return {"session_id": session_id, "reply": result["reply"], "llm_provider": result.get("llm_provider"),
-                "guardrail_passed": result.get("guardrail_passed")}
+        response = {"session_id": session_id, "reply": result["reply"], "llm_provider": result.get("llm_provider"),
+                    "guardrail_passed": result.get("guardrail_passed")}
+        structured_result = result.get("structured_result")
+        if structured_result:
+            response["structured_result"] = structured_result
+        if structured_result or self._get_loan_payload(session):
+            response["buttons"] = self._loan_buttons_for_response(session, structured_result)
+        return response
 
     # ---- Callback state machine (deterministic, no LLM) --------------------
     def _advance_callback_flow(self, session, text: str):
@@ -854,6 +981,9 @@ class serviceChatbot:
                 reply, buttons = MENU_QUESTIONS["browsing_first_time"]
                 self._persist_turn(session_id, "assistant", reply)
                 return {"session_id": session_id, "reply": reply, "buttons": buttons}
+            if matched == "menu_loan":
+                self._safe_update_session_menu_state(session_id, None, None)
+                return self._enter_loan_assistant(session)
             reply, buttons = MENU_QUESTIONS["main_menu"]
             reply = "Sorry, please choose one of the options below.\n" + reply
             self._persist_turn(session_id, "assistant", reply)
@@ -1348,6 +1478,7 @@ class serviceChatbot:
         provider = "gemini"
         retrieved_chunks = []
         used_kb = False
+        structured_result = None
 
         for round_index in range(MAX_TOOL_ROUNDS):
             if provider == "gemini":
@@ -1376,6 +1507,8 @@ class serviceChatbot:
                 if name == "search_knowledge_base":
                     used_kb = True
                     retrieved_chunks = tool_result.get("chunks", [])
+                if name in LOAN_STRUCTURED_RESULT_TYPES and "error" not in tool_result:
+                    structured_result = {"type": LOAN_STRUCTURED_RESULT_TYPES[name], "data": tool_result}
 
                 if provider == "gemini":
                     history.append({"role": "model", "function_call": {
@@ -1396,11 +1529,13 @@ class serviceChatbot:
             draft_reply = step["text"] or SAFE_FALLBACK_REPLY
             if looks_degenerate(draft_reply):
                 logger.warning("degenerate_reply_detected: provider=%s", provider)
-                return self._final_text_only(provider, latest_text, retrieved_chunks, used_kb)
+                return self._final_text_only(provider, latest_text, retrieved_chunks, used_kb, structured_result)
             if not used_kb:
-                return {"reply": draft_reply, "llm_provider": provider}
+                return self._with_structured_result({"reply": draft_reply, "llm_provider": provider}, structured_result)
 
-            return self._apply_guardrail(draft_reply, retrieved_chunks, provider)
+            return self._with_structured_result(
+                self._apply_guardrail(draft_reply, retrieved_chunks, provider), structured_result,
+            )
 
         # The tool-round budget ran out (or a provider genuinely failed) without ever landing
         # on a text reply. Rather than keep negotiating "please stop calling tools now" on the
@@ -1408,9 +1543,20 @@ class serviceChatbot:
         # and which Groq hard-rejects outright when disobeyed - finish with one guaranteed-clean
         # call: no tools registered, no tool-call-shaped history, just the gathered facts. A
         # model with no tool schema in the request has no structural way to attempt a tool call.
-        return self._final_text_only(provider, latest_text, retrieved_chunks, used_kb)
+        return self._final_text_only(provider, latest_text, retrieved_chunks, used_kb, structured_result)
 
-    def _final_text_only(self, provider: str, latest_text: str, retrieved_chunks: list, used_kb: bool):
+    def _with_structured_result(self, result: dict, structured_result: dict) -> dict:
+        # Centralizes attaching a loan-tool's structured payload (EMI/eligibility/affordability/
+        # report-ready data) onto whichever return shape the caller produced - the agent loop has
+        # several distinct return points (plain reply, guardrail-checked reply, final-text-only
+        # fallback) and a calculation tool can be called in the same turn as a KB lookup, so every
+        # one of those paths needs to carry it through rather than only the "no KB used" branch.
+        if structured_result:
+            result["structured_result"] = structured_result
+        return result
+
+    def _final_text_only(self, provider: str, latest_text: str, retrieved_chunks: list, used_kb: bool,
+                          structured_result: dict = None):
         context_note = ""
         if retrieved_chunks:
             joined = "\n".join(c["content"] for c in retrieved_chunks)
@@ -1430,14 +1576,16 @@ class serviceChatbot:
                     logger.warning("degenerate_reply_detected: provider=%s (final_text_only)", attempt_provider)
                     continue
                 if not used_kb:
-                    return {"reply": draft_reply, "llm_provider": attempt_provider}
-                return self._apply_guardrail(draft_reply, retrieved_chunks, attempt_provider)
+                    return self._with_structured_result({"reply": draft_reply, "llm_provider": attempt_provider}, structured_result)
+                return self._with_structured_result(
+                    self._apply_guardrail(draft_reply, retrieved_chunks, attempt_provider), structured_result,
+                )
             except (GeminiError, GroqError):
                 continue
 
-        return {"reply": SAFE_FALLBACK_REPLY if used_kb else DEGRADED_FALLBACK_REPLY, "llm_provider": None}
-
-        return {"reply": DEGRADED_FALLBACK_REPLY, "llm_provider": None}
+        return self._with_structured_result(
+            {"reply": SAFE_FALLBACK_REPLY if used_kb else DEGRADED_FALLBACK_REPLY, "llm_provider": None}, structured_result,
+        )
 
     def _apply_guardrail(self, draft_reply: str, retrieved_chunks: list, provider: str):
         try:
@@ -1463,6 +1611,20 @@ class serviceChatbot:
                 return self._tool_upsert_crm_lead(session, args.get("name"), args.get("phone"), args.get("email"))
             if name == "extract_lead_signals":
                 return self._tool_extract_lead_signals(session)
+            if name == "update_loan_profile":
+                return self._tool_update_loan_profile(session, args)
+            if name == "calculate_emi":
+                return self._tool_calculate_emi(session, args)
+            if name == "calculate_loan_eligibility":
+                return self._tool_calculate_loan_eligibility(session, args)
+            if name == "calculate_affordability":
+                return self._tool_calculate_affordability(session, args)
+            if name == "compare_tenures":
+                return self._tool_compare_tenures(session, args)
+            if name == "get_document_checklist":
+                return self._tool_get_document_checklist(args.get("employment_type"))
+            if name == "generate_eligibility_report":
+                return self._tool_generate_eligibility_report(session)
         except Exception as e:
             logger.warning("chatbot_tool_failed: %s %s", name, e)
             return {"error": "tool_failed"}
@@ -1519,6 +1681,177 @@ class serviceChatbot:
         if data.get("temperature"):
             self._persistence.update_lead_fields(session.lead_id, lead_temperature=data["temperature"])
         return data
+
+    # ---- Home Loan Assistant --------------------------------------------
+    def _enter_loan_assistant(self, session):
+        session_id = session.id
+        self._persist_turn(session_id, "user", "[Home Loan / EMI Help]")
+        result = self._run_agent_loop(session, LOAN_ENTRY_SEED_TEXT)
+        self._persist_turn(
+            session_id, "assistant", result["reply"], llm_provider=result.get("llm_provider"),
+        )
+        response = {"session_id": session_id, "reply": result["reply"], "llm_provider": result.get("llm_provider")}
+        if result.get("structured_result"):
+            response["structured_result"] = result["structured_result"]
+        response["buttons"] = self._loan_buttons_for_response(session, result.get("structured_result"))
+        return response
+
+    def _get_loan_payload(self, session) -> dict:
+        raw = getattr(session, "loan_payload", None)
+        if isinstance(raw, dict):
+            return dict(raw)
+        if not raw:
+            return {}
+        try:
+            return json.loads(raw)
+        except (TypeError, ValueError):
+            return {}
+
+    def _merge_loan_payload(self, session, updates: dict) -> dict:
+        payload = self._get_loan_payload(session)
+        payload.update({k: v for k, v in updates.items() if v is not None})
+        try:
+            self._persistence.update_session_loan_state(session.id, payload)
+        except Exception as e:
+            logger.warning("chatbot_loan_state_update_failed: %s", e)
+        session.loan_payload = payload
+        return payload
+
+    def _loan_dynamic_buttons(self, session) -> list:
+        payload = self._get_loan_payload(session)
+        if payload.get("last_calculation"):
+            buttons = [
+                {"label": "Download Report", "value": "loan_download_report", "action": "chatbot_message"},
+                {"label": "Change Loan Amount", "value": "loan_change_amount", "action": "chatbot_message"},
+                {"label": "Change Tenure", "value": "loan_change_tenure", "action": "chatbot_message"},
+                {"label": "Check Another Property", "value": "loan_new_property", "action": "chatbot_message"},
+            ]
+            if not payload.get("co_applicant_income"):
+                buttons.insert(3, {"label": "Add Co-Applicant", "value": "loan_add_co_applicant", "action": "chatbot_message"})
+            return buttons
+        return list(LOAN_INITIAL_BUTTONS)
+
+    def _loan_buttons_for_response(self, session, structured_result: dict = None) -> list:
+        buttons = self._loan_dynamic_buttons(session)
+        if structured_result and structured_result.get("type") == "report_ready":
+            download_url = structured_result["data"].get("download_url")
+            if download_url:
+                buttons = [b for b in buttons if b.get("value") != "loan_download_report"]
+                buttons.insert(0, {"label": "Download My Home Loan Eligibility Report",
+                                    "value": "loan_report_ready", "action": "download_link", "url": download_url})
+        return buttons
+
+    def _tool_update_loan_profile(self, session, args: dict) -> dict:
+        money_fields = (
+            "monthly_income", "co_applicant_income", "existing_emi",
+            "property_price", "down_payment", "requested_loan",
+        )
+        updates = {}
+        for field in money_fields:
+            if field in args and args[field] not in (None, ""):
+                normalized = normalize_indian_amount(args[field])
+                if normalized is not None:
+                    updates[field] = normalized
+        for field in ("age", "interest_rate", "tenure_years"):
+            if field in args and args[field] is not None:
+                updates[field] = args[field]
+        if args.get("employment_type"):
+            employment = args["employment_type"].strip().lower()
+            updates["employment_type"] = "self_employed" if "self" in employment or "business" in employment else "salaried"
+        if args.get("credit_score_band"):
+            updates["credit_score_band"] = str(args["credit_score_band"]).strip()
+
+        payload = self._merge_loan_payload(session, updates)
+        return {k: v for k, v in payload.items() if k != "last_calculation"}
+
+    def _tool_calculate_emi(self, session, args: dict) -> dict:
+        payload = self._get_loan_payload(session)
+        principal = args.get("principal") or payload.get("requested_loan")
+        rate = args.get("annual_rate_pct") or payload.get("interest_rate")
+        tenure = args.get("tenure_years") or payload.get("tenure_years")
+        illustrative_rate_used = not rate
+        rate = rate or ILLUSTRATIVE_RATE_DEFAULT
+        tenure = tenure or 20
+
+        if not principal:
+            return {"error": "missing_fields", "fields": ["principal"]}
+        try:
+            result = calculate_emi(principal, rate, tenure)
+        except ValueError as e:
+            return {"error": "invalid_input", "reason": str(e)}
+        result["illustrative_rate_used"] = illustrative_rate_used
+        self._merge_loan_payload(session, {"last_calculation": {**payload.get("last_calculation", {}), "emi": result}})
+        return result
+
+    def _tool_calculate_loan_eligibility(self, session, args: dict) -> dict:
+        payload = self._get_loan_payload(session)
+        monthly_income = payload.get("monthly_income")
+        if not monthly_income:
+            return {"error": "missing_fields", "fields": ["monthly_income"]}
+        try:
+            result = calculate_loan_eligibility(
+                monthly_income=monthly_income, co_applicant_income=payload.get("co_applicant_income"),
+                existing_emi=payload.get("existing_emi"), requested_loan=payload.get("requested_loan"),
+                tenure_years=payload.get("tenure_years") or 20, interest_rate=payload.get("interest_rate"),
+                credit_score_band=payload.get("credit_score_band"), age=payload.get("age"),
+            )
+        except ValueError as e:
+            return {"error": "invalid_input", "reason": str(e)}
+        self._merge_loan_payload(session, {"last_calculation": {**payload.get("last_calculation", {}), "eligibility": result}})
+        return result
+
+    def _tool_calculate_affordability(self, session, args: dict) -> dict:
+        payload = self._get_loan_payload(session)
+        property_price = normalize_indian_amount(args.get("property_price")) or payload.get("property_price")
+        monthly_income = payload.get("monthly_income")
+        if not property_price or not monthly_income:
+            missing = [f for f, v in (("property_price", property_price), ("monthly_income", monthly_income)) if not v]
+            return {"error": "missing_fields", "fields": missing}
+        try:
+            result = calculate_affordability(
+                property_price=property_price, down_payment=payload.get("down_payment"),
+                monthly_income=monthly_income, co_applicant_income=payload.get("co_applicant_income"),
+                existing_emi=payload.get("existing_emi"), tenure_years=payload.get("tenure_years") or 20,
+                interest_rate=payload.get("interest_rate"),
+            )
+        except ValueError as e:
+            return {"error": "invalid_input", "reason": str(e)}
+        updates = {"property_price": property_price, "last_calculation": {**payload.get("last_calculation", {}), "affordability": result}}
+        self._merge_loan_payload(session, updates)
+        return result
+
+    def _tool_compare_tenures(self, session, args: dict) -> dict:
+        payload = self._get_loan_payload(session)
+        principal = payload.get("requested_loan")
+        rate = payload.get("interest_rate") or ILLUSTRATIVE_RATE_DEFAULT
+        tenure_options = args.get("tenure_options_years") or [15, 20, 25]
+        if not principal:
+            return {"error": "missing_fields", "fields": ["requested_loan"]}
+        try:
+            rows = _compare_tenures(principal, rate, tenure_options)
+        except ValueError as e:
+            return {"error": "invalid_input", "reason": str(e)}
+        result = {"principal": principal, "annual_rate_pct": rate, "illustrative_rate_used": not payload.get("interest_rate"), "rows": rows}
+        self._merge_loan_payload(session, {"last_calculation": {**payload.get("last_calculation", {}), "tenure_comparison": result}})
+        return result
+
+    def _tool_get_document_checklist(self, employment_type: str) -> dict:
+        return get_document_checklist(employment_type)
+
+    def _tool_generate_eligibility_report(self, session) -> dict:
+        payload = self._get_loan_payload(session)
+        if not payload.get("last_calculation"):
+            return {"error": "no_calculation_yet"}
+        snapshot = {"profile": {k: v for k, v in payload.items() if k != "last_calculation"},
+                    "last_calculation": payload.get("last_calculation")}
+        try:
+            row = self._loan_persistence.create_loan_report(
+                id=str(uuid.uuid4()), snapshot=snapshot, session_id=session.id, lead_id=session.lead_id,
+            )
+        except Exception as e:
+            logger.warning("loan_report_create_failed: %s", e)
+            return {"error": "report_generation_failed"}
+        return {"report_id": row.id, "download_url": f"/loan/report/{row.id}/download"}
 
     def _save_lead_email(self, lead_id: str, email: str) -> bool:
         try:

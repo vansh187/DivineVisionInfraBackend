@@ -69,6 +69,12 @@ update_session_menu_state: |
       last_activity_date = :last_activity_date
   WHERE id = :id
   RETURNING *;
+update_session_loan_state: |
+  UPDATE divine_chatbot_sessions
+  SET loan_payload = :loan_payload,
+      last_activity_date = :last_activity_date
+  WHERE id = :id
+  RETURNING *;
 
 create_message: |
   INSERT INTO divine_chatbot_messages(id, session_id, role, content, tool_name, llm_provider, guardrail_score, guardrail_passed, latency_ms, created_date)

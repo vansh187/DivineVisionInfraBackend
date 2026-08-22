@@ -221,6 +221,22 @@ class persistenceChatbot:
                 db.rollback()
                 raise
 
+    def update_session_loan_state(self, id: str, loan_payload: dict = None):
+        with self._session_factory() as db:
+            try:
+                params = {
+                    "id": id,
+                    "loan_payload": json.dumps(loan_payload) if loan_payload is not None else None,
+                    "last_activity_date": datetime.now(timezone.utc),
+                }
+                result = db.execute(text(self._q("update_session_loan_state")), params)
+                row = result.mappings().first()
+                db.commit()
+                return RowWrapper(row) if row else None
+            except Exception:
+                db.rollback()
+                raise
+
     # ---- Messages ---------------------------------------------------------
     def create_message(self, id: str, session_id: str, role: str, content: str, tool_name: str = None,
                         llm_provider: str = None, guardrail_score: float = None,
