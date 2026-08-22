@@ -1,0 +1,6 @@
+create_loan_report: |
+  INSERT INTO divine_loan_reports(id, session_id, lead_id, snapshot_json, created_date)
+  VALUES (:id, :session_id, :lead_id, :snapshot_json, :created_date)
+  RETURNING *;
+get_loan_report_by_id: |
+  SELECT * FROM divine_loan_reports WHERE id = :id LIMIT 1;

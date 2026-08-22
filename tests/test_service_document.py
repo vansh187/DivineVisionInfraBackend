@@ -274,6 +274,8 @@ def test_generate_booking_application_raises_when_documents_missing():
         assert "aadhaar_front" in message
         assert "aadhaar_back" in message
         assert "pan_card" in message
+        assert "applicant_photo" in message
+        assert "co_applicant_photo" in message
 
 
 @patch.object(serviceDocument, "_sign_url", return_value="https://fake.supabase.co/signed")
@@ -294,7 +296,7 @@ def test_generate_booking_application_succeeds_and_embeds_when_all_present(mock_
     doc, signed_url, expires_in = svc.generate(dto, owner_id="C00001", owner_role="customer")
 
     assert doc.id == "doc1"
-    assert mock_download.call_count == 3  # aadhaar_front, aadhaar_back, pan_card
+    assert mock_download.call_count == 5  # aadhaar_front, aadhaar_back, pan_card, applicant_photo, co_applicant_photo
     mock_upload.assert_called_once()
 
 
@@ -349,6 +351,74 @@ def test_upload_aadhaar_photo_rejects_invalid_side():
         assert False, "expected ValueError"
     except ValueError as e:
         assert str(e) == "invalid_side"
+
+
+@patch.object(serviceDocument, "_sign_url", return_value="url")
+@patch.object(serviceDocument, "_upload_to_storage")
+def test_upload_applicant_photo_uses_applicant_photo_document_type(mock_upload, mock_sign):
+    persistence = MagicMock()
+    persistence.create_document.return_value = MagicMock(id="doc1")
+    svc = serviceDocument(persistence)
+    svc._supabase_url = "https://fake.supabase.co"
+    svc._service_key = "fake-key"
+
+    svc.upload_applicant_photo(_fake_photo_bytes(), "image/jpeg", owner_id="C00001", owner_role="customer")
+
+    _, kwargs = persistence.create_document.call_args
+    assert kwargs["document_type"] == "applicant_photo"
+
+
+@patch.object(serviceDocument, "_sign_url", return_value="url")
+@patch.object(serviceDocument, "_upload_to_storage")
+def test_upload_co_applicant_photo_uses_co_applicant_photo_document_type(mock_upload, mock_sign):
+    persistence = MagicMock()
+    persistence.create_document.return_value = MagicMock(id="doc1")
+    svc = serviceDocument(persistence)
+    svc._supabase_url = "https://fake.supabase.co"
+    svc._service_key = "fake-key"
+
+    svc.upload_co_applicant_photo(_fake_photo_bytes(), "image/jpeg", owner_id="C00001", owner_role="customer")
+
+    _, kwargs = persistence.create_document.call_args
+    assert kwargs["document_type"] == "co_applicant_photo"
+
+
+# ---------- _render_pdf applicant/co-applicant photo layout ----------
+
+def test_render_pdf_places_applicant_and_co_applicant_photos():
+    svc, _ = _service()
+    pdf_bytes = svc._render_pdf(
+        "booking_application",
+        {"applicantName": "Jane", "coApplicantName": "John"},
+        photos={"applicant_photo": _TINY_PNG, "co_applicant_photo": _TINY_PNG},
+    )
+    assert pdf_bytes.startswith(b"%PDF")
+
+
+def test_render_pdf_booking_application_without_photos_does_not_crash():
+    svc, _ = _service()
+    pdf_bytes = svc._render_pdf("booking_application", {"applicantName": "Jane"})
+    assert pdf_bytes.startswith(b"%PDF")
+
+
+def test_render_pdf_falls_back_gracefully_on_corrupt_photo():
+    svc, _ = _service()
+    pdf_bytes = svc._render_pdf(
+        "booking_application", {"applicantName": "Jane"}, photos={"applicant_photo": b"not-an-image"},
+    )
+    assert pdf_bytes.startswith(b"%PDF")
+
+
+def test_split_applicant_fields_routes_co_applicant_keys_correctly():
+    from DivineService.service_document import _split_applicant_fields
+
+    form_data = {
+        "applicantName": "Jane", "applicant_age": 30,
+        "coApplicantName": "John", "co_applicant_age": 28, "Co-Applicant Income": 50000,
+    }
+    applicant, co_applicant = _split_applicant_fields(form_data)
+    assert applicant == {"applicantName": "Jane", "applicant_age": 30}
+    assert co_applicant == {"coApplicantName": "John", "co_applicant_age": 28, "Co-Applicant Income": 50000}
 
 
 # ---------- get() ownership check ----------

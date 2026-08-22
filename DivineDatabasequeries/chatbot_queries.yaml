@@ -19,6 +19,12 @@ update_lead_email: |
       last_updated_date = :last_updated_date
   WHERE id = :id
   RETURNING *;
+update_lead_notify_updates: |
+  UPDATE divine_chatbot_leads
+  SET notify_updates_opt_in = :notify_updates_opt_in,
+      last_updated_date = :last_updated_date
+  WHERE id = :id
+  RETURNING *;
 
 create_lead_source: |
   INSERT INTO divine_chatbot_lead_sources(id, lead_id, ip_address, ip_geo_city, ip_geo_region, precise_lat, precise_long, maps_link, referrer, utm_source, utm_medium, utm_campaign, device_type, captured_at)
@@ -56,6 +62,19 @@ update_session_auth_state: |
       last_activity_date = :last_activity_date
   WHERE id = :id
   RETURNING *;
+update_session_menu_state: |
+  UPDATE divine_chatbot_sessions
+  SET menu_state = :menu_state,
+      menu_payload = :menu_payload,
+      last_activity_date = :last_activity_date
+  WHERE id = :id
+  RETURNING *;
+update_session_loan_state: |
+  UPDATE divine_chatbot_sessions
+  SET loan_payload = :loan_payload,
+      last_activity_date = :last_activity_date
+  WHERE id = :id
+  RETURNING *;
 
 create_message: |
   INSERT INTO divine_chatbot_messages(id, session_id, role, content, tool_name, llm_provider, guardrail_score, guardrail_passed, latency_ms, created_date)
@@ -70,10 +89,22 @@ upsert_qualification: |
   INSERT INTO divine_chatbot_qualification(id, lead_id, budget_min, budget_max, unit_type, timeline_days, intent_signal, temperature, updated_date)
   VALUES (:id, :lead_id, :budget_min, :budget_max, :unit_type, :timeline_days, :intent_signal, :temperature, :updated_date)
   RETURNING *;
+create_menu_qualification: |
+  INSERT INTO divine_chatbot_qualification(
+    id, lead_id, budget_min, budget_max, unit_type, timeline_days, intent_signal, temperature,
+    buyer_type, working_profile_type, location_preference, opportunity_type, investment_size_band,
+    investment_goal, proceed_preference, source_flow, updated_date
+  )
+  VALUES (
+    :id, :lead_id, :budget_min, :budget_max, :unit_type, :timeline_days, :intent_signal, :temperature,
+    :buyer_type, :working_profile_type, :location_preference, :opportunity_type, :investment_size_band,
+    :investment_goal, :proceed_preference, :source_flow, :updated_date
+  )
+  RETURNING *;
 
 create_callback_request: |
-  INSERT INTO divine_chatbot_callback_requests(id, lead_id, visitor_name, phone, preferred_time, status, requested_at)
-  VALUES (:id, :lead_id, :visitor_name, :phone, :preferred_time, 'pending', :requested_at)
+  INSERT INTO divine_chatbot_callback_requests(id, lead_id, visitor_name, phone, preferred_time, status, notes, request_type, requested_at)
+  VALUES (:id, :lead_id, :visitor_name, :phone, :preferred_time, 'pending', :notes, :request_type, :requested_at)
   RETURNING *;
 list_callback_requests: |
   SELECT * FROM divine_chatbot_callback_requests ORDER BY requested_at DESC LIMIT :limit;

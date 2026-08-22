@@ -164,6 +164,7 @@ CREATE TABLE IF NOT EXISTS divine_chatbot_leads (
   assigned_broker_id varchar(6) REFERENCES divine_broker_users(id),
   consent_given boolean NOT NULL DEFAULT false,
   consent_at timestamptz,
+  notify_updates_opt_in boolean,
   created_date timestamptz DEFAULT now(),
   last_updated_date timestamptz DEFAULT now()
 );
@@ -198,11 +199,23 @@ CREATE TABLE IF NOT EXISTS divine_chatbot_sessions (
   callback_time varchar(100),
   auth_state varchar(80),
   auth_payload text,
+  menu_state varchar(80),
+  menu_payload text,
+  loan_payload text,
   created_date timestamptz DEFAULT now(),
   last_activity_date timestamptz DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_chatbot_sessions_lead_id ON divine_chatbot_sessions (lead_id);
 CREATE INDEX IF NOT EXISTS idx_chatbot_sessions_last_activity ON divine_chatbot_sessions (last_activity_date DESC);
+
+CREATE TABLE IF NOT EXISTS divine_loan_reports (
+  id varchar(36) PRIMARY KEY,
+  session_id varchar(36) REFERENCES divine_chatbot_sessions(id),
+  lead_id varchar(36) REFERENCES divine_chatbot_leads(id),
+  snapshot_json text NOT NULL,
+  created_date timestamptz DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_loan_reports_session_id ON divine_loan_reports (session_id);
 
 CREATE TABLE IF NOT EXISTS divine_chatbot_messages (
   id varchar(36) PRIMARY KEY,
@@ -227,6 +240,14 @@ CREATE TABLE IF NOT EXISTS divine_chatbot_qualification (
   timeline_days integer,
   intent_signal varchar(120),
   temperature varchar(10) CHECK (temperature IN ('hot','warm','cold')),
+  buyer_type varchar(20) CHECK (buyer_type IS NULL OR buyer_type IN ('end_client','investor_dealer')),
+  working_profile_type varchar(80),
+  location_preference varchar(200),
+  opportunity_type varchar(80),
+  investment_size_band varchar(40),
+  investment_goal varchar(80),
+  proceed_preference varchar(40),
+  source_flow varchar(20) CHECK (source_flow IS NULL OR source_flow IN ('llm_signals','menu_sales','menu_browsing')),
   updated_date timestamptz DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_chatbot_qualification_lead_id ON divine_chatbot_qualification (lead_id);
@@ -238,6 +259,8 @@ CREATE TABLE IF NOT EXISTS divine_chatbot_callback_requests (
   phone varchar(20) NOT NULL,
   preferred_time varchar(100) NOT NULL,
   status varchar(20) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','contacted','done')),
+  notes text,
+  request_type varchar(20) NOT NULL DEFAULT 'callback' CHECK (request_type IN ('callback','support')),
   requested_at timestamptz DEFAULT now(),
   actioned_at timestamptz
 );

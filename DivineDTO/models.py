@@ -252,6 +252,7 @@ class ChatMessageResponseDTO(BaseModel):
     auth_role: Optional[str] = None
     guardrail_passed: Optional[bool] = None
     llm_provider: Optional[str] = None
+    structured_result: Optional[Dict[str, Any]] = None
 
 
 class CallbackRequestOutDTO(BaseModel):
@@ -263,3 +264,101 @@ class CallbackRequestOutDTO(BaseModel):
     status: str
     requested_at: Optional[datetime]
     actioned_at: Optional[datetime]
+
+
+# ---- Home Loan Assistant ------------------------------------------------
+
+class EMICalculateRequestDTO(BaseModel):
+    principal: float = Field(..., gt=0)
+    annual_rate_pct: float = Field(..., gt=0, lt=30)
+    tenure_years: float = Field(..., ge=1, le=30)
+    include_schedule: bool = False
+
+
+class AmortizationRowDTO(BaseModel):
+    month: int
+    principal_component: float
+    interest_component: float
+    balance: float
+
+
+class EMICalculateResponseDTO(BaseModel):
+    principal: float
+    annual_rate_pct: float
+    tenure_years: float
+    tenure_months: int
+    emi: float
+    total_interest: float
+    total_payment: float
+    schedule: Optional[List[AmortizationRowDTO]] = None
+
+
+class EligibilityRequestDTO(BaseModel):
+    monthly_income: float = Field(..., ge=0)
+    co_applicant_income: Optional[float] = Field(None, ge=0)
+    existing_emi: Optional[float] = Field(None, ge=0)
+    requested_loan: Optional[float] = Field(None, gt=0)
+    tenure_years: float = Field(20, ge=1, le=30)
+    interest_rate: Optional[float] = Field(None, gt=0, lt=30)
+    credit_score_band: Optional[str] = None
+    age: Optional[float] = Field(None, ge=21, le=70)
+
+
+class EligibilityResponseDTO(BaseModel):
+    combined_income: float
+    existing_emi: float
+    available_emi_capacity: float
+    comfortable_emi_range: Dict[str, float]
+    eligible_loan_range: Dict[str, float]
+    requested_loan: Optional[float] = None
+    category: str
+    reasons: List[str]
+    foir_cap: float
+    interest_rate_used: float
+    illustrative_rate_used: bool
+    credit_score_band: Optional[str] = None
+
+
+class AffordabilityRequestDTO(BaseModel):
+    property_price: float = Field(..., gt=0)
+    down_payment: Optional[float] = Field(None, ge=0)
+    monthly_income: float = Field(..., ge=0)
+    co_applicant_income: Optional[float] = Field(None, ge=0)
+    existing_emi: Optional[float] = Field(None, ge=0)
+    tenure_years: float = Field(20, ge=1, le=30)
+    interest_rate: Optional[float] = Field(None, gt=0, lt=30)
+
+
+class AffordabilityResponseDTO(BaseModel):
+    property_price: float
+    down_payment: float
+    required_loan: float
+    required_emi: float
+    emi_capacity: float
+    gap: float
+    affordable: bool
+    interest_rate_used: float
+    illustrative_rate_used: bool
+    suggestions: List[str]
+    loan_to_property_ratio: Optional[float] = None
+
+
+class TenureCompareRequestDTO(BaseModel):
+    principal: float = Field(..., gt=0)
+    annual_rate_pct: float = Field(..., gt=0, lt=30)
+    tenure_options_years: List[float] = Field(..., min_length=1)
+
+
+class TenureCompareResponseDTO(BaseModel):
+    rows: List[EMICalculateResponseDTO]
+
+
+class ReportGenerateRequestDTO(BaseModel):
+    profile: Dict[str, Any] = Field(...)
+    last_calculation: Optional[Dict[str, Any]] = None
+    session_id: Optional[str] = None
+    lead_id: Optional[str] = None
+
+
+class ReportGenerateResponseDTO(BaseModel):
+    report_id: str

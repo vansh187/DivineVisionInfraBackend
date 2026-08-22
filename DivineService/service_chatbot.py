@@ -8,11 +8,19 @@ import unicodedata
 from datetime import datetime, timezone
 
 from Divinepersistence import persistenceChatbot
+from Divinepersistence.persistence_loan import persistenceLoan
 from DivineDTO.models import UserCreateDTO
 from DivineService.service_broker import serviceBroker
 from DivineService.service_customer import serviceCustomer
 from DivineService.llm_gemini import llmGemini, GeminiError
 from DivineService.llm_groq import llmGroq, GroqError
+from DivineService.service_zoho import serviceZoho
+from DivineService.loan_utils import normalize_indian_amount
+from DivineService.service_loan_calculator import calculate_emi, compare_tenures as _compare_tenures
+from DivineService.service_loan_eligibility import (
+    calculate_loan_eligibility, calculate_affordability, ILLUSTRATIVE_RATE_DEFAULT,
+)
+from DivineService.loan_knowledge import get_document_checklist
 
 logger = logging.getLogger(__name__)
 
@@ -21,12 +29,47 @@ SYSTEM_INSTRUCTION = (
     "Answer visitor questions about projects, pricing, RERA, and specs ONLY using the "
     "search_knowledge_base tool's results - never invent figures or claims from your own "
     "general knowledge. If the knowledge base has no relevant information, say so plainly "
-    "and offer a callback instead of guessing. Keep replies short, warm, and in the "
-    "visitor's own language/register (Hindi/Hinglish/English as they write). Use "
-    "upsert_crm_lead when the visitor shares their name, phone number, or email address. "
-    "Only ask for email if the visitor explicitly says they want to connect by email. Use "
-    "extract_lead_signals after a few substantive turns to capture budget/timeline signals."
+    "and offer a callback instead of guessing. "
+    "You are a knowledgeable, consultative sales assistant, not just an FAQ bot - when you "
+    "don't have specific data, don't just say you don't know: acknowledge the question, "
+    "share what you do know from the knowledge base, and route to a callback or site visit "
+    "for the specifics you can't confirm. When a visitor raises a concern or objection, "
+    "address it directly using knowledge base content before pivoting to a call-to-action. "
+    "Keep replies short, warm, and in the visitor's own language/register (Hindi/Hinglish/"
+    "English as they write). Use upsert_crm_lead when the visitor shares their name, phone "
+    "number, or email address. Only ask for email if the visitor explicitly says they want "
+    "to connect by email. Use extract_lead_signals after a few substantive turns to capture "
+    "budget/timeline signals."
 )
+
+LOAN_SYSTEM_INSTRUCTION = (
+    "\n\nYou are also the Home Loan Assistant for this real-estate site. You help visitors "
+    "estimate EMI, home-loan eligibility, and property affordability using ONLY the loan "
+    "calculation tools provided (update_loan_profile, calculate_emi, calculate_loan_eligibility, "
+    "calculate_affordability, compare_tenures, get_document_checklist, "
+    "generate_eligibility_report). You must NEVER perform this arithmetic yourself - always "
+    "call the relevant tool and base your answer only on its returned numbers.\n"
+    "Rules:\n"
+    "- Ask only for the specific pieces of information a calculation actually needs, one or "
+    "two questions at a time, conversationally - never present a long form.\n"
+    "- Before asking for anything, call update_loan_profile with whatever the visitor already "
+    "stated in their message, and check what's already known this session - never re-ask for a "
+    "value already captured.\n"
+    "- If the visitor doesn't give an interest rate, the calculation tools use an illustrative "
+    "default and tell you what it was - always say plainly to the visitor: \"Illustrative rate "
+    "used for calculation: X%\" - never invent or claim to know current bank rates.\n"
+    "- NEVER say a loan is \"approved\" or guaranteed. Always use \"estimated\", \"indicative\", "
+    "\"approximate\", or \"based on the information provided\".\n"
+    "- NEVER state a specific bank's policy, a specific lender's approval odds, or a CIBIL/"
+    "credit score the visitor did not themselves provide.\n"
+    "- Every EMI or eligibility answer must end with: \"This is an indicative calculation and "
+    "actual lender terms may differ.\"\n"
+    "- When a calculation is complete, mention the visitor can download an eligibility report.\n"
+    "- For document questions, call get_document_checklist rather than listing documents from "
+    "memory, and note that exact requirements vary by lender.\n"
+    "- Keep the tone warm, human, and consultative - like a knowledgeable loan advisor, not a form."
+)
+SYSTEM_INSTRUCTION = SYSTEM_INSTRUCTION + LOAN_SYSTEM_INSTRUCTION
 
 SAFE_FALLBACK_REPLY = "I don't want to guess on that — let me get you an exact answer from our team. Would you like a callback?"
 DEGRADED_FALLBACK_REPLY = "Sorry, I'm having a little trouble right now. Could you try again in a moment, or would you like our team to call you back?"
@@ -94,6 +137,151 @@ AUTH_FLOW_VALUES = {
     "broker_register": ("signup", "broker"),
 }
 
+# ---- Menu-driven sales flow (deterministic, no LLM) --------------------------
+# Button copy below is a first pass and expected to be refined with exact wording
+# from the business - the state sequencing/persistence is the stable part.
+MAIN_MENU_BUTTONS = [
+    {"label": "About Divine Vision", "value": "menu_about", "action": "chatbot_menu"},
+    {"label": "Chat with Sales", "value": "menu_sales", "action": "chatbot_menu"},
+    {"label": "Chat with Support", "value": "menu_support", "action": "chatbot_menu"},
+    {"label": "Only Browsing", "value": "menu_browsing", "action": "chatbot_menu"},
+    {"label": "Home Loan / EMI Help", "value": "menu_loan", "action": "chatbot_menu"},
+]
+
+LOAN_ENTRY_SEED_TEXT = "I want to check my home loan eligibility"
+LOAN_INITIAL_BUTTONS = [
+    {"label": "Check Loan Eligibility", "value": "loan_eligibility", "action": "chatbot_message"},
+    {"label": "Calculate EMI", "value": "loan_emi", "action": "chatbot_message"},
+    {"label": "Check Property Affordability", "value": "loan_affordability", "action": "chatbot_message"},
+    {"label": "Documents Required", "value": "loan_documents", "action": "chatbot_message"},
+]
+SALES_TRACK_BUTTONS = [
+    {"label": "Buy a Property / End Client", "value": "sales_end_client", "action": "chatbot_menu"},
+    {"label": "Investor / Dealer", "value": "sales_investor_dealer", "action": "chatbot_menu"},
+]
+PROFILE_TYPE_BUTTONS = [
+    {"label": "Individual Buyer", "value": "profile_individual_buyer", "action": "chatbot_menu"},
+    {"label": "Individual Investor", "value": "profile_individual_investor", "action": "chatbot_menu"},
+    {"label": "Channel Partner / Broker", "value": "profile_channel_partner", "action": "chatbot_menu"},
+    {"label": "Corporate / Institutional", "value": "profile_corporate", "action": "chatbot_menu"},
+]
+LOCATION_BUTTONS = [
+    {"label": "OPS Divine Greens area", "value": "loc_ops_divine_greens", "action": "chatbot_menu"},
+    {"label": "Suraksha Enclave area", "value": "loc_suraksha_enclave", "action": "chatbot_menu"},
+    {"label": "Other / Not sure yet", "value": "loc_other", "action": "chatbot_menu"},
+]
+OPPORTUNITY_TYPE_BUTTONS = [
+    {"label": "Residential Plot", "value": "opp_residential_plot", "action": "chatbot_menu"},
+    {"label": "Residential Unit / Flat", "value": "opp_residential_unit", "action": "chatbot_menu"},
+    {"label": "Commercial", "value": "opp_commercial", "action": "chatbot_menu"},
+]
+INVESTMENT_SIZE_BUTTONS = [
+    {"label": "Under 20 Lakh", "value": "size_under_20l", "action": "chatbot_menu"},
+    {"label": "20-50 Lakh", "value": "size_20_50l", "action": "chatbot_menu"},
+    {"label": "50 Lakh - 1 Cr", "value": "size_50l_1cr", "action": "chatbot_menu"},
+    {"label": "Above 1 Cr", "value": "size_above_1cr", "action": "chatbot_menu"},
+]
+INVESTMENT_GOAL_BUTTONS = [
+    {"label": "Long-term Investment", "value": "goal_long_term", "action": "chatbot_menu"},
+    {"label": "Short-term / Quick Resale", "value": "goal_short_term", "action": "chatbot_menu"},
+    {"label": "Rental Yield", "value": "goal_rental_yield", "action": "chatbot_menu"},
+    {"label": "Self Use / End Use", "value": "goal_self_use", "action": "chatbot_menu"},
+]
+PROCEED_BUTTONS = [
+    {"label": "Register My Interest", "value": "proceed_register", "action": "chatbot_menu"},
+    {"label": "Schedule a Site Visit", "value": "proceed_site_visit", "action": "chatbot_menu"},
+    {"label": "Send Me Regular Updates", "value": "proceed_updates", "action": "chatbot_menu"},
+    {"label": "Talk to Someone Now", "value": "proceed_talk_now", "action": "chatbot_menu"},
+]
+FIRST_TIME_BUTTONS = [
+    {"label": "Yes, first time", "value": "first_time_yes", "action": "chatbot_menu"},
+    {"label": "No, visited before", "value": "first_time_no", "action": "chatbot_menu"},
+]
+DECISION_BUTTONS = [
+    {"label": "I've Decided, Proceed", "value": "decision_proceed", "action": "chatbot_menu"},
+    {"label": "Call Me Back", "value": "decision_call_back", "action": "chatbot_menu"},
+    {"label": "WhatsApp Me", "value": "decision_whatsapp", "action": "chatbot_menu"},
+]
+YES_NO_BUTTONS = [
+    {"label": "Yes", "value": "yes", "action": "chatbot_menu"},
+    {"label": "No", "value": "no", "action": "chatbot_menu"},
+]
+
+# state -> (reply text asked upon entering the state, buttons or None)
+MENU_QUESTIONS = {
+    "main_menu": ("How can I help you today?", MAIN_MENU_BUTTONS),
+    "sales_track": ("Great! Are you looking to buy a property for yourself, or exploring as an investor/dealer?", SALES_TRACK_BUTTONS),
+    "sales_profile_type": ("Please select your working profile type.", PROFILE_TYPE_BUTTONS),
+    "sales_location": ("Which location are you currently exploring for investment?", LOCATION_BUTTONS),
+    "sales_opportunity_type": ("What type of opportunities are you looking for?", OPPORTUNITY_TYPE_BUTTONS),
+    "sales_investment_size": ("What is your typical investment size?", INVESTMENT_SIZE_BUTTONS),
+    "sales_investment_goal": ("What is your investment goal?", INVESTMENT_GOAL_BUTTONS),
+    "sales_proceed": ("How would you like to proceed?", PROCEED_BUTTONS),
+    "browsing_first_time": ("No problem! Is this your first time exploring our projects?", FIRST_TIME_BUTTONS),
+    "browsing_location": ("Which location are you exploring?", LOCATION_BUTTONS),
+    "browsing_budget": ("What's your approximate budget range?", INVESTMENT_SIZE_BUTTONS),
+    "browsing_investor_qual": ("Are you exploring this as an investor, or for personal/end use?", SALES_TRACK_BUTTONS),
+    "browsing_decision": ("How would you like to proceed?", DECISION_BUTTONS),
+    "support_updates_optin": ("Thanks, our team will get back to you shortly! Would you like to be notified about new updates and offers?", YES_NO_BUTTONS),
+}
+
+# state -> (menu_payload field the matched button value is stored under, next state)
+# Only states whose answer is "pick one button, store it, move to the next question" -
+# branching states (main_menu, support_*, browsing_decision, sales_proceed) are hand-written.
+MENU_LINEAR_TRANSITIONS = {
+    "sales_track": ("buyer_type", "sales_profile_type"),
+    "sales_profile_type": ("working_profile_type", "sales_location"),
+    "sales_location": ("location_preference", "sales_opportunity_type"),
+    "sales_opportunity_type": ("opportunity_type", "sales_investment_size"),
+    "sales_investment_size": ("investment_size_band", "sales_investment_goal"),
+    "sales_investment_goal": ("investment_goal", "sales_proceed"),
+    "browsing_first_time": ("first_time_response", "browsing_location"),
+    "browsing_location": ("location_preference", "browsing_budget"),
+    "browsing_budget": ("investment_size_band", "browsing_investor_qual"),
+    "browsing_investor_qual": ("buyer_type", "browsing_decision"),
+}
+
+# Both sales_track and browsing_investor_qual reuse SALES_TRACK_BUTTONS' values for the
+# buyer_type signal - map them to the DB's CHECK-constrained enum.
+BUYER_TYPE_VALUE_MAP = {"sales_end_client": "end_client", "sales_investor_dealer": "investor_dealer"}
+
+
+def _tokens_contain_subsequence(haystack_tokens: list, needle_tokens: list) -> bool:
+    # Whole-token containment, not raw substring containment - "no" must not match inside
+    # "noon" or "not_sure" or "know", the way naive `"no" in "noon"` would.
+    if not needle_tokens:
+        return False
+    n = len(needle_tokens)
+    return any(haystack_tokens[i:i + n] == needle_tokens for i in range(len(haystack_tokens) - n + 1))
+
+
+def _match_menu_button(raw: str, buttons: list):
+    text = _contact_text(raw)
+    if not text:
+        return None
+    normalized_value = re.sub(r"[\s-]+", "_", text)
+    value_tokens = [t for t in normalized_value.split("_") if t]
+
+    for b in buttons:
+        if b["value"] == normalized_value:
+            return b["value"]
+    for b in buttons:
+        needle = [t for t in b["value"].split("_") if t]
+        if _tokens_contain_subsequence(value_tokens, needle):
+            return b["value"]
+
+    text_tokens = text.split()
+    for b in buttons:
+        label_norm = _contact_text(b["label"])
+        if not label_norm:
+            continue
+        if label_norm == text:
+            return b["value"]
+        if _tokens_contain_subsequence(text_tokens, label_norm.split()):
+            return b["value"]
+    return None
+
+
 TOOL_SCHEMAS = [
     {
         "name": "search_knowledge_base",
@@ -115,6 +303,73 @@ TOOL_SCHEMAS = [
         "parameters": {"type": "object", "properties": {}, "required": []},
     },
 ]
+
+LOAN_TOOL_SCHEMAS = [
+    {
+        "name": "update_loan_profile",
+        "description": "Save any financial details the visitor just mentioned (income, EMI, age, property price, etc.) so they aren't asked again this session.",
+        "parameters": {"type": "object", "properties": {
+            "monthly_income": {"type": "string", "description": "e.g. '1.5 lakh', '150000'"},
+            "co_applicant_income": {"type": "string"},
+            "existing_emi": {"type": "string"},
+            "age": {"type": "number"},
+            "employment_type": {"type": "string", "description": "'salaried' or 'self_employed'"},
+            "property_price": {"type": "string"},
+            "down_payment": {"type": "string"},
+            "requested_loan": {"type": "string"},
+            "interest_rate": {"type": "number", "description": "annual %, only if visitor stated one"},
+            "tenure_years": {"type": "number"},
+            "credit_score_band": {"type": "string", "description": "e.g. 'poor','fair','good','excellent', or a raw score like 740"},
+        }, "required": []},
+    },
+    {
+        "name": "calculate_emi",
+        "description": "Compute monthly EMI, total interest, and total repayment. Uses the visitor's saved loan profile fields (requested_loan, interest_rate, tenure_years) for any argument not explicitly given.",
+        "parameters": {"type": "object", "properties": {
+            "principal": {"type": "number"}, "annual_rate_pct": {"type": "number"}, "tenure_years": {"type": "number"},
+        }, "required": []},
+    },
+    {
+        "name": "calculate_loan_eligibility",
+        "description": "Estimate an indicative home-loan eligibility range from the visitor's saved income/EMI/credit profile.",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "calculate_affordability",
+        "description": "Check whether the visitor's saved profile can comfortably afford a given property price, and by how much it falls short if not.",
+        "parameters": {"type": "object", "properties": {
+            "property_price": {"type": "string"},
+        }, "required": []},
+    },
+    {
+        "name": "compare_tenures",
+        "description": "Return an EMI/interest/total-payment comparison across multiple tenure options for the visitor's loan amount.",
+        "parameters": {"type": "object", "properties": {
+            "tenure_options_years": {"type": "array", "items": {"type": "number"}},
+        }, "required": []},
+    },
+    {
+        "name": "get_document_checklist",
+        "description": "Return the standard home-loan document checklist for a given employment type.",
+        "parameters": {"type": "object", "properties": {
+            "employment_type": {"type": "string", "description": "'salaried' or 'self_employed'"},
+        }, "required": ["employment_type"]},
+    },
+    {
+        "name": "generate_eligibility_report",
+        "description": "Generate a downloadable PDF summary of the visitor's most recent loan calculation and profile.",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+]
+TOOL_SCHEMAS = TOOL_SCHEMAS + LOAN_TOOL_SCHEMAS
+
+LOAN_STRUCTURED_RESULT_TYPES = {
+    "calculate_emi": "emi_result",
+    "calculate_loan_eligibility": "eligibility_result",
+    "calculate_affordability": "affordability_result",
+    "compare_tenures": "tenure_comparison",
+    "generate_eligibility_report": "report_ready",
+}
 
 
 def looks_degenerate(text: str) -> bool:
@@ -346,12 +601,19 @@ def is_negative(raw: str) -> bool:
 
 class serviceChatbot:
     def __init__(self, persistence: persistenceChatbot = None, gemini: llmGemini = None, groq: llmGroq = None,
-                 customer_service: serviceCustomer = None, broker_service: serviceBroker = None):
+                 customer_service: serviceCustomer = None, broker_service: serviceBroker = None,
+                 zoho: serviceZoho = None, loan_persistence: persistenceLoan = None):
         self._persistence = persistence or persistenceChatbot()
         self._gemini = gemini or llmGemini()
         self._groq = groq or llmGroq()
         self._customer_service = customer_service
         self._broker_service = broker_service
+        self._loan_persistence = loan_persistence or persistenceLoan()
+        try:
+            self._zoho = zoho or serviceZoho()
+        except Exception as e:
+            logger.warning("zoho_service_init_failed: %s", e)
+            self._zoho = None
 
     # ---- Session init ---------------------------------------------------
     def init_session(self, referrer: str = None, utm_source: str = None, utm_medium: str = None,
@@ -363,6 +625,13 @@ class serviceChatbot:
             utm_campaign=utm_campaign, device_type=device_type,
         )
         session = self._persistence.create_session(id=str(uuid.uuid4()), lead_id=lead.id)
+        try:
+            self._persistence.update_session_menu_state(session.id, "greeting_name", {})
+        except Exception as e:
+            # Best-effort: if this fails, the visitor just lands in the old free-text
+            # experience (menu_state stays NULL) instead of the guided funnel - never
+            # fail session creation over it.
+            logger.warning("menu_state_init_failed session_id=%s error=%s", session.id, e)
         return {"session_id": session.id, "lead_id": lead.id}
 
     # ---- Main entry point -------------------------------------------------
@@ -402,6 +671,14 @@ class serviceChatbot:
             return self._advance_auth_flow(session, text)
 
         if intent == "request_callback" and not session.callback_state:
+            if getattr(session, "menu_state", None):
+                # A callback request can arrive mid-funnel (e.g. a persistent "Request a
+                # Callback" widget separate from the menu buttons) - without clearing
+                # menu_state here, _advance_callback_flow's "complete" branch recurses into
+                # handle_message once the callback flow finishes, and that recursive call
+                # would misinterpret the visitor's next free-text reply as an answer to the
+                # abandoned menu question instead of routing it normally.
+                self._safe_update_session_menu_state(session_id, None, None)
             session = self._persistence.update_session_callback_state(session_id, "awaiting_name")
             reply = "Sure! May I know your name?"
             self._persist_turn(session_id, "user", "[intent:request_callback]")
@@ -410,6 +687,21 @@ class serviceChatbot:
 
         if session.callback_state:
             return self._advance_callback_flow(session, text)
+
+        if auth_flow and auth_flow[1] and getattr(session, "menu_state", None):
+            # Explicit, UNAMBIGUOUS auth intent (mode + role both known, e.g. "login as
+            # customer") always wins over the menu funnel - without this, a fresh visitor
+            # typing that during greeting/menu capture would have it swallowed as their
+            # name or as an answer to the current menu question. Deliberately requires a
+            # role (auth_flow[1]) rather than firing on the weaker ("choose", None) case -
+            # selected_auth_flow does plain substring matching on bare words like "register"/
+            # "create", which collide with menu button values (e.g. "proceed_register").
+            self._safe_update_session_menu_state(session_id, None, None)
+            self._persist_turn(session_id, "user", text)
+            return self._start_auth_flow(session, auth_flow)
+
+        if getattr(session, "menu_state", None):
+            return self._advance_menu_flow(session, text)
 
         if not text:
             return {"session_id": session_id, "reply": "Sorry, I didn't catch that — could you type your question?"}
@@ -460,8 +752,14 @@ class serviceChatbot:
             session_id, "assistant", result["reply"], llm_provider=result.get("llm_provider"),
             guardrail_score=result.get("guardrail_score"), guardrail_passed=result.get("guardrail_passed"),
         )
-        return {"session_id": session_id, "reply": result["reply"], "llm_provider": result.get("llm_provider"),
-                "guardrail_passed": result.get("guardrail_passed")}
+        response = {"session_id": session_id, "reply": result["reply"], "llm_provider": result.get("llm_provider"),
+                    "guardrail_passed": result.get("guardrail_passed")}
+        structured_result = result.get("structured_result")
+        if structured_result:
+            response["structured_result"] = structured_result
+        if structured_result or self._get_loan_payload(session):
+            response["buttons"] = self._loan_buttons_for_response(session, structured_result)
+        return response
 
     # ---- Callback state machine (deterministic, no LLM) --------------------
     def _advance_callback_flow(self, session, text: str):
@@ -558,7 +856,24 @@ class serviceChatbot:
                 id=str(uuid.uuid4()), lead_id=session.lead_id,
                 visitor_name=updated.callback_name, phone=updated.callback_phone, preferred_time=updated.callback_time,
             )
-            self._persistence.update_lead_fields(session.lead_id, visitor_name=updated.callback_name, visitor_phone=updated.callback_phone)
+            lead_row = self._persistence.update_lead_fields(
+                session.lead_id, visitor_name=updated.callback_name, visitor_phone=updated.callback_phone,
+            )
+            try:
+                if self._zoho:
+                    # Push the full current lead row (not just the fields that just changed)
+                    # so the Zoho upsert dedups correctly against a record created earlier
+                    # from a different identifier (e.g. email captured before phone).
+                    self._zoho.push_lead_async(
+                        lead_id=session.lead_id,
+                        visitor_name=getattr(lead_row, "visitor_name", None) or updated.callback_name,
+                        visitor_phone=getattr(lead_row, "visitor_phone", None) or updated.callback_phone,
+                        visitor_email=getattr(lead_row, "visitor_email", None),
+                        lead_temperature=getattr(lead_row, "lead_temperature", None),
+                    )
+            except Exception as e:
+                # Best-effort CRM sync - must never block the visitor's callback confirmation.
+                logger.warning("zoho_lead_sync_failed lead_id=%s error=%s", session.lead_id, e)
 
             reply = (f"Got it, {updated.callback_name}! We'll call you at {updated.callback_phone} around "
                      f"{updated.callback_time}. Our team will be in touch shortly.")
@@ -571,6 +886,318 @@ class serviceChatbot:
         # Unreachable in practice - callback_state is DB-constrained to the four known
         # values and "complete" is handled above before any persistence happens.
         return {"session_id": session_id, "reply": DEGRADED_FALLBACK_REPLY}
+
+    # ---- Menu-driven sales flow (deterministic, no LLM) ----------------------
+    def _advance_menu_flow(self, session, text: str):
+        session_id = session.id
+        state = getattr(session, "menu_state", None)
+        payload = self._menu_payload(session)
+
+        if state == "complete":
+            # Same convention as callback_state's "complete" - clear the state and hand
+            # this message to the normal handler, which will persist it itself.
+            self._safe_update_session_menu_state(session_id, None, None)
+            return self.handle_message(session_id, text=text)
+
+        if state == "greeting_name":
+            if not text:
+                # First turn of a fresh session (frontend calls /message once, even with
+                # empty text, right after session init) - show the greeting, don't persist
+                # an empty user turn, don't advance state yet.
+                reply = (
+                    "Hi! Welcome to Divine Vision Infratech. Hope you're doing well. I'd "
+                    "love to assist you. Please share your full name, phone number, and "
+                    "email id, so our project expert can assist you better. To start, "
+                    "what's your name?"
+                )
+                self._persist_turn(session_id, "assistant", reply)
+                return {"session_id": session_id, "reply": reply}
+            self._persist_turn(session_id, "user", text)
+            if not text.strip():
+                reply = "Please share your full name to continue."
+                self._persist_turn(session_id, "assistant", reply)
+                return {"session_id": session_id, "reply": reply}
+            payload["name"] = text.strip()
+            self._safe_update_session_menu_state(session_id, "greeting_phone", payload)
+            reply = "Thanks! Please share your phone number."
+            self._persist_turn(session_id, "assistant", reply)
+            return {"session_id": session_id, "reply": reply}
+
+        if state == "greeting_phone":
+            self._persist_turn(session_id, "user", text)
+            if not valid_phone(text):
+                reply = "That doesn't look like a valid phone number. Could you share a valid phone number?"
+                self._persist_turn(session_id, "assistant", reply)
+                return {"session_id": session_id, "reply": reply}
+            payload["phone"] = normalize_phone(text)
+            self._safe_update_session_menu_state(session_id, "greeting_email", payload)
+            reply = "Great! And your email address?"
+            self._persist_turn(session_id, "assistant", reply)
+            return {"session_id": session_id, "reply": reply}
+
+        if state == "greeting_email":
+            self._persist_turn(session_id, "user", text)
+            email = text.strip() if valid_email(text) else extract_email(text)
+            if not email:
+                reply = "Please share a valid email address so our project expert can reach you."
+                self._persist_turn(session_id, "assistant", reply)
+                return {"session_id": session_id, "reply": reply}
+            try:
+                self._persistence.update_lead_fields(
+                    session.lead_id, visitor_name=payload.get("name"), visitor_phone=payload.get("phone"),
+                )
+            except Exception as e:
+                logger.warning("menu_greeting_lead_update_failed lead_id=%s error=%s", session.lead_id, e)
+            if not self._save_lead_email(session.lead_id, email):
+                reply = "Sorry, I'm having trouble saving your details right now. Could you share your email again in a moment?"
+                self._persist_turn(session_id, "assistant", reply)
+                return {"session_id": session_id, "reply": reply}
+            self._safe_update_session_menu_state(session_id, "main_menu", {})
+            reply, buttons = MENU_QUESTIONS["main_menu"]
+            reply = "Thanks! " + reply
+            self._persist_turn(session_id, "assistant", reply)
+            return {"session_id": session_id, "reply": reply, "buttons": buttons}
+
+        if state == "main_menu":
+            self._persist_turn(session_id, "user", text)
+            matched = _match_menu_button(text, MAIN_MENU_BUTTONS)
+            if matched == "menu_about":
+                self._safe_update_session_menu_state(session_id, None, None)
+                reply = "Sure! Ask me anything about Divine Vision Infratech - our projects, RERA approvals, or anything else."
+                self._persist_turn(session_id, "assistant", reply)
+                return {"session_id": session_id, "reply": reply}
+            if matched == "menu_sales":
+                self._safe_update_session_menu_state(session_id, "sales_track", {})
+                reply, buttons = MENU_QUESTIONS["sales_track"]
+                self._persist_turn(session_id, "assistant", reply)
+                return {"session_id": session_id, "reply": reply, "buttons": buttons}
+            if matched == "menu_support":
+                self._safe_update_session_menu_state(session_id, "support_concern", {})
+                reply = "I'm sorry to hear that. Please share your concern and our support team will assist you shortly."
+                self._persist_turn(session_id, "assistant", reply)
+                return {"session_id": session_id, "reply": reply}
+            if matched == "menu_browsing":
+                self._safe_update_session_menu_state(session_id, "browsing_first_time", {})
+                reply, buttons = MENU_QUESTIONS["browsing_first_time"]
+                self._persist_turn(session_id, "assistant", reply)
+                return {"session_id": session_id, "reply": reply, "buttons": buttons}
+            if matched == "menu_loan":
+                self._safe_update_session_menu_state(session_id, None, None)
+                return self._enter_loan_assistant(session)
+            reply, buttons = MENU_QUESTIONS["main_menu"]
+            reply = "Sorry, please choose one of the options below.\n" + reply
+            self._persist_turn(session_id, "assistant", reply)
+            return {"session_id": session_id, "reply": reply, "buttons": buttons}
+
+        if state == "support_concern":
+            self._persist_turn(session_id, "user", text)
+            if not text.strip():
+                reply = "Please share your concern so our support team can help."
+                self._persist_turn(session_id, "assistant", reply)
+                return {"session_id": session_id, "reply": reply}
+            payload["concern"] = text.strip()
+            try:
+                lead = self._persistence.get_lead_by_id(session.lead_id)
+                self._persistence.create_callback_request(
+                    id=str(uuid.uuid4()), lead_id=session.lead_id,
+                    visitor_name=getattr(lead, "visitor_name", None) or "Visitor",
+                    phone=getattr(lead, "visitor_phone", None) or "",
+                    preferred_time="As soon as possible", notes=payload["concern"], request_type="support",
+                )
+            except Exception as e:
+                logger.warning("menu_support_ticket_failed lead_id=%s error=%s", session.lead_id, e)
+                reply = "Sorry, I'm having trouble saving this right now. Could you try again in a moment?"
+                self._persist_turn(session_id, "assistant", reply)
+                return {"session_id": session_id, "reply": reply}
+            self._safe_update_session_menu_state(session_id, "support_updates_optin", payload)
+            reply, buttons = MENU_QUESTIONS["support_updates_optin"]
+            self._persist_turn(session_id, "assistant", reply)
+            return {"session_id": session_id, "reply": reply, "buttons": buttons}
+
+        if state == "support_updates_optin":
+            self._persist_turn(session_id, "user", text)
+            opt_in = None
+            if is_affirmative(text) or _match_menu_button(text, YES_NO_BUTTONS) == "yes":
+                opt_in = True
+            elif is_negative(text) or _match_menu_button(text, YES_NO_BUTTONS) == "no":
+                opt_in = False
+            if opt_in is None:
+                reply, buttons = MENU_QUESTIONS["support_updates_optin"]
+                reply = "Please reply yes or no - " + reply
+                self._persist_turn(session_id, "assistant", reply)
+                return {"session_id": session_id, "reply": reply, "buttons": buttons}
+            try:
+                self._persistence.update_lead_notify_updates(session.lead_id, opt_in)
+            except Exception as e:
+                logger.warning("menu_notify_updates_failed lead_id=%s error=%s", session.lead_id, e)
+            self._sync_lead_to_zoho(session.lead_id)
+            self._safe_update_session_menu_state(session_id, "complete", {})
+            reply = "Thank you! Our team will reach out to you soon. Is there anything else I can help with?"
+            self._persist_turn(session_id, "assistant", reply)
+            return {"session_id": session_id, "reply": reply}
+
+        if state == "browsing_decision":
+            self._persist_turn(session_id, "user", text)
+            matched = _match_menu_button(text, DECISION_BUTTONS)
+            if matched == "decision_call_back":
+                return self._start_callback_flow_prefilled(session)
+            if matched in ("decision_proceed", "decision_whatsapp"):
+                payload["proceed_preference"] = "whatsapp" if matched == "decision_whatsapp" else "proceed"
+                self._save_menu_qualification(session, payload, source_flow="menu_browsing")
+                self._sync_lead_to_zoho(session.lead_id)
+                self._safe_update_session_menu_state(session_id, "complete", {})
+                if matched == "decision_whatsapp":
+                    reply = "Great, our team will reach out to you on WhatsApp shortly!"
+                else:
+                    reply = "Thank you! Our project expert will reach out to you shortly."
+                self._persist_turn(session_id, "assistant", reply)
+                return {"session_id": session_id, "reply": reply}
+            reply, buttons = MENU_QUESTIONS["browsing_decision"]
+            reply = "Sorry, please choose one of the options below.\n" + reply
+            self._persist_turn(session_id, "assistant", reply)
+            return {"session_id": session_id, "reply": reply, "buttons": buttons}
+
+        if state == "sales_proceed":
+            self._persist_turn(session_id, "user", text)
+            matched = _match_menu_button(text, PROCEED_BUTTONS)
+            if matched == "proceed_talk_now":
+                payload["proceed_preference"] = matched
+                self._save_menu_qualification(session, payload, source_flow="menu_sales")
+                self._sync_lead_to_zoho(session.lead_id)
+                return self._start_callback_flow_prefilled(session)
+            if matched in ("proceed_register", "proceed_site_visit", "proceed_updates"):
+                payload["proceed_preference"] = matched
+                self._save_menu_qualification(session, payload, source_flow="menu_sales")
+                self._sync_lead_to_zoho(session.lead_id)
+                self._safe_update_session_menu_state(session_id, "complete", {})
+                replies = {
+                    "proceed_register": "Thanks! We've registered your interest - our team will be in touch soon.",
+                    "proceed_site_visit": "Great! Our team will contact you to schedule a site visit.",
+                    "proceed_updates": "You're all set! We'll keep you updated with the best matching opportunities.",
+                }
+                reply = replies[matched]
+                self._persist_turn(session_id, "assistant", reply)
+                return {"session_id": session_id, "reply": reply}
+            reply, buttons = MENU_QUESTIONS["sales_proceed"]
+            reply = "Sorry, please choose one of the options below.\n" + reply
+            self._persist_turn(session_id, "assistant", reply)
+            return {"session_id": session_id, "reply": reply, "buttons": buttons}
+
+        if state in MENU_LINEAR_TRANSITIONS:
+            self._persist_turn(session_id, "user", text)
+            return self._advance_linear_menu_step(session, state, text, payload)
+
+        # Unknown/corrupt state - reset and fall back, mirroring _auth_error's approach.
+        logger.warning("menu_state_unrecognized session_id=%s state=%s", session_id, state)
+        self._safe_update_session_menu_state(session_id, None, None)
+        reply = DEGRADED_FALLBACK_REPLY
+        self._persist_turn(session_id, "assistant", reply)
+        return {"session_id": session_id, "reply": reply}
+
+    def _advance_linear_menu_step(self, session, state: str, text: str, payload: dict):
+        session_id = session.id
+        _, buttons = MENU_QUESTIONS[state]
+        matched = _match_menu_button(text, buttons)
+        if not matched:
+            reply, buttons = MENU_QUESTIONS[state]
+            reply = "Sorry, please choose one of the options below.\n" + reply
+            self._persist_turn(session_id, "assistant", reply)
+            return {"session_id": session_id, "reply": reply, "buttons": buttons}
+
+        field, next_state = MENU_LINEAR_TRANSITIONS[state]
+        payload[field] = matched
+        self._safe_update_session_menu_state(session_id, next_state, payload)
+        reply, next_buttons = MENU_QUESTIONS[next_state]
+        self._persist_turn(session_id, "assistant", reply)
+        return {"session_id": session_id, "reply": reply, "buttons": next_buttons}
+
+    def _start_callback_flow_prefilled(self, session):
+        # Used when a visitor picks "Call me back"/"Talk to someone now" mid-menu - we
+        # already have their name/phone from the mandatory greeting capture, so skip
+        # straight to asking preferred time instead of re-asking name/phone.
+        session_id = session.id
+        lead = None
+        try:
+            lead = self._persistence.get_lead_by_id(session.lead_id)
+        except Exception as e:
+            logger.warning("menu_callback_lead_lookup_failed lead_id=%s error=%s", session.lead_id, e)
+        name = getattr(lead, "visitor_name", None) if lead else None
+        phone = getattr(lead, "visitor_phone", None) if lead else None
+        self._safe_update_session_menu_state(session_id, None, None)
+        if not (name and phone):
+            # Missing one somehow - fall back to the full callback flow rather than block.
+            if not self._safe_update_session_callback_state(session_id, "awaiting_name"):
+                reply = "Sorry, I'm having trouble starting this right now. Please try again in a moment."
+                self._persist_turn(session_id, "assistant", reply)
+                return {"session_id": session_id, "reply": reply}
+            reply = "Sure! May I know your name?"
+            self._persist_turn(session_id, "assistant", reply)
+            return {"session_id": session_id, "reply": reply}
+        try:
+            self._persistence.update_session_callback_state(
+                session_id, "awaiting_time", callback_name=name, callback_phone=phone,
+            )
+        except Exception as e:
+            logger.warning("menu_callback_prefill_failed session_id=%s error=%s", session_id, e)
+            reply = "Sorry, I'm having trouble starting this right now. Please try again in a moment."
+            self._persist_turn(session_id, "assistant", reply)
+            return {"session_id": session_id, "reply": reply}
+        reply = "Sure! What time works best for you? Morning, afternoon, or evening?"
+        self._persist_turn(session_id, "assistant", reply)
+        return {"session_id": session_id, "reply": reply}
+
+    def _save_menu_qualification(self, session, payload: dict, source_flow: str):
+        try:
+            buyer_type_raw = payload.get("buyer_type")
+            self._persistence.create_menu_qualification(
+                id=str(uuid.uuid4()), lead_id=session.lead_id,
+                buyer_type=BUYER_TYPE_VALUE_MAP.get(buyer_type_raw, buyer_type_raw),
+                working_profile_type=payload.get("working_profile_type"),
+                location_preference=payload.get("location_preference"),
+                opportunity_type=payload.get("opportunity_type"),
+                investment_size_band=payload.get("investment_size_band"),
+                investment_goal=payload.get("investment_goal"),
+                proceed_preference=payload.get("proceed_preference"),
+                source_flow=source_flow,
+            )
+        except Exception as e:
+            # Best-effort qualification snapshot - must never block lead capture/thank-you.
+            logger.warning("menu_qualification_save_failed lead_id=%s error=%s", session.lead_id, e)
+
+    def _sync_lead_to_zoho(self, lead_id: str):
+        try:
+            if not self._zoho:
+                return
+            lead = self._persistence.get_lead_by_id(lead_id)
+            if not lead:
+                return
+            self._zoho.push_lead_async(
+                lead_id=lead_id,
+                visitor_name=getattr(lead, "visitor_name", None),
+                visitor_phone=getattr(lead, "visitor_phone", None),
+                visitor_email=getattr(lead, "visitor_email", None),
+                lead_temperature=getattr(lead, "lead_temperature", None),
+            )
+        except Exception as e:
+            logger.warning("zoho_lead_sync_failed lead_id=%s error=%s", lead_id, e)
+
+    def _menu_payload(self, session) -> dict:
+        raw = getattr(session, "menu_payload", None)
+        if isinstance(raw, dict):
+            return dict(raw)
+        if not raw:
+            return {}
+        try:
+            return json.loads(raw)
+        except (TypeError, ValueError):
+            return {}
+
+    def _safe_update_session_menu_state(self, session_id: str, state, payload: dict = None):
+        try:
+            return self._persistence.update_session_menu_state(session_id, state, payload)
+        except Exception as e:
+            logger.warning("chatbot_menu_state_update_failed: %s", e)
+            return None
 
     # ---- Auth state machine (deterministic, no LLM) -------------------------
     def _start_auth_flow(self, session, auth_flow):
@@ -851,6 +1478,7 @@ class serviceChatbot:
         provider = "gemini"
         retrieved_chunks = []
         used_kb = False
+        structured_result = None
 
         for round_index in range(MAX_TOOL_ROUNDS):
             if provider == "gemini":
@@ -879,6 +1507,8 @@ class serviceChatbot:
                 if name == "search_knowledge_base":
                     used_kb = True
                     retrieved_chunks = tool_result.get("chunks", [])
+                if name in LOAN_STRUCTURED_RESULT_TYPES and "error" not in tool_result:
+                    structured_result = {"type": LOAN_STRUCTURED_RESULT_TYPES[name], "data": tool_result}
 
                 if provider == "gemini":
                     history.append({"role": "model", "function_call": {
@@ -899,11 +1529,13 @@ class serviceChatbot:
             draft_reply = step["text"] or SAFE_FALLBACK_REPLY
             if looks_degenerate(draft_reply):
                 logger.warning("degenerate_reply_detected: provider=%s", provider)
-                return self._final_text_only(provider, latest_text, retrieved_chunks, used_kb)
+                return self._final_text_only(provider, latest_text, retrieved_chunks, used_kb, structured_result)
             if not used_kb:
-                return {"reply": draft_reply, "llm_provider": provider}
+                return self._with_structured_result({"reply": draft_reply, "llm_provider": provider}, structured_result)
 
-            return self._apply_guardrail(draft_reply, retrieved_chunks, provider)
+            return self._with_structured_result(
+                self._apply_guardrail(draft_reply, retrieved_chunks, provider), structured_result,
+            )
 
         # The tool-round budget ran out (or a provider genuinely failed) without ever landing
         # on a text reply. Rather than keep negotiating "please stop calling tools now" on the
@@ -911,9 +1543,20 @@ class serviceChatbot:
         # and which Groq hard-rejects outright when disobeyed - finish with one guaranteed-clean
         # call: no tools registered, no tool-call-shaped history, just the gathered facts. A
         # model with no tool schema in the request has no structural way to attempt a tool call.
-        return self._final_text_only(provider, latest_text, retrieved_chunks, used_kb)
+        return self._final_text_only(provider, latest_text, retrieved_chunks, used_kb, structured_result)
 
-    def _final_text_only(self, provider: str, latest_text: str, retrieved_chunks: list, used_kb: bool):
+    def _with_structured_result(self, result: dict, structured_result: dict) -> dict:
+        # Centralizes attaching a loan-tool's structured payload (EMI/eligibility/affordability/
+        # report-ready data) onto whichever return shape the caller produced - the agent loop has
+        # several distinct return points (plain reply, guardrail-checked reply, final-text-only
+        # fallback) and a calculation tool can be called in the same turn as a KB lookup, so every
+        # one of those paths needs to carry it through rather than only the "no KB used" branch.
+        if structured_result:
+            result["structured_result"] = structured_result
+        return result
+
+    def _final_text_only(self, provider: str, latest_text: str, retrieved_chunks: list, used_kb: bool,
+                          structured_result: dict = None):
         context_note = ""
         if retrieved_chunks:
             joined = "\n".join(c["content"] for c in retrieved_chunks)
@@ -933,14 +1576,16 @@ class serviceChatbot:
                     logger.warning("degenerate_reply_detected: provider=%s (final_text_only)", attempt_provider)
                     continue
                 if not used_kb:
-                    return {"reply": draft_reply, "llm_provider": attempt_provider}
-                return self._apply_guardrail(draft_reply, retrieved_chunks, attempt_provider)
+                    return self._with_structured_result({"reply": draft_reply, "llm_provider": attempt_provider}, structured_result)
+                return self._with_structured_result(
+                    self._apply_guardrail(draft_reply, retrieved_chunks, attempt_provider), structured_result,
+                )
             except (GeminiError, GroqError):
                 continue
 
-        return {"reply": SAFE_FALLBACK_REPLY if used_kb else DEGRADED_FALLBACK_REPLY, "llm_provider": None}
-
-        return {"reply": DEGRADED_FALLBACK_REPLY, "llm_provider": None}
+        return self._with_structured_result(
+            {"reply": SAFE_FALLBACK_REPLY if used_kb else DEGRADED_FALLBACK_REPLY, "llm_provider": None}, structured_result,
+        )
 
     def _apply_guardrail(self, draft_reply: str, retrieved_chunks: list, provider: str):
         try:
@@ -966,6 +1611,20 @@ class serviceChatbot:
                 return self._tool_upsert_crm_lead(session, args.get("name"), args.get("phone"), args.get("email"))
             if name == "extract_lead_signals":
                 return self._tool_extract_lead_signals(session)
+            if name == "update_loan_profile":
+                return self._tool_update_loan_profile(session, args)
+            if name == "calculate_emi":
+                return self._tool_calculate_emi(session, args)
+            if name == "calculate_loan_eligibility":
+                return self._tool_calculate_loan_eligibility(session, args)
+            if name == "calculate_affordability":
+                return self._tool_calculate_affordability(session, args)
+            if name == "compare_tenures":
+                return self._tool_compare_tenures(session, args)
+            if name == "get_document_checklist":
+                return self._tool_get_document_checklist(args.get("employment_type"))
+            if name == "generate_eligibility_report":
+                return self._tool_generate_eligibility_report(session)
         except Exception as e:
             logger.warning("chatbot_tool_failed: %s %s", name, e)
             return {"error": "tool_failed"}
@@ -1023,13 +1682,199 @@ class serviceChatbot:
             self._persistence.update_lead_fields(session.lead_id, lead_temperature=data["temperature"])
         return data
 
+    # ---- Home Loan Assistant --------------------------------------------
+    def _enter_loan_assistant(self, session):
+        session_id = session.id
+        self._persist_turn(session_id, "user", "[Home Loan / EMI Help]")
+        result = self._run_agent_loop(session, LOAN_ENTRY_SEED_TEXT)
+        self._persist_turn(
+            session_id, "assistant", result["reply"], llm_provider=result.get("llm_provider"),
+        )
+        response = {"session_id": session_id, "reply": result["reply"], "llm_provider": result.get("llm_provider")}
+        if result.get("structured_result"):
+            response["structured_result"] = result["structured_result"]
+        response["buttons"] = self._loan_buttons_for_response(session, result.get("structured_result"))
+        return response
+
+    def _get_loan_payload(self, session) -> dict:
+        raw = getattr(session, "loan_payload", None)
+        if isinstance(raw, dict):
+            return dict(raw)
+        if not raw:
+            return {}
+        try:
+            return json.loads(raw)
+        except (TypeError, ValueError):
+            return {}
+
+    def _merge_loan_payload(self, session, updates: dict) -> dict:
+        payload = self._get_loan_payload(session)
+        payload.update({k: v for k, v in updates.items() if v is not None})
+        try:
+            self._persistence.update_session_loan_state(session.id, payload)
+        except Exception as e:
+            logger.warning("chatbot_loan_state_update_failed: %s", e)
+        session.loan_payload = payload
+        return payload
+
+    def _loan_dynamic_buttons(self, session) -> list:
+        payload = self._get_loan_payload(session)
+        if payload.get("last_calculation"):
+            buttons = [
+                {"label": "Download Report", "value": "loan_download_report", "action": "chatbot_message"},
+                {"label": "Change Loan Amount", "value": "loan_change_amount", "action": "chatbot_message"},
+                {"label": "Change Tenure", "value": "loan_change_tenure", "action": "chatbot_message"},
+                {"label": "Check Another Property", "value": "loan_new_property", "action": "chatbot_message"},
+            ]
+            if not payload.get("co_applicant_income"):
+                buttons.insert(3, {"label": "Add Co-Applicant", "value": "loan_add_co_applicant", "action": "chatbot_message"})
+            return buttons
+        return list(LOAN_INITIAL_BUTTONS)
+
+    def _loan_buttons_for_response(self, session, structured_result: dict = None) -> list:
+        buttons = self._loan_dynamic_buttons(session)
+        if structured_result and structured_result.get("type") == "report_ready":
+            download_url = structured_result["data"].get("download_url")
+            if download_url:
+                buttons = [b for b in buttons if b.get("value") != "loan_download_report"]
+                buttons.insert(0, {"label": "Download My Home Loan Eligibility Report",
+                                    "value": "loan_report_ready", "action": "download_link", "url": download_url})
+        return buttons
+
+    def _tool_update_loan_profile(self, session, args: dict) -> dict:
+        money_fields = (
+            "monthly_income", "co_applicant_income", "existing_emi",
+            "property_price", "down_payment", "requested_loan",
+        )
+        updates = {}
+        for field in money_fields:
+            if field in args and args[field] not in (None, ""):
+                normalized = normalize_indian_amount(args[field])
+                if normalized is not None:
+                    updates[field] = normalized
+        for field in ("age", "interest_rate", "tenure_years"):
+            if field in args and args[field] is not None:
+                updates[field] = args[field]
+        if args.get("employment_type"):
+            employment = args["employment_type"].strip().lower()
+            updates["employment_type"] = "self_employed" if "self" in employment or "business" in employment else "salaried"
+        if args.get("credit_score_band"):
+            updates["credit_score_band"] = str(args["credit_score_band"]).strip()
+
+        payload = self._merge_loan_payload(session, updates)
+        return {k: v for k, v in payload.items() if k != "last_calculation"}
+
+    def _tool_calculate_emi(self, session, args: dict) -> dict:
+        payload = self._get_loan_payload(session)
+        principal = args.get("principal") or payload.get("requested_loan")
+        rate = args.get("annual_rate_pct") or payload.get("interest_rate")
+        tenure = args.get("tenure_years") or payload.get("tenure_years")
+        illustrative_rate_used = not rate
+        rate = rate or ILLUSTRATIVE_RATE_DEFAULT
+        tenure = tenure or 20
+
+        if not principal:
+            return {"error": "missing_fields", "fields": ["principal"]}
+        try:
+            result = calculate_emi(principal, rate, tenure)
+        except ValueError as e:
+            return {"error": "invalid_input", "reason": str(e)}
+        result["illustrative_rate_used"] = illustrative_rate_used
+        self._merge_loan_payload(session, {"last_calculation": {**payload.get("last_calculation", {}), "emi": result}})
+        return result
+
+    def _tool_calculate_loan_eligibility(self, session, args: dict) -> dict:
+        payload = self._get_loan_payload(session)
+        monthly_income = payload.get("monthly_income")
+        if not monthly_income:
+            return {"error": "missing_fields", "fields": ["monthly_income"]}
+        try:
+            result = calculate_loan_eligibility(
+                monthly_income=monthly_income, co_applicant_income=payload.get("co_applicant_income"),
+                existing_emi=payload.get("existing_emi"), requested_loan=payload.get("requested_loan"),
+                tenure_years=payload.get("tenure_years") or 20, interest_rate=payload.get("interest_rate"),
+                credit_score_band=payload.get("credit_score_band"), age=payload.get("age"),
+            )
+        except ValueError as e:
+            return {"error": "invalid_input", "reason": str(e)}
+        self._merge_loan_payload(session, {"last_calculation": {**payload.get("last_calculation", {}), "eligibility": result}})
+        return result
+
+    def _tool_calculate_affordability(self, session, args: dict) -> dict:
+        payload = self._get_loan_payload(session)
+        property_price = normalize_indian_amount(args.get("property_price")) or payload.get("property_price")
+        monthly_income = payload.get("monthly_income")
+        if not property_price or not monthly_income:
+            missing = [f for f, v in (("property_price", property_price), ("monthly_income", monthly_income)) if not v]
+            return {"error": "missing_fields", "fields": missing}
+        try:
+            result = calculate_affordability(
+                property_price=property_price, down_payment=payload.get("down_payment"),
+                monthly_income=monthly_income, co_applicant_income=payload.get("co_applicant_income"),
+                existing_emi=payload.get("existing_emi"), tenure_years=payload.get("tenure_years") or 20,
+                interest_rate=payload.get("interest_rate"),
+            )
+        except ValueError as e:
+            return {"error": "invalid_input", "reason": str(e)}
+        updates = {"property_price": property_price, "last_calculation": {**payload.get("last_calculation", {}), "affordability": result}}
+        self._merge_loan_payload(session, updates)
+        return result
+
+    def _tool_compare_tenures(self, session, args: dict) -> dict:
+        payload = self._get_loan_payload(session)
+        principal = payload.get("requested_loan")
+        rate = payload.get("interest_rate") or ILLUSTRATIVE_RATE_DEFAULT
+        tenure_options = args.get("tenure_options_years") or [15, 20, 25]
+        if not principal:
+            return {"error": "missing_fields", "fields": ["requested_loan"]}
+        try:
+            rows = _compare_tenures(principal, rate, tenure_options)
+        except ValueError as e:
+            return {"error": "invalid_input", "reason": str(e)}
+        result = {"principal": principal, "annual_rate_pct": rate, "illustrative_rate_used": not payload.get("interest_rate"), "rows": rows}
+        self._merge_loan_payload(session, {"last_calculation": {**payload.get("last_calculation", {}), "tenure_comparison": result}})
+        return result
+
+    def _tool_get_document_checklist(self, employment_type: str) -> dict:
+        return get_document_checklist(employment_type)
+
+    def _tool_generate_eligibility_report(self, session) -> dict:
+        payload = self._get_loan_payload(session)
+        if not payload.get("last_calculation"):
+            return {"error": "no_calculation_yet"}
+        snapshot = {"profile": {k: v for k, v in payload.items() if k != "last_calculation"},
+                    "last_calculation": payload.get("last_calculation")}
+        try:
+            row = self._loan_persistence.create_loan_report(
+                id=str(uuid.uuid4()), snapshot=snapshot, session_id=session.id, lead_id=session.lead_id,
+            )
+        except Exception as e:
+            logger.warning("loan_report_create_failed: %s", e)
+            return {"error": "report_generation_failed"}
+        return {"report_id": row.id, "download_url": f"/loan/report/{row.id}/download"}
+
     def _save_lead_email(self, lead_id: str, email: str) -> bool:
         try:
-            self._persistence.update_lead_email(lead_id, email.strip())
-            return True
+            lead_row = self._persistence.update_lead_email(lead_id, email.strip())
         except Exception as e:
             logger.warning("chatbot_email_save_failed: %s", e)
             return False
+        try:
+            if self._zoho:
+                # Push the full current lead row (not just the email that just changed)
+                # so the Zoho upsert dedups correctly against a record created earlier
+                # from a different identifier (e.g. phone captured before email).
+                self._zoho.push_lead_async(
+                    lead_id=lead_id,
+                    visitor_name=getattr(lead_row, "visitor_name", None),
+                    visitor_phone=getattr(lead_row, "visitor_phone", None),
+                    visitor_email=(getattr(lead_row, "visitor_email", None) or email.strip()),
+                    lead_temperature=getattr(lead_row, "lead_temperature", None),
+                )
+        except Exception as e:
+            # Best-effort CRM sync - must never fail the visitor's email capture.
+            logger.warning("zoho_lead_sync_failed lead_id=%s error=%s", lead_id, e)
+        return True
 
     def _safe_update_session_callback_state(self, session_id: str, state):
         try:

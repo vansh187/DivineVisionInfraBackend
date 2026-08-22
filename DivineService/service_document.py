@@ -29,12 +29,35 @@ _PAID_PAYMENT_STATUS = "paid"
 # placeholder used in older tests) generate without requiring/attaching anything,
 # so as not to couple every possible future document type to this specific gate.
 _GATED_DOCUMENT_TYPE = "booking_application"
-_REQUIRED_PHOTO_DOCUMENT_TYPES = ("aadhaar_front", "aadhaar_back", "pan_card")
+_REQUIRED_PHOTO_DOCUMENT_TYPES = ("aadhaar_front", "aadhaar_back", "pan_card", "applicant_photo", "co_applicant_photo")
 _ATTACHMENT_LABELS = {
     "aadhaar_front": "Aadhaar Card - Front",
     "aadhaar_back": "Aadhaar Card - Back",
     "pan_card": "PAN Card",
 }
+# applicant_photo/co_applicant_photo are NOT in _ATTACHMENT_LABELS above - they don't get
+# their own full page like the identity documents. Instead they're placed on the right-hand
+# side of the applicant's/co-applicant's own details section (see _render_applicant_section).
+_PHOTO_DOCUMENT_TYPES = ("applicant_photo", "co_applicant_photo")
+
+# A form_data key is treated as belonging to the co-applicant section if it mentions
+# "co applicant" in any common casing/separator style (coApplicantName, co_applicant_name,
+# "Co-Applicant Name", etc.) - everything else (including plain "applicant..." keys) is
+# treated as the applicant's own section.
+_CO_APPLICANT_KEY_RE = re.compile(r"co[\s_-]?applicant", re.IGNORECASE)
+_PHOTO_COLUMN_WIDTH_MM = 45
+_PHOTO_COLUMN_HEIGHT_MM = 55
+_PHOTO_COLUMN_GAP_MM = 6
+
+
+def _split_applicant_fields(form_data: dict) -> tuple:
+    applicant_fields, co_applicant_fields = {}, {}
+    for key, value in (form_data or {}).items():
+        if _CO_APPLICANT_KEY_RE.search(str(key)):
+            co_applicant_fields[key] = value
+        else:
+            applicant_fields[key] = value
+    return applicant_fields, co_applicant_fields
 
 
 def _safe_path_segment(value: str, fallback: str = "document") -> str:
@@ -57,15 +80,22 @@ class serviceDocument:
         self._bucket = os.getenv("SUPABASE_STORAGE_BUCKET", "documents")
         self._booking_forms_bucket = os.getenv(_BOOKING_FORMS_BUCKET_ENV, _DEFAULT_BOOKING_FORMS_BUCKET)
 
-    def _render_pdf(self, document_type: str, form_data: dict, attachments: dict = None) -> bytes:
+    def _render_pdf(self, document_type: str, form_data: dict, attachments: dict = None, photos: dict = None) -> bytes:
         pdf = FPDF()
         pdf.add_page()
         pdf.set_font("Helvetica", "B", 16)
         pdf.cell(0, 10, _pdf_safe_text(document_type), new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-        pdf.set_font("Helvetica", "", 12)
-        for key, value in form_data.items():
-            line = f"{_pdf_safe_text(key)}: {_pdf_safe_text(value)}"
-            pdf.multi_cell(0, 8, line, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+
+        if document_type == _GATED_DOCUMENT_TYPE:
+            applicant_fields, co_applicant_fields = _split_applicant_fields(form_data)
+            self._render_applicant_section(pdf, "Applicant Details", applicant_fields, (photos or {}).get("applicant_photo"))
+            pdf.add_page()
+            self._render_applicant_section(pdf, "Co-Applicant Details", co_applicant_fields, (photos or {}).get("co_applicant_photo"))
+        else:
+            pdf.set_font("Helvetica", "", 12)
+            for key, value in (form_data or {}).items():
+                line = f"{_pdf_safe_text(key)}: {_pdf_safe_text(value)}"
+                pdf.multi_cell(0, 8, line, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
         for label, image_bytes in (attachments or {}).items():
             pdf.add_page()
@@ -80,6 +110,40 @@ class serviceDocument:
                 pdf.multi_cell(0, 8, "(This attachment could not be embedded.)", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
         return bytes(pdf.output())
+
+    def _render_applicant_section(self, pdf: FPDF, heading: str, fields: dict, photo_bytes: bytes) -> None:
+        """Renders one applicant's/co-applicant's details on the left with their photo
+        placed on the right-hand side of the same section."""
+        pdf.set_font("Helvetica", "B", 14)
+        pdf.cell(0, 10, _pdf_safe_text(heading), new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        section_top_y = pdf.get_y()
+        text_column_width = pdf.epw - _PHOTO_COLUMN_WIDTH_MM - _PHOTO_COLUMN_GAP_MM
+
+        pdf.set_font("Helvetica", "", 12)
+        if fields:
+            for key, value in fields.items():
+                line = f"{_pdf_safe_text(key)}: {_pdf_safe_text(value)}"
+                pdf.multi_cell(text_column_width, 8, line, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        else:
+            pdf.multi_cell(text_column_width, 8, "(no details provided)", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        text_bottom_y = pdf.get_y()
+
+        photo_bottom_y = section_top_y
+        if photo_bytes:
+            photo_x = pdf.l_margin + text_column_width + _PHOTO_COLUMN_GAP_MM
+            try:
+                pdf.image(io.BytesIO(photo_bytes), x=photo_x, y=section_top_y,
+                          w=_PHOTO_COLUMN_WIDTH_MM, h=_PHOTO_COLUMN_HEIGHT_MM)
+                photo_bottom_y = section_top_y + _PHOTO_COLUMN_HEIGHT_MM
+            except Exception:
+                # A corrupt/unreadable photo shouldn't fail the whole document - note it
+                # and move on, since the text column has already succeeded.
+                pdf.set_xy(photo_x, section_top_y)
+                pdf.set_font("Helvetica", "", 9)
+                pdf.multi_cell(_PHOTO_COLUMN_WIDTH_MM, 6, "(photo could not be embedded)")
+                photo_bottom_y = pdf.get_y()
+
+        pdf.set_xy(pdf.l_margin, max(text_bottom_y, photo_bottom_y) + 4)
 
     def _upload_to_storage(self, object_path: str, file_bytes: bytes, content_type: str = "application/pdf", bucket: str = None) -> None:
         if not self._supabase_url or not self._service_key:
@@ -160,6 +224,7 @@ class serviceDocument:
 
     def generate(self, dto: DocumentGenerateRequestDTO, owner_id: str, owner_role: str):
         attachment_bytes = {}
+        photo_bytes = {}
         if dto.document_type == _GATED_DOCUMENT_TYPE:
             missing = []
             records = {}
@@ -172,13 +237,16 @@ class serviceDocument:
             if missing:
                 raise ValueError(f"documents_incomplete:{','.join(missing)}")
             for doc_type, record in records.items():
-                attachment_bytes[_ATTACHMENT_LABELS[doc_type]] = self._download_from_storage(record.storage_path)
+                if doc_type in _PHOTO_DOCUMENT_TYPES:
+                    photo_bytes[doc_type] = self._download_from_storage(record.storage_path)
+                else:
+                    attachment_bytes[_ATTACHMENT_LABELS[doc_type]] = self._download_from_storage(record.storage_path)
 
         document_id = str(uuid.uuid4())
         safe_type = _safe_path_segment(dto.document_type)
         object_path = f"{owner_id}/{safe_type}_{document_id}.pdf"
 
-        pdf_bytes = self._render_pdf(dto.document_type, dto.form_data, attachment_bytes)
+        pdf_bytes = self._render_pdf(dto.document_type, dto.form_data, attachment_bytes, photo_bytes)
         self._upload_to_storage(object_path, pdf_bytes)
 
         try:
@@ -251,6 +319,12 @@ class serviceDocument:
 
     def upload_pan_photo(self, file_bytes: bytes, content_type: str, owner_id: str, owner_role: str):
         return self._upload_photo(file_bytes, content_type, "pan_card", owner_id, owner_role)
+
+    def upload_applicant_photo(self, file_bytes: bytes, content_type: str, owner_id: str, owner_role: str):
+        return self._upload_photo(file_bytes, content_type, "applicant_photo", owner_id, owner_role)
+
+    def upload_co_applicant_photo(self, file_bytes: bytes, content_type: str, owner_id: str, owner_role: str):
+        return self._upload_photo(file_bytes, content_type, "co_applicant_photo", owner_id, owner_role)
 
     def upload_booking_application(
         self,
