@@ -1,5 +1,6 @@
 import uuid
 from collections import Counter
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from Divinepersistence import persistenceInventory, persistenceMarketTrend, persistenceChatbot
 from .llm_gemini import llmGemini, GeminiError
@@ -12,9 +13,12 @@ MAX_RECOMMEND_LIMIT = 50
 # (see search()) - large enough to cover this dataset's realistic size without an unbounded query.
 SEARCH_FETCH_CAP = 2000
 ALLOWED_UNIT_TYPES = {"plot", "floor", "flat", "commercial"}
+# 'reserved' is deliberately excluded from filterable statuses - it's a private Channel
+# Partner state, never something a public/customer search should be able to select for.
 ALLOWED_STATUSES = {"available", "held", "sold"}
 AREA_MATCH_TOLERANCE_SQYD = 100.0
 AREA_TOLERANCE_RATIO = 0.15
+RESERVATION_DURATION_DAYS = 3
 
 NL_SEARCH_TOOL = {
     "name": "extract_search_filters",
@@ -349,3 +353,67 @@ class serviceInventory:
             similar_alternatives[event.inventory_id] = [self._format_unit(c, price_cache) for c in neighbors[:3]]
 
         return {"best_fit": best_fit, "similar_alternatives": similar_alternatives}
+
+    # ---- Channel Partner reservations --------------------------------------
+    def _format_reserved_unit(self, record, price_cache: dict = None) -> dict:
+        formatted = self._format_unit(record, price_cache)
+        formatted["reserved_at"] = self._to_iso_or_none(getattr(record, "reserved_at", None))
+        formatted["reserved_until"] = self._to_iso_or_none(getattr(record, "reserved_until", None))
+        return formatted
+
+    def _to_iso_or_none(self, value) -> str:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            return value
+        return value.isoformat()
+
+    def reserve_unit(self, inventory_id: str, broker_id: str) -> dict:
+        if not (inventory_id or "").strip():
+            raise ValueError("inventory_id_required")
+        if not (broker_id or "").strip():
+            raise ValueError("broker_id_required")
+
+        reserved_at = datetime.now(timezone.utc)
+        reserved_until = reserved_at + timedelta(days=RESERVATION_DURATION_DAYS)
+        record = self._persistence.reserve_unit(
+            id=inventory_id, broker_id=broker_id, reservation_id=str(uuid.uuid4()),
+            reserved_at=reserved_at, reserved_until=reserved_until,
+        )
+        if record is None:
+            # Covers both "no such unit" and "someone already grabbed it" - the guarded UPDATE
+            # can't tell them apart, and it shouldn't: a broker probing random ids gets the same
+            # answer either way.
+            raise ValueError("unit_not_available")
+        return self._format_reserved_unit(record)
+
+    def release_reservation(self, inventory_id: str, broker_id: str) -> dict:
+        if not (inventory_id or "").strip():
+            raise ValueError("inventory_id_required")
+        record = self._persistence.release_reservation(
+            id=inventory_id, broker_id=broker_id, target_status="available", outcome="released",
+        )
+        if record is None:
+            # Deliberately the same error whether the unit isn't reserved at all, has already
+            # expired, or is reserved by a DIFFERENT broker - a broker must never learn from this
+            # response that another Channel Partner currently holds it.
+            raise ValueError("not_reserved_by_you")
+        return self._format_unit(record)
+
+    def mark_sold(self, inventory_id: str, broker_id: str) -> dict:
+        if not (inventory_id or "").strip():
+            raise ValueError("inventory_id_required")
+        record = self._persistence.release_reservation(
+            id=inventory_id, broker_id=broker_id, target_status="sold", outcome="converted",
+        )
+        if record is None:
+            raise ValueError("not_reserved_by_you")
+        return self._format_unit(record)
+
+    def list_my_reservations(self, broker_id: str) -> dict:
+        if not (broker_id or "").strip():
+            raise ValueError("broker_id_required")
+        price_cache = {}
+        records = self._persistence.list_reservations_for_broker(broker_id)
+        reservations = [self._format_reserved_unit(r, price_cache) for r in records]
+        return {"count": len(reservations), "reservations": reservations}

@@ -23,7 +23,8 @@ upsert_unit: |
 
 search_units: |
   SELECT * FROM divine_project_inventory
-  WHERE (:project_name IS NULL OR lower(project_name) LIKE '%' || lower(:project_name) || '%')
+  WHERE status != 'reserved'
+    AND (:project_name IS NULL OR lower(project_name) LIKE '%' || lower(:project_name) || '%')
     AND (:city IS NULL OR lower(city) LIKE '%' || lower(:city) || '%')
     AND (:unit_type IS NULL OR lower(unit_type) = lower(:unit_type))
     AND (:status IS NULL OR lower(status) = lower(:status))
@@ -53,3 +54,44 @@ list_recent_available_units: |
   WHERE status = 'available'
   ORDER BY created_date DESC
   LIMIT :limit;
+
+expire_stale_units: |
+  UPDATE divine_project_inventory
+  SET status = 'available', reserved_by_broker_id = NULL, reserved_at = NULL, reserved_until = NULL,
+      last_updated_date = :now
+  WHERE status = 'reserved' AND reserved_until < :now;
+
+expire_stale_reservation_history: |
+  UPDATE divine_inventory_reservations
+  SET outcome = 'expired', ended_at = :now
+  WHERE outcome = 'active' AND expires_at < :now;
+
+reserve_unit: |
+  UPDATE divine_project_inventory
+  SET status = 'reserved', reserved_by_broker_id = :broker_id,
+      reserved_at = :reserved_at, reserved_until = :reserved_until,
+      last_updated_date = :reserved_at
+  WHERE id = :id AND status = 'available'
+  RETURNING *;
+
+insert_reservation_history: |
+  INSERT INTO divine_inventory_reservations(id, inventory_id, broker_id, reserved_at, expires_at, outcome, created_date)
+  VALUES (:id, :inventory_id, :broker_id, :reserved_at, :expires_at, 'active', :reserved_at)
+  RETURNING *;
+
+release_reservation: |
+  UPDATE divine_project_inventory
+  SET status = :target_status, reserved_by_broker_id = NULL, reserved_at = NULL, reserved_until = NULL,
+      last_updated_date = :ended_at
+  WHERE id = :id AND reserved_by_broker_id = :broker_id AND status = 'reserved'
+  RETURNING *;
+
+close_reservation_history: |
+  UPDATE divine_inventory_reservations
+  SET outcome = :outcome, ended_at = :ended_at
+  WHERE inventory_id = :inventory_id AND broker_id = :broker_id AND outcome = 'active';
+
+list_reservations_for_broker: |
+  SELECT * FROM divine_project_inventory
+  WHERE status = 'reserved' AND reserved_by_broker_id = :broker_id
+  ORDER BY reserved_until ASC;

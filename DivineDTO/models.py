@@ -194,6 +194,20 @@ class RecommendationResponseDTO(BaseModel):
     similar_alternatives: Dict[str, List[InventoryUnitOutDTO]]
 
 
+class ReservedUnitOutDTO(InventoryUnitOutDTO):
+    reserved_at: Optional[str]
+    reserved_until: Optional[str]
+
+
+class ReserveInventoryResponseDTO(ReservedUnitOutDTO):
+    pass
+
+
+class MyReservationsResponseDTO(BaseModel):
+    count: int
+    reservations: List[ReservedUnitOutDTO]
+
+
 class BrokerCommissionCreateDTO(BaseModel):
     brokerId: str = Field(..., min_length=1, max_length=80)
     serialNumber: str = Field(..., min_length=1, max_length=100)
