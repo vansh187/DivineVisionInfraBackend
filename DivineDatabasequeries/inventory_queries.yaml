@@ -1,0 +1,55 @@
+# SQL queries for project inventory search + browsing-event tracking
+upsert_unit: |
+  INSERT INTO divine_project_inventory(
+    id, project_name, city, locality, block, unit_number, unit_type,
+    width_mtr, length_mtr, area_sqmt, area_sqyd, status, created_date, last_updated_date
+  )
+  VALUES (
+    :id, :project_name, :city, :locality, :block, :unit_number, :unit_type,
+    :width_mtr, :length_mtr, :area_sqmt, :area_sqyd, :status, :created_date, :last_updated_date
+  )
+  ON CONFLICT (project_name, unit_number) DO UPDATE SET
+    city = EXCLUDED.city,
+    locality = EXCLUDED.locality,
+    block = EXCLUDED.block,
+    unit_type = EXCLUDED.unit_type,
+    width_mtr = EXCLUDED.width_mtr,
+    length_mtr = EXCLUDED.length_mtr,
+    area_sqmt = EXCLUDED.area_sqmt,
+    area_sqyd = EXCLUDED.area_sqyd,
+    status = EXCLUDED.status,
+    last_updated_date = EXCLUDED.last_updated_date
+  RETURNING *;
+
+search_units: |
+  SELECT * FROM divine_project_inventory
+  WHERE (:project_name IS NULL OR lower(project_name) LIKE '%' || lower(:project_name) || '%')
+    AND (:city IS NULL OR lower(city) LIKE '%' || lower(:city) || '%')
+    AND (:unit_type IS NULL OR lower(unit_type) = lower(:unit_type))
+    AND (:status IS NULL OR lower(status) = lower(:status))
+    AND (:min_area_sqyd IS NULL OR area_sqyd >= :min_area_sqyd)
+    AND (:max_area_sqyd IS NULL OR area_sqyd <= :max_area_sqyd)
+  ORDER BY project_name ASC, area_sqyd ASC
+  LIMIT :limit OFFSET :offset;
+
+get_unit_by_id: |
+  SELECT * FROM divine_project_inventory WHERE id = :id;
+
+record_event: |
+  INSERT INTO divine_inventory_events(id, inventory_id, lead_id, session_id, event_type, created_date)
+  VALUES (:id, :inventory_id, :lead_id, :session_id, :event_type, :created_date)
+  RETURNING *;
+
+list_events_for_lead: |
+  SELECT e.*, u.project_name, u.city, u.locality, u.unit_type, u.area_sqyd, u.status AS unit_status
+  FROM divine_inventory_events e
+  JOIN divine_project_inventory u ON u.id = e.inventory_id
+  WHERE e.lead_id = :lead_id
+  ORDER BY e.created_date DESC
+  LIMIT :limit;
+
+list_recent_available_units: |
+  SELECT * FROM divine_project_inventory
+  WHERE status = 'available'
+  ORDER BY created_date DESC
+  LIMIT :limit;
