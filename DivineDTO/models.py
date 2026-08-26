@@ -148,6 +148,52 @@ class MarketTrendListDTO(BaseModel):
     trends: List[MarketTrendOutDTO]
 
 
+class InventoryUnitOutDTO(BaseModel):
+    id: str
+    project_name: str
+    city: str
+    locality: Optional[str]
+    block: Optional[str]
+    unit_number: str
+    unit_type: str
+    width_mtr: Optional[float]
+    length_mtr: Optional[float]
+    area_sqmt: Optional[float]
+    area_sqyd: Optional[float]
+    status: str
+    estimated_price: Optional[float]
+
+
+class InventorySearchResponseDTO(BaseModel):
+    count: int
+    units: List[InventoryUnitOutDTO]
+
+
+class NLSearchRequestDTO(BaseModel):
+    query: str = Field(..., min_length=1, max_length=500)
+    session_id: Optional[str] = None
+
+
+class NLSearchResponseDTO(BaseModel):
+    count: int
+    units: List[InventoryUnitOutDTO]
+    parsed_filters: Dict[str, Any]
+
+
+class InventoryViewRequestDTO(BaseModel):
+    lead_id: Optional[str] = None
+    session_id: Optional[str] = None
+
+
+class InventoryViewResponseDTO(BaseModel):
+    recorded: bool
+
+
+class RecommendationResponseDTO(BaseModel):
+    best_fit: List[InventoryUnitOutDTO]
+    similar_alternatives: Dict[str, List[InventoryUnitOutDTO]]
+
+
 class BrokerCommissionCreateDTO(BaseModel):
     brokerId: str = Field(..., min_length=1, max_length=80)
     serialNumber: str = Field(..., min_length=1, max_length=100)

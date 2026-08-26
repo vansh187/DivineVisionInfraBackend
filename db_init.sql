@@ -290,3 +290,38 @@ CREATE INDEX IF NOT EXISTS idx_chatbot_kb_chunks_document_id ON divine_chatbot_k
 -- matches on every search. HNSW has no such "too few rows" failure mode.
 CREATE INDEX IF NOT EXISTS idx_chatbot_kb_chunks_embedding
   ON divine_chatbot_kb_chunks USING hnsw (embedding vector_cosine_ops);
+
+-- ============================================================
+-- Project inventory (smart search + recommendations)
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS divine_project_inventory (
+  id varchar(36) PRIMARY KEY,
+  project_name varchar(150) NOT NULL,
+  city varchar(100) NOT NULL,
+  locality varchar(150),
+  block varchar(20),
+  unit_number varchar(20) NOT NULL,
+  unit_type varchar(20) NOT NULL DEFAULT 'plot' CHECK (unit_type IN ('plot','floor','flat','commercial')),
+  width_mtr numeric(8,3),
+  length_mtr numeric(8,3),
+  area_sqmt numeric(10,3) NOT NULL CHECK (area_sqmt > 0),
+  area_sqyd numeric(10,2) NOT NULL CHECK (area_sqyd > 0),
+  status varchar(20) NOT NULL DEFAULT 'available' CHECK (status IN ('available','held','sold')),
+  created_date timestamptz DEFAULT now(),
+  last_updated_date timestamptz DEFAULT now(),
+  UNIQUE (project_name, unit_number)
+);
+CREATE INDEX IF NOT EXISTS idx_divine_project_inventory_search
+  ON divine_project_inventory (project_name, city, unit_type, status, area_sqyd);
+
+CREATE TABLE IF NOT EXISTS divine_inventory_events (
+  id varchar(36) PRIMARY KEY,
+  inventory_id varchar(36) NOT NULL REFERENCES divine_project_inventory(id),
+  lead_id varchar(36) REFERENCES divine_chatbot_leads(id),
+  session_id varchar(36) REFERENCES divine_chatbot_sessions(id),
+  event_type varchar(20) NOT NULL DEFAULT 'view' CHECK (event_type IN ('view','shortlist')),
+  created_date timestamptz DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_divine_inventory_events_inventory_id ON divine_inventory_events (inventory_id);
+CREATE INDEX IF NOT EXISTS idx_divine_inventory_events_lead_id ON divine_inventory_events (lead_id);

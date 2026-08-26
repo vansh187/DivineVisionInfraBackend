@@ -102,6 +102,12 @@ create_menu_qualification: |
   )
   RETURNING *;
 
+get_qualification_by_lead: |
+  SELECT * FROM divine_chatbot_qualification
+  WHERE lead_id = :lead_id
+  ORDER BY updated_date DESC
+  LIMIT 1;
+
 create_callback_request: |
   INSERT INTO divine_chatbot_callback_requests(id, lead_id, visitor_name, phone, preferred_time, status, notes, request_type, requested_at)
   VALUES (:id, :lead_id, :visitor_name, :phone, :preferred_time, 'pending', :notes, :request_type, :requested_at)

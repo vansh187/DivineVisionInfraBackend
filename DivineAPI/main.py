@@ -23,6 +23,7 @@ from DivineAPI.broker_commission_api import router as broker_commission_router
 from DivineAPI.chatbot_api import router as chatbot_router
 from DivineAPI.zoho_admin_api import router as zoho_admin_router
 from DivineAPI.loan_api import router as loan_router
+from DivineAPI.inventory_api import router as inventory_router
 from DivineService import serviceHealth
 
 
@@ -111,3 +112,4 @@ app.include_router(broker_commission_router)
 app.include_router(chatbot_router)
 app.include_router(zoho_admin_router)
 app.include_router(loan_router)
+app.include_router(inventory_router)

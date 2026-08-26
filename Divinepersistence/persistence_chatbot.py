@@ -48,6 +48,12 @@ class persistenceChatbot:
                 db.rollback()
                 raise
 
+    def get_qualification_by_lead(self, lead_id: str):
+        with self._session_factory() as db:
+            result = db.execute(text(self._q("get_qualification_by_lead")), {"lead_id": lead_id})
+            row = result.mappings().first()
+            return RowWrapper(row) if row else None
+
     def get_lead_by_id(self, id: str):
         with self._session_factory() as db:
             result = db.execute(text(self._q("get_lead_by_id")), {"id": id})
