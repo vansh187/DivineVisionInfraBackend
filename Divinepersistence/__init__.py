@@ -1,5 +1,6 @@
 from .persistence_db import PersistenceDB
 from .persistence_customer import persistenceCustomer
+from .persistence_customer_profile import persistenceCustomerProfile
 from .persistence_broker import persistenceBroker
 from .persistence_document import persistenceDocument
 from .persistence_kyc import persistenceKyc
@@ -10,4 +11,4 @@ from .persistence_broker_commission import persistenceBrokerCommission
 from .persistence_chatbot import persistenceChatbot
 from .persistence_inventory import persistenceInventory
 
-__all__ = ["PersistenceDB", "persistenceCustomer", "persistenceBroker", "persistenceDocument", "persistenceKyc", "persistencePayment", "persistenceVisit", "persistenceMarketTrend", "persistenceBrokerCommission", "persistenceChatbot", "persistenceInventory"]
+__all__ = ["PersistenceDB", "persistenceCustomer", "persistenceCustomerProfile", "persistenceBroker", "persistenceDocument", "persistenceKyc", "persistencePayment", "persistenceVisit", "persistenceMarketTrend", "persistenceBrokerCommission", "persistenceChatbot", "persistenceInventory"]

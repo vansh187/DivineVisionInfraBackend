@@ -422,3 +422,51 @@ class ReportGenerateRequestDTO(BaseModel):
 
 class ReportGenerateResponseDTO(BaseModel):
     report_id: str
+
+
+# ---- Customer profile -------------------------------------------------------
+
+class CustomerAddressDTO(BaseModel):
+    line1: Optional[str] = None
+    line2: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    pincode: Optional[str] = None
+
+
+class PaymentScheduleRowDTO(BaseModel):
+    label: Optional[str] = None
+    percent: Optional[float] = None
+    due_days: Optional[int] = None
+    due_date: Optional[str] = None
+    amount: Optional[int] = None
+    status: Optional[str] = None
+
+
+class CustomerBookingDTO(BaseModel):
+    has_booking: bool = False
+    project_id: Optional[str] = None
+    project_name: Optional[str] = None
+    township_label: Optional[str] = None
+    unit_number: Optional[str] = None
+    plot_area_sq_yd: Optional[str] = None
+    unit_type: Optional[str] = None
+    booking_date: Optional[str] = None
+    total_consideration: Optional[int] = None
+    amount_received: Optional[int] = None
+    payment_schedule: Optional[List[PaymentScheduleRowDTO]] = None
+
+
+class CustomerProfileDTO(BaseModel):
+    customer_id: str
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    full_name: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    gender: Optional[str] = None
+    date_of_birth: Optional[str] = None
+    age: Optional[int] = None
+    address: Optional[CustomerAddressDTO] = None
+    address_text: Optional[str] = None
+    booking: CustomerBookingDTO = Field(default_factory=CustomerBookingDTO)
