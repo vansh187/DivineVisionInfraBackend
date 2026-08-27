@@ -7,7 +7,7 @@ import ipaddress
 import unicodedata
 from datetime import datetime, timezone
 
-from Divinepersistence import persistenceChatbot
+from Divinepersistence import persistenceChatbot, persistenceInventory
 from Divinepersistence.persistence_loan import persistenceLoan
 from DivineDTO.models import UserCreateDTO
 from DivineService.service_broker import serviceBroker
@@ -30,6 +30,12 @@ SYSTEM_INSTRUCTION = (
     "search_knowledge_base tool's results - never invent figures or claims from your own "
     "general knowledge. If the knowledge base has no relevant information, say so plainly "
     "and offer a callback instead of guessing. "
+    "For any question about unit sizes, plot sizes, plot dimensions, or plot area ('how "
+    "big are the plots', 'what sizes do you have', 'kitne gaj', 'kitne size'), call "
+    "get_plot_size_options and answer with how many distinct sizes are on offer and list "
+    "them - give the area in sq. yards, plus the plot dimensions in metres where available, "
+    "grouped by project. Do NOT ask for the visitor's name or phone number just to answer "
+    "a sizing question. "
     "You are a knowledgeable, consultative sales assistant, not just an FAQ bot - when you "
     "don't have specific data, don't just say you don't know: acknowledge the question, "
     "share what you do know from the knowledge base, and route to a callback or site visit "
@@ -289,6 +295,19 @@ TOOL_SCHEMAS = [
         "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "search query"}}, "required": ["query"]},
     },
     {
+        "name": "get_plot_size_options",
+        "description": (
+            "List the distinct plot/unit sizes on offer across the projects, with a count of "
+            "how many distinct sizes there are. Use this for any question about unit sizes, "
+            "plot sizes, plot dimensions, area, 'how big are the plots', or 'what sizes are "
+            "available'. Returns area in sq. yards / sq. metres and plot dimensions in metres "
+            "where recorded, grouped by project."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "project_name": {"type": "string", "description": "optional project filter, e.g. 'OPS Divine Greens' or 'Suraksha'"},
+        }, "required": []},
+    },
+    {
         "name": "upsert_crm_lead",
         "description": "Save or update the visitor's name, phone number, and/or email address on their lead record.",
         "parameters": {"type": "object", "properties": {
@@ -386,6 +405,17 @@ def looks_degenerate(text: str) -> bool:
         return False
     junk = sum(1 for w in words if not re.search(r"[A-Za-z0-9ऀ-ॿ]", w))
     return (junk / len(words)) > 0.35
+
+
+def _as_number(value):
+    # Inventory area/dimension columns come back as Decimal on Postgres and float/str on
+    # SQLite - normalise to a plain float (or None) so tool output is JSON-clean.
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _digits_only(raw: str) -> str:
@@ -602,13 +632,21 @@ def is_negative(raw: str) -> bool:
 class serviceChatbot:
     def __init__(self, persistence: persistenceChatbot = None, gemini: llmGemini = None, groq: llmGroq = None,
                  customer_service: serviceCustomer = None, broker_service: serviceBroker = None,
-                 zoho: serviceZoho = None, loan_persistence: persistenceLoan = None):
+                 zoho: serviceZoho = None, loan_persistence: persistenceLoan = None,
+                 inventory_persistence: persistenceInventory = None):
         self._persistence = persistence or persistenceChatbot()
         self._gemini = gemini or llmGemini()
         self._groq = groq or llmGroq()
         self._customer_service = customer_service
         self._broker_service = broker_service
         self._loan_persistence = loan_persistence or persistenceLoan()
+        try:
+            self._inventory = inventory_persistence or persistenceInventory()
+        except Exception as e:
+            # Inventory lookups are an enhancement (plot-size answers) - a failure here must
+            # never stop the chatbot from starting; the tool degrades to "unavailable".
+            logger.warning("inventory_persistence_init_failed: %s", e)
+            self._inventory = None
         try:
             self._zoho = zoho or serviceZoho()
         except Exception as e:
@@ -1611,6 +1649,8 @@ class serviceChatbot:
                 return self._tool_upsert_crm_lead(session, args.get("name"), args.get("phone"), args.get("email"))
             if name == "extract_lead_signals":
                 return self._tool_extract_lead_signals(session)
+            if name == "get_plot_size_options":
+                return self._tool_get_plot_size_options(args)
             if name == "update_loan_profile":
                 return self._tool_update_loan_profile(session, args)
             if name == "calculate_emi":
@@ -1641,6 +1681,48 @@ class serviceChatbot:
         chunks = [{"content": r.content, "similarity": float(r.similarity)} for r in rows if r.similarity and r.similarity > 0.3]
         sources = [r.title for r in rows if r.similarity and r.similarity > 0.3]
         return {"chunks": chunks, "sources": sources}
+
+    def _tool_get_plot_size_options(self, args: dict) -> dict:
+        if not self._inventory:
+            return {"error": "inventory_unavailable"}
+        project_name = (args.get("project_name") or "").strip() or None
+        try:
+            rows = self._inventory.distinct_plot_sizes(project_name=project_name)
+        except Exception as e:
+            logger.warning("chatbot_plot_sizes_lookup_failed: %s", e)
+            return {"error": "tool_failed"}
+
+        projects = {}
+        distinct_keys = set()
+        for r in rows:
+            pname = getattr(r, "project_name", None) or "Unknown project"
+            entry = projects.setdefault(pname, {
+                "project_name": pname, "city": getattr(r, "city", None), "sizes": [],
+            })
+            area_sqyd = _as_number(getattr(r, "area_sqyd", None))
+            width = _as_number(getattr(r, "width_mtr", None))
+            length = _as_number(getattr(r, "length_mtr", None))
+            dimensions = f"{width} x {length} m" if width and length else None
+            entry["sizes"].append({
+                "unit_type": getattr(r, "unit_type", None),
+                "area_sq_yd": area_sqyd,
+                "area_sq_mtr": _as_number(getattr(r, "area_sqmt", None)),
+                "dimensions_mtr": dimensions,
+                "total_units": int(getattr(r, "unit_count", 0) or 0),
+                "available_units": int(getattr(r, "available_count", 0) or 0),
+            })
+            distinct_keys.add((pname, area_sqyd, dimensions))
+
+        result = {
+            "distinct_size_count": len(distinct_keys),
+            "projects": list(projects.values()),
+        }
+        if not distinct_keys:
+            result["note"] = (
+                "No plot-size data is loaded in inventory yet - offer a callback so the team "
+                "can share exact sizes."
+            )
+        return result
 
     def _tool_upsert_crm_lead(self, session, name: str, phone: str, email: str = None) -> dict:
         if phone and not valid_phone(phone):

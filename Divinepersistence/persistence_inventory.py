@@ -121,6 +121,16 @@ class persistenceInventory:
             row = result.mappings().first()
             return RowWrapper(row) if row else None
 
+    def distinct_plot_sizes(self, project_name: str = None, unit_type: str = None):
+        # The full size catalogue a project offers - reservation status is irrelevant here
+        # (a reserved unit still represents a size on offer), so this deliberately does not
+        # call expire_stale_reservations() or filter by status.
+        with self._session_factory() as db:
+            result = db.execute(text(self._q("distinct_plot_sizes")), {
+                "project_name": project_name, "unit_type": unit_type,
+            })
+            return [RowWrapper(row) for row in result.mappings().all()]
+
     def record_event(self, id: str, inventory_id: str, lead_id: str = None,
                       session_id: str = None, event_type: str = "view"):
         with self._session_factory() as db:
