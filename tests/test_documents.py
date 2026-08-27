@@ -123,6 +123,48 @@ def test_get_document_not_found():
     assert r.status_code == 404
 
 
+def test_get_latest_document_not_found():
+    r = client.get("/documents/latest/applicant_photo", headers=_auth_headers())
+    assert r.status_code == 404
+
+
+@patch("DivineService.service_document.serviceDocument._sign_url", return_value=FAKE_SIGNED_URL)
+@patch("DivineService.service_document.serviceDocument._upload_to_storage", return_value=None)
+def test_get_latest_applicant_photo_returns_uploaded_document(mock_upload, mock_sign):
+    upload = client.post(
+        "/documents/applicant-photo",
+        files={"file": ("profile.jpg", _fake_jpeg_bytes(), "image/jpeg")},
+        headers=_auth_headers(),
+    )
+    assert upload.status_code == 200, upload.text
+
+    r = client.get("/documents/latest/applicant_photo", headers=_auth_headers())
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["id"] == upload.json()["id"]
+    assert data["document_type"] == "applicant_photo"
+    assert data["signed_url"] == FAKE_SIGNED_URL
+
+
+@patch("DivineService.service_document.serviceDocument._sign_url", return_value=FAKE_SIGNED_URL)
+@patch("DivineService.service_document.serviceDocument._upload_to_storage", return_value=None)
+def test_get_latest_applicant_photo_is_scoped_to_the_caller(mock_upload, mock_sign):
+    # A second identity uploads a photo; the first caller must never receive it.
+    other = client.post(
+        "/documents/applicant-photo",
+        files={"file": ("other.jpg", _fake_jpeg_bytes(), "image/jpeg")},
+        headers={"Authorization": f"Bearer {_OTHER_TOKEN}"},
+    )
+    assert other.status_code == 200, other.text
+
+    r = client.get("/documents/latest/co_applicant_photo", headers={"Authorization": f"Bearer {_OTHER_TOKEN}"})
+    assert r.status_code == 404  # that identity has no co_applicant_photo, only applicant_photo
+
+    mine = client.get("/documents/latest/applicant_photo", headers=_auth_headers())
+    if mine.status_code == 200:
+        assert mine.json()["id"] != other.json()["id"]
+
+
 def test_generate_document_missing_document_type_is_422():
     r = client.post(
         "/documents/generate",

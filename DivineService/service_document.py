@@ -436,3 +436,15 @@ class serviceDocument:
         bucket = getattr(doc, "storage_bucket", None) or self._bucket
         signed_url = self._sign_url(doc.storage_path, bucket=bucket)
         return doc, signed_url, DEFAULT_SIGNED_URL_EXPIRY_SECONDS
+
+    def get_latest(self, document_type: str, requester_id: str, requester_role: str = None):
+        if not document_type or not document_type.strip():
+            raise ValueError("document_type_required")
+        doc = self._persistence.get_latest_by_owner_and_type(requester_id, document_type.strip())
+        if not doc:
+            raise ValueError("not_found")
+        if requester_role is not None and doc.owner_role != requester_role:
+            raise PermissionError("forbidden")
+        bucket = getattr(doc, "storage_bucket", None) or self._bucket
+        signed_url = self._sign_url(doc.storage_path, bucket=bucket)
+        return doc, signed_url, DEFAULT_SIGNED_URL_EXPIRY_SECONDS
