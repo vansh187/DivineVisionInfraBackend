@@ -106,3 +106,45 @@ def test_message_after_successful_login_is_not_consumed_as_password():
     assert "invalid email or password" not in result["reply"].lower()
     assert result["reply"] == "Here are the plot details."
     assert persistence.session.auth_state is None
+
+
+def _gemini_text(reply):
+    return SimpleNamespace(generate=lambda *a, **k: {"function_call": None, "text": reply})
+
+
+def test_stale_password_state_does_not_swallow_a_plot_question():
+    # Simulate the reported bug's precondition: auth_state survived a prior successful
+    # login. A plain project question must break out of it, not get read as a password.
+    persistence = FakePersistence()
+    persistence.session.auth_state = "login_customer_password"
+    persistence.session.auth_payload = {"mode": "login", "role": "customer", "email": "u@example.com"}
+    service = _service(persistence, FakeAuth(ok=True), gemini=_gemini_text("Available plots: ..."))
+
+    result = service.handle_message("s1", text="give details of plots")
+
+    assert "invalid email or password" not in result["reply"].lower()
+    assert result["reply"] == "Available plots: ..."
+    assert persistence.session.auth_state is None
+
+
+def test_escape_hatch_falls_back_without_recursing_when_clear_write_keeps_failing():
+    persistence = FakePersistence(clear_fails_times=99)  # every clear-to-None write raises
+    persistence.session.auth_state = "login_customer_password"
+    persistence.session.auth_payload = {"mode": "login", "role": "customer", "email": "u@example.com"}
+    service = _service(persistence, FakeAuth(ok=True), gemini=_gemini_text("Plot info here"))
+
+    result = service.handle_message("s1", text="what plot sizes are available")
+
+    assert result["reply"] == "Plot info here"
+    assert "invalid email or password" not in result["reply"].lower()
+
+
+def test_single_word_during_password_entry_is_still_treated_as_password():
+    persistence = FakePersistence()
+    persistence.session.auth_state = "login_customer_password"
+    persistence.session.auth_payload = {"mode": "login", "role": "customer", "email": "u@example.com"}
+    service = _service(persistence, FakeAuth(ok=False))
+
+    result = service.handle_message("s1", text="plots")
+
+    assert "invalid email or password" in result["reply"].lower()

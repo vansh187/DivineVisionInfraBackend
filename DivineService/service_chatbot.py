@@ -584,6 +584,27 @@ def wants_plot_booking(raw: str) -> bool:
     return has_booking_intent and has_plot_or_size
 
 
+_PROJECT_INFO_KEYWORDS = (
+    "plot", "plots", "property", "properties", "unit", "units", "flat", "flats",
+    "price", "pricing", "rate", "rates", "cost", "budget", "brochure",
+    "detail", "details", "information", "info",
+    "size", "sizes", "area", "dimension", "dimensions",
+    "available", "availability", "inventory", "option", "options",
+    "location", "township", "rera", "possession", "amenities", "amenity",
+    "payment plan", "installment", "instalment", "floor plan", "layout",
+)
+
+
+def wants_project_info(raw: str) -> bool:
+    # A message that plainly reads as a projects/pricing/specs question rather than a
+    # login credential. Used to break out of a stale auth flow so a logged-in visitor
+    # isn't answered with "invalid email or password".
+    text = _contact_text(raw)
+    if not text:
+        return False
+    return any(kw in text for kw in _PROJECT_INFO_KEYWORDS)
+
+
 def selected_booking_project(raw: str) -> str:
     text = _contact_text(raw)
     if not text:
@@ -1293,6 +1314,34 @@ class serviceChatbot:
         state = session.auth_state
         payload = self._auth_payload(session)
         credentials = extract_auth_credentials(text)
+
+        # Escape hatch for a stale auth_state - e.g. a login that succeeded but whose
+        # state-clear write didn't stick. Without this, the visitor's normal questions
+        # keep getting consumed as email/password guesses and answered with
+        # "invalid email or password". If the message carries no credential and plainly
+        # reads as a project-info / booking question, drop the auth flow and route it
+        # normally (same recursion pattern as the callback/menu "complete" states).
+        if (not credentials.get("email") and not credentials.get("password")
+                and len((text or "").split()) >= 2
+                and (wants_project_info(text) or wants_plot_booking(text))):
+            if self._safe_update_session_auth_state(session_id, None, None) is not None:
+                return self.handle_message(session_id, text=text)
+            # DB clear failed - don't recurse (auth_state is still set in the DB and we'd
+            # loop). Drop it in-memory and answer this turn directly.
+            logger.error("chatbot_auth_state_clear_failed_on_escape session_id=%s", session_id)
+            session.auth_state = None
+            self._persist_turn(session_id, "user", text)
+            result = self._run_agent_loop(session, text)
+            self._persist_turn(
+                session_id, "assistant", result["reply"], llm_provider=result.get("llm_provider"),
+                guardrail_score=result.get("guardrail_score"), guardrail_passed=result.get("guardrail_passed"),
+            )
+            response = {"session_id": session_id, "reply": result["reply"],
+                        "llm_provider": result.get("llm_provider"),
+                        "guardrail_passed": result.get("guardrail_passed")}
+            if result.get("structured_result"):
+                response["structured_result"] = result["structured_result"]
+            return response
 
         if state.endswith("_password") or credentials.get("password"):
             self._persist_turn(session_id, "user", "[password hidden]")
