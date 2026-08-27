@@ -285,3 +285,120 @@ def test_recommend_with_no_lead_or_session_returns_recent_units():
 
     assert result["best_fit"][0]["id"] == "u1"
     persistence.list_events_for_lead.assert_not_called()
+
+
+# ---- Channel Partner reservations ------------------------------------------
+
+def test_reserve_unit_success_returns_formatted_unit_with_expiry():
+    from datetime import datetime, timezone
+    svc, persistence, _, _ = _service()
+    persistence.reserve_unit.return_value = _unit(
+        status="reserved", reserved_by_broker_id="B00001",
+        reserved_at=datetime.now(timezone.utc), reserved_until=datetime.now(timezone.utc),
+    )
+
+    result = svc.reserve_unit("u1", "B00001")
+
+    assert result["id"] == "u1"
+    assert result["reserved_at"] is not None
+    assert result["reserved_until"] is not None
+    call_kwargs = persistence.reserve_unit.call_args.kwargs
+    assert call_kwargs["id"] == "u1"
+    assert call_kwargs["broker_id"] == "B00001"
+    assert (call_kwargs["reserved_until"] - call_kwargs["reserved_at"]).days == 3
+
+
+def test_reserve_unit_raises_conflict_when_persistence_returns_none():
+    svc, persistence, _, _ = _service()
+    persistence.reserve_unit.return_value = None
+
+    try:
+        svc.reserve_unit("u1", "B00001")
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert str(e) == "unit_not_available"
+
+
+def test_reserve_unit_rejects_blank_ids():
+    svc, _, _, _ = _service()
+
+    try:
+        svc.reserve_unit("  ", "B00001")
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert str(e) == "inventory_id_required"
+
+    try:
+        svc.reserve_unit("u1", "  ")
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert str(e) == "broker_id_required"
+
+
+def test_release_reservation_success():
+    svc, persistence, _, _ = _service()
+    persistence.release_reservation.return_value = _unit(status="available")
+
+    result = svc.release_reservation("u1", "B00001")
+
+    assert result["status"] == "available"
+    call_kwargs = persistence.release_reservation.call_args.kwargs
+    assert call_kwargs["target_status"] == "available"
+    assert call_kwargs["outcome"] == "released"
+
+
+def test_release_reservation_raises_when_not_owned_by_caller():
+    svc, persistence, _, _ = _service()
+    persistence.release_reservation.return_value = None
+
+    try:
+        svc.release_reservation("u1", "B00002")
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert str(e) == "not_reserved_by_you"
+
+
+def test_mark_sold_success():
+    svc, persistence, _, _ = _service()
+    persistence.release_reservation.return_value = _unit(status="sold")
+
+    result = svc.mark_sold("u1", "B00001")
+
+    assert result["status"] == "sold"
+    call_kwargs = persistence.release_reservation.call_args.kwargs
+    assert call_kwargs["target_status"] == "sold"
+    assert call_kwargs["outcome"] == "converted"
+
+
+def test_mark_sold_raises_when_not_owned_by_caller():
+    svc, persistence, _, _ = _service()
+    persistence.release_reservation.return_value = None
+
+    try:
+        svc.mark_sold("u1", "B00002")
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert str(e) == "not_reserved_by_you"
+
+
+def test_list_my_reservations_scopes_to_calling_broker_only():
+    svc, persistence, _, _ = _service()
+    persistence.list_reservations_for_broker.return_value = [
+        _unit(id="mine1", status="reserved"), _unit(id="mine2", status="reserved"),
+    ]
+
+    result = svc.list_my_reservations("B00001")
+
+    assert result["count"] == 2
+    assert [r["id"] for r in result["reservations"]] == ["mine1", "mine2"]
+    persistence.list_reservations_for_broker.assert_called_once_with("B00001")
+
+
+def test_list_my_reservations_rejects_blank_broker_id():
+    svc, _, _, _ = _service()
+
+    try:
+        svc.list_my_reservations("  ")
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert str(e) == "broker_id_required"

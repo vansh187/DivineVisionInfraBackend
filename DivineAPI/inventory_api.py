@@ -1,13 +1,21 @@
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from DivineDTO.models import (
     InventorySearchResponseDTO, NLSearchRequestDTO, NLSearchResponseDTO,
     InventoryViewRequestDTO, InventoryViewResponseDTO, RecommendationResponseDTO,
+    InventoryUnitOutDTO, ReserveInventoryResponseDTO, MyReservationsResponseDTO,
 )
 from DivineService import serviceInventory
+from DivineService.auth import get_current_user
 
 router = APIRouter(prefix="/inventory", tags=["inventory"])
 _inventory_service = serviceInventory()
+
+
+def _require_broker(current_user: dict) -> str:
+    if current_user["role"] != "broker":
+        raise HTTPException(status_code=403, detail="inventory_reservation_broker_only")
+    return current_user["sub"]
 
 
 @router.get("/search", response_model=InventorySearchResponseDTO)
@@ -66,6 +74,56 @@ def get_recommendations(
     try:
         return _inventory_service.recommend(lead_id=lead_id, session_id=session_id, limit=limit)
     except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception:
+        raise HTTPException(status_code=500, detail="internal_error")
+
+
+@router.get("/reserved/mine", response_model=MyReservationsResponseDTO)
+def list_my_reservations(current_user: dict = Depends(get_current_user)):
+    broker_id = _require_broker(current_user)
+    try:
+        return _inventory_service.list_my_reservations(broker_id=broker_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception:
+        raise HTTPException(status_code=500, detail="internal_error")
+
+
+@router.post("/{inventory_id}/reserve", response_model=ReserveInventoryResponseDTO)
+def reserve_inventory(inventory_id: str, current_user: dict = Depends(get_current_user)):
+    broker_id = _require_broker(current_user)
+    try:
+        return _inventory_service.reserve_unit(inventory_id=inventory_id, broker_id=broker_id)
+    except ValueError as e:
+        if str(e) == "unit_not_available":
+            raise HTTPException(status_code=409, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception:
+        raise HTTPException(status_code=500, detail="internal_error")
+
+
+@router.post("/{inventory_id}/release", response_model=InventoryUnitOutDTO)
+def release_inventory_reservation(inventory_id: str, current_user: dict = Depends(get_current_user)):
+    broker_id = _require_broker(current_user)
+    try:
+        return _inventory_service.release_reservation(inventory_id=inventory_id, broker_id=broker_id)
+    except ValueError as e:
+        if str(e) == "not_reserved_by_you":
+            raise HTTPException(status_code=409, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception:
+        raise HTTPException(status_code=500, detail="internal_error")
+
+
+@router.post("/{inventory_id}/mark-sold", response_model=InventoryUnitOutDTO)
+def mark_inventory_sold(inventory_id: str, current_user: dict = Depends(get_current_user)):
+    broker_id = _require_broker(current_user)
+    try:
+        return _inventory_service.mark_sold(inventory_id=inventory_id, broker_id=broker_id)
+    except ValueError as e:
+        if str(e) == "not_reserved_by_you":
+            raise HTTPException(status_code=409, detail=str(e))
         raise HTTPException(status_code=400, detail=str(e))
     except Exception:
         raise HTTPException(status_code=500, detail="internal_error")
