@@ -742,6 +742,19 @@ class serviceChatbot:
             return self._advance_menu_flow(session, text)
 
         if not text:
+            # The frontend calls /message once with empty text right after opening the
+            # widget, expecting the welcome greeting back. That greeting normally comes
+            # from the menu funnel's "greeting_name" state, which init_session arms. If
+            # it isn't armed here - init_session's menu_state write failed, or this
+            # integration (e.g. the customer portal) opened the chat without calling
+            # /session/init - arm it now on this first, message-less turn and greet,
+            # instead of returning a terse "didn't catch that". Guarded on the session
+            # being fresh so a stray empty message mid-conversation doesn't restart the
+            # funnel.
+            if self._session_is_fresh(session_id):
+                armed = self._safe_update_session_menu_state(session_id, "greeting_name", {})
+                if armed is not None:
+                    return self._advance_menu_flow(armed, "")
             return {"session_id": session_id, "reply": "Sorry, I didn't catch that — could you type your question?"}
 
         if auth_flow:
@@ -1236,6 +1249,16 @@ class serviceChatbot:
         except Exception as e:
             logger.warning("chatbot_menu_state_update_failed: %s", e)
             return None
+
+    def _session_is_fresh(self, session_id: str) -> bool:
+        # "Fresh" = no turns persisted yet, i.e. this is the widget-open ping. On any
+        # lookup failure, assume fresh: greeting an empty message is the friendlier
+        # default, and the guard only exists to avoid re-arming the funnel mid-chat.
+        try:
+            return not self._persistence.list_recent_messages(session_id, limit=1)
+        except Exception as e:
+            logger.warning("chatbot_session_freshness_check_failed: %s", e)
+            return True
 
     # ---- Auth state machine (deterministic, no LLM) -------------------------
     def _start_auth_flow(self, session, auth_flow):
