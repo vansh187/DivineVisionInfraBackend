@@ -422,7 +422,7 @@ def test_login_flow_invalid_credentials_restarts_at_email_and_masks_password():
 
     assert "invalid email or password" in result["reply"].lower()
     assert persistence.session.auth_state == "login_customer_email"
-    assert persistence.session.auth_payload == {"mode": "login", "role": "customer"}
+    assert persistence.session.auth_payload == {"mode": "login", "role": "customer", "login_attempts": 1}
     assert "[password hidden]" in [m["content"] for m in persistence.messages]
     assert "wrong-password" not in [m["content"] for m in persistence.messages]
 

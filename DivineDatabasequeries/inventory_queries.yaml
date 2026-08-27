@@ -36,6 +36,23 @@ search_units: |
 get_unit_by_id: |
   SELECT * FROM divine_project_inventory WHERE id = :id;
 
+distinct_plot_sizes: |
+  SELECT
+    project_name,
+    city,
+    unit_type,
+    area_sqyd,
+    area_sqmt,
+    width_mtr,
+    length_mtr,
+    COUNT(*) AS unit_count,
+    SUM(CASE WHEN status = 'available' THEN 1 ELSE 0 END) AS available_count
+  FROM divine_project_inventory
+  WHERE (:project_name IS NULL OR lower(project_name) LIKE '%' || lower(:project_name) || '%')
+    AND (:unit_type IS NULL OR lower(unit_type) = lower(:unit_type))
+  GROUP BY project_name, city, unit_type, area_sqyd, area_sqmt, width_mtr, length_mtr
+  ORDER BY project_name ASC, area_sqyd ASC;
+
 record_event: |
   INSERT INTO divine_inventory_events(id, inventory_id, lead_id, session_id, event_type, created_date)
   VALUES (:id, :inventory_id, :lead_id, :session_id, :event_type, :created_date)

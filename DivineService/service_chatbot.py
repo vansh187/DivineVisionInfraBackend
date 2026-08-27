@@ -7,7 +7,7 @@ import ipaddress
 import unicodedata
 from datetime import datetime, timezone
 
-from Divinepersistence import persistenceChatbot
+from Divinepersistence import persistenceChatbot, persistenceInventory
 from Divinepersistence.persistence_loan import persistenceLoan
 from DivineDTO.models import UserCreateDTO
 from DivineService.service_broker import serviceBroker
@@ -30,6 +30,12 @@ SYSTEM_INSTRUCTION = (
     "search_knowledge_base tool's results - never invent figures or claims from your own "
     "general knowledge. If the knowledge base has no relevant information, say so plainly "
     "and offer a callback instead of guessing. "
+    "For any question about unit sizes, plot sizes, plot dimensions, or plot area ('how "
+    "big are the plots', 'what sizes do you have', 'kitne gaj', 'kitne size'), call "
+    "get_plot_size_options and answer with how many distinct sizes are on offer and list "
+    "them - give the area in sq. yards, plus the plot dimensions in metres where available, "
+    "grouped by project. Do NOT ask for the visitor's name or phone number just to answer "
+    "a sizing question. "
     "You are a knowledgeable, consultative sales assistant, not just an FAQ bot - when you "
     "don't have specific data, don't just say you don't know: acknowledge the question, "
     "share what you do know from the knowledge base, and route to a callback or site visit "
@@ -76,6 +82,10 @@ DEGRADED_FALLBACK_REPLY = "Sorry, I'm having a little trouble right now. Could y
 
 MAX_TOOL_ROUNDS = 3
 HISTORY_TURN_LIMIT = 20
+# After this many failed login attempts in one auth flow, abandon the flow and let the
+# visitor keep chatting - otherwise a wrong password (or a stale auth_state that made a
+# normal question get read as a password) traps them in a "invalid email or password" loop.
+MAX_LOGIN_ATTEMPTS = 3
 GUARDRAIL_THRESHOLD = float(os.getenv("CHATBOT_GUARDRAIL_THRESHOLD", "0.5"))
 
 BOOKING_PROJECT_BUTTONS = [
@@ -289,6 +299,19 @@ TOOL_SCHEMAS = [
         "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "search query"}}, "required": ["query"]},
     },
     {
+        "name": "get_plot_size_options",
+        "description": (
+            "List the distinct plot/unit sizes on offer across the projects, with a count of "
+            "how many distinct sizes there are. Use this for any question about unit sizes, "
+            "plot sizes, plot dimensions, area, 'how big are the plots', or 'what sizes are "
+            "available'. Returns area in sq. yards / sq. metres and plot dimensions in metres "
+            "where recorded, grouped by project."
+        ),
+        "parameters": {"type": "object", "properties": {
+            "project_name": {"type": "string", "description": "optional project filter, e.g. 'OPS Divine Greens' or 'Suraksha'"},
+        }, "required": []},
+    },
+    {
         "name": "upsert_crm_lead",
         "description": "Save or update the visitor's name, phone number, and/or email address on their lead record.",
         "parameters": {"type": "object", "properties": {
@@ -386,6 +409,17 @@ def looks_degenerate(text: str) -> bool:
         return False
     junk = sum(1 for w in words if not re.search(r"[A-Za-z0-9ऀ-ॿ]", w))
     return (junk / len(words)) > 0.35
+
+
+def _as_number(value):
+    # Inventory area/dimension columns come back as Decimal on Postgres and float/str on
+    # SQLite - normalise to a plain float (or None) so tool output is JSON-clean.
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _digits_only(raw: str) -> str:
@@ -550,6 +584,27 @@ def wants_plot_booking(raw: str) -> bool:
     return has_booking_intent and has_plot_or_size
 
 
+_PROJECT_INFO_KEYWORDS = (
+    "plot", "plots", "property", "properties", "unit", "units", "flat", "flats",
+    "price", "pricing", "rate", "rates", "cost", "budget", "brochure",
+    "detail", "details", "information", "info",
+    "size", "sizes", "area", "dimension", "dimensions",
+    "available", "availability", "inventory", "option", "options",
+    "location", "township", "rera", "possession", "amenities", "amenity",
+    "payment plan", "installment", "instalment", "floor plan", "layout",
+)
+
+
+def wants_project_info(raw: str) -> bool:
+    # A message that plainly reads as a projects/pricing/specs question rather than a
+    # login credential. Used to break out of a stale auth flow so a logged-in visitor
+    # isn't answered with "invalid email or password".
+    text = _contact_text(raw)
+    if not text:
+        return False
+    return any(kw in text for kw in _PROJECT_INFO_KEYWORDS)
+
+
 def selected_booking_project(raw: str) -> str:
     text = _contact_text(raw)
     if not text:
@@ -602,13 +657,21 @@ def is_negative(raw: str) -> bool:
 class serviceChatbot:
     def __init__(self, persistence: persistenceChatbot = None, gemini: llmGemini = None, groq: llmGroq = None,
                  customer_service: serviceCustomer = None, broker_service: serviceBroker = None,
-                 zoho: serviceZoho = None, loan_persistence: persistenceLoan = None):
+                 zoho: serviceZoho = None, loan_persistence: persistenceLoan = None,
+                 inventory_persistence: persistenceInventory = None):
         self._persistence = persistence or persistenceChatbot()
         self._gemini = gemini or llmGemini()
         self._groq = groq or llmGroq()
         self._customer_service = customer_service
         self._broker_service = broker_service
         self._loan_persistence = loan_persistence or persistenceLoan()
+        try:
+            self._inventory = inventory_persistence or persistenceInventory()
+        except Exception as e:
+            # Inventory lookups are an enhancement (plot-size answers) - a failure here must
+            # never stop the chatbot from starting; the tool degrades to "unavailable".
+            logger.warning("inventory_persistence_init_failed: %s", e)
+            self._inventory = None
         try:
             self._zoho = zoho or serviceZoho()
         except Exception as e:
@@ -704,6 +767,19 @@ class serviceChatbot:
             return self._advance_menu_flow(session, text)
 
         if not text:
+            # The frontend calls /message once with empty text right after opening the
+            # widget, expecting the welcome greeting back. That greeting normally comes
+            # from the menu funnel's "greeting_name" state, which init_session arms. If
+            # it isn't armed here - init_session's menu_state write failed, or this
+            # integration (e.g. the customer portal) opened the chat without calling
+            # /session/init - arm it now on this first, message-less turn and greet,
+            # instead of returning a terse "didn't catch that". Guarded on the session
+            # being fresh so a stray empty message mid-conversation doesn't restart the
+            # funnel.
+            if self._session_is_fresh(session_id):
+                armed = self._safe_update_session_menu_state(session_id, "greeting_name", {})
+                if armed is not None:
+                    return self._advance_menu_flow(armed, "")
             return {"session_id": session_id, "reply": "Sorry, I didn't catch that — could you type your question?"}
 
         if auth_flow:
@@ -1199,6 +1275,31 @@ class serviceChatbot:
             logger.warning("chatbot_menu_state_update_failed: %s", e)
             return None
 
+    def _session_is_fresh(self, session_id: str) -> bool:
+        # "Fresh" = no turns persisted yet, i.e. this is the widget-open ping. On any
+        # lookup failure, assume fresh: greeting an empty message is the friendlier
+        # default, and the guard only exists to avoid re-arming the funnel mid-chat.
+        try:
+            return not self._persistence.list_recent_messages(session_id, limit=1)
+        except Exception as e:
+            logger.warning("chatbot_session_freshness_check_failed: %s", e)
+            return True
+
+    def _already_logged_in_this_session(self, session_id: str) -> bool:
+        # True once a prior turn confirmed a login. Used to recognise a lingering
+        # auth_state (whose clear write didn't persist) so later messages aren't
+        # treated as credential guesses.
+        try:
+            rows = self._persistence.list_recent_messages(session_id, limit=HISTORY_TURN_LIMIT)
+        except Exception as e:
+            logger.warning("chatbot_login_history_check_failed: %s", e)
+            return False
+        for row in rows:
+            if (getattr(row, "role", None) == "assistant"
+                    and str(getattr(row, "content", "")).startswith("You are logged in as ")):
+                return True
+        return False
+
     # ---- Auth state machine (deterministic, no LLM) -------------------------
     def _start_auth_flow(self, session, auth_flow):
         mode, role = auth_flow
@@ -1228,6 +1329,38 @@ class serviceChatbot:
         state = session.auth_state
         payload = self._auth_payload(session)
         credentials = extract_auth_credentials(text)
+
+        # Escape hatch for a stale auth_state - e.g. a login that succeeded ("You are
+        # logged in as customer.") but whose state-clear write didn't stick, so the
+        # visitor's next message ("giv details of plots") gets consumed as a password
+        # and answered "invalid email or password". Bail out of the auth flow when the
+        # message carries no credential, is more than one word, and EITHER reads as a
+        # project-info / booking question OR this session has already completed a login.
+        # A genuine re-login isn't hurt: its email step carries an address (a credential)
+        # and its password step is normally a single token. Same recursion pattern as
+        # the callback/menu "complete" states.
+        if (not credentials.get("email") and not credentials.get("password")
+                and len((text or "").split()) >= 2
+                and (wants_project_info(text) or wants_plot_booking(text)
+                     or self._already_logged_in_this_session(session_id))):
+            if self._safe_update_session_auth_state(session_id, None, None) is not None:
+                return self.handle_message(session_id, text=text)
+            # DB clear failed - don't recurse (auth_state is still set in the DB and we'd
+            # loop). Drop it in-memory and answer this turn directly.
+            logger.error("chatbot_auth_state_clear_failed_on_escape session_id=%s", session_id)
+            session.auth_state = None
+            self._persist_turn(session_id, "user", text)
+            result = self._run_agent_loop(session, text)
+            self._persist_turn(
+                session_id, "assistant", result["reply"], llm_provider=result.get("llm_provider"),
+                guardrail_score=result.get("guardrail_score"), guardrail_passed=result.get("guardrail_passed"),
+            )
+            response = {"session_id": session_id, "reply": result["reply"],
+                        "llm_provider": result.get("llm_provider"),
+                        "guardrail_passed": result.get("guardrail_passed")}
+            if result.get("structured_result"):
+                response["structured_result"] = result["structured_result"]
+            return response
 
         if state.endswith("_password") or credentials.get("password"):
             self._persist_turn(session_id, "user", "[password hidden]")
@@ -1428,7 +1561,19 @@ class serviceChatbot:
         try:
             token = self._auth_service(role).login_by_email(payload.get("email"), payload.get("password"))
         except ValueError:
-            self._safe_update_session_auth_state(session_id, f"login_{role}_email", {"mode": "login", "role": role})
+            attempts = self._as_attempt_count(payload.get("login_attempts")) + 1
+            if attempts >= MAX_LOGIN_ATTEMPTS:
+                self._safe_update_session_auth_state(session_id, None, None)
+                reply = (
+                    "I still couldn't verify those login details. No problem - you can keep "
+                    "chatting, and use the Login button whenever you'd like to try again."
+                )
+                self._persist_turn(session_id, "assistant", reply)
+                return {"session_id": session_id, "reply": reply, "buttons": [AUTH_LOGIN_BUTTONS[role]]}
+            self._safe_update_session_auth_state(
+                session_id, f"login_{role}_email",
+                {"mode": "login", "role": role, "login_attempts": attempts},
+            )
             reply = "Invalid email or password. Please enter your email address again."
             self._persist_turn(session_id, "assistant", reply)
             return {"session_id": session_id, "reply": reply}
@@ -1439,10 +1584,21 @@ class serviceChatbot:
             self._persist_turn(session_id, "assistant", reply)
             return {"session_id": session_id, "reply": reply}
 
-        self._safe_update_session_auth_state(session_id, None, None)
+        # This clear MUST stick: if auth_state survives a successful login, the visitor's
+        # very next message is consumed as a password and bounces them into a bogus
+        # "invalid email or password" loop despite being logged in. Retry once, then log.
+        if self._safe_update_session_auth_state(session_id, None, None) is None:
+            if self._safe_update_session_auth_state(session_id, None, None) is None:
+                logger.error("chatbot_auth_state_clear_failed_after_login session_id=%s", session_id)
         reply = f"You are logged in as {role}."
         self._persist_turn(session_id, "assistant", reply)
         return {"session_id": session_id, "reply": reply, "auth_token": token, "auth_role": role}
+
+    def _as_attempt_count(self, raw) -> int:
+        try:
+            return max(0, int(raw))
+        except (TypeError, ValueError):
+            return 0
 
     def _auth_service(self, role: str):
         if role == "customer":
@@ -1611,6 +1767,8 @@ class serviceChatbot:
                 return self._tool_upsert_crm_lead(session, args.get("name"), args.get("phone"), args.get("email"))
             if name == "extract_lead_signals":
                 return self._tool_extract_lead_signals(session)
+            if name == "get_plot_size_options":
+                return self._tool_get_plot_size_options(args)
             if name == "update_loan_profile":
                 return self._tool_update_loan_profile(session, args)
             if name == "calculate_emi":
@@ -1641,6 +1799,48 @@ class serviceChatbot:
         chunks = [{"content": r.content, "similarity": float(r.similarity)} for r in rows if r.similarity and r.similarity > 0.3]
         sources = [r.title for r in rows if r.similarity and r.similarity > 0.3]
         return {"chunks": chunks, "sources": sources}
+
+    def _tool_get_plot_size_options(self, args: dict) -> dict:
+        if not self._inventory:
+            return {"error": "inventory_unavailable"}
+        project_name = (args.get("project_name") or "").strip() or None
+        try:
+            rows = self._inventory.distinct_plot_sizes(project_name=project_name)
+        except Exception as e:
+            logger.warning("chatbot_plot_sizes_lookup_failed: %s", e)
+            return {"error": "tool_failed"}
+
+        projects = {}
+        distinct_keys = set()
+        for r in rows:
+            pname = getattr(r, "project_name", None) or "Unknown project"
+            entry = projects.setdefault(pname, {
+                "project_name": pname, "city": getattr(r, "city", None), "sizes": [],
+            })
+            area_sqyd = _as_number(getattr(r, "area_sqyd", None))
+            width = _as_number(getattr(r, "width_mtr", None))
+            length = _as_number(getattr(r, "length_mtr", None))
+            dimensions = f"{width} x {length} m" if width and length else None
+            entry["sizes"].append({
+                "unit_type": getattr(r, "unit_type", None),
+                "area_sq_yd": area_sqyd,
+                "area_sq_mtr": _as_number(getattr(r, "area_sqmt", None)),
+                "dimensions_mtr": dimensions,
+                "total_units": int(getattr(r, "unit_count", 0) or 0),
+                "available_units": int(getattr(r, "available_count", 0) or 0),
+            })
+            distinct_keys.add((pname, area_sqyd, dimensions))
+
+        result = {
+            "distinct_size_count": len(distinct_keys),
+            "projects": list(projects.values()),
+        }
+        if not distinct_keys:
+            result["note"] = (
+                "No plot-size data is loaded in inventory yet - offer a callback so the team "
+                "can share exact sizes."
+            )
+        return result
 
     def _tool_upsert_crm_lead(self, session, name: str, phone: str, email: str = None) -> dict:
         if phone and not valid_phone(phone):
