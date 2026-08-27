@@ -148,3 +148,34 @@ def test_single_word_during_password_entry_is_still_treated_as_password():
     result = service.handle_message("s1", text="plots")
 
     assert "invalid email or password" in result["reply"].lower()
+
+
+def test_any_multiword_message_after_a_prior_login_escapes_stale_auth_state():
+    # Exactly the reported screenshot: login already succeeded, auth_state lingered,
+    # next message is a non-credential phrase.
+    persistence = FakePersistence()
+    persistence.session.auth_state = "login_customer_password"
+    persistence.session.auth_payload = {"mode": "login", "role": "customer", "email": "u@example.com"}
+    persistence.messages.append(SimpleNamespace(role="assistant", content="You are logged in as customer."))
+    service = _service(persistence, FakeAuth(ok=True), gemini=_gemini_text("Here's what I found."))
+
+    result = service.handle_message("s1", text="tell me more")
+
+    assert result["reply"] == "Here's what I found."
+    assert persistence.session.auth_state is None
+
+
+def test_relogin_password_step_single_token_still_processed_after_prior_login():
+    persistence = FakePersistence()
+    persistence.session.auth_state = "login_broker_password"
+    persistence.session.auth_payload = {"mode": "login", "role": "broker", "email": "b@example.com"}
+    persistence.messages.append(SimpleNamespace(role="assistant", content="You are logged in as customer."))
+    service = serviceChatbot(
+        persistence=persistence, gemini=object(), groq=object(), zoho=None,
+        broker_service=FakeAuth(ok=True),
+    )
+
+    result = service.handle_message("s1", text="BrokerPass123")
+
+    assert result.get("auth_token") is not None
+    assert persistence.session.auth_state is None

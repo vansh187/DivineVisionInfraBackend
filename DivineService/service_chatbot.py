@@ -1285,6 +1285,21 @@ class serviceChatbot:
             logger.warning("chatbot_session_freshness_check_failed: %s", e)
             return True
 
+    def _already_logged_in_this_session(self, session_id: str) -> bool:
+        # True once a prior turn confirmed a login. Used to recognise a lingering
+        # auth_state (whose clear write didn't persist) so later messages aren't
+        # treated as credential guesses.
+        try:
+            rows = self._persistence.list_recent_messages(session_id, limit=HISTORY_TURN_LIMIT)
+        except Exception as e:
+            logger.warning("chatbot_login_history_check_failed: %s", e)
+            return False
+        for row in rows:
+            if (getattr(row, "role", None) == "assistant"
+                    and str(getattr(row, "content", "")).startswith("You are logged in as ")):
+                return True
+        return False
+
     # ---- Auth state machine (deterministic, no LLM) -------------------------
     def _start_auth_flow(self, session, auth_flow):
         mode, role = auth_flow
@@ -1315,15 +1330,19 @@ class serviceChatbot:
         payload = self._auth_payload(session)
         credentials = extract_auth_credentials(text)
 
-        # Escape hatch for a stale auth_state - e.g. a login that succeeded but whose
-        # state-clear write didn't stick. Without this, the visitor's normal questions
-        # keep getting consumed as email/password guesses and answered with
-        # "invalid email or password". If the message carries no credential and plainly
-        # reads as a project-info / booking question, drop the auth flow and route it
-        # normally (same recursion pattern as the callback/menu "complete" states).
+        # Escape hatch for a stale auth_state - e.g. a login that succeeded ("You are
+        # logged in as customer.") but whose state-clear write didn't stick, so the
+        # visitor's next message ("giv details of plots") gets consumed as a password
+        # and answered "invalid email or password". Bail out of the auth flow when the
+        # message carries no credential, is more than one word, and EITHER reads as a
+        # project-info / booking question OR this session has already completed a login.
+        # A genuine re-login isn't hurt: its email step carries an address (a credential)
+        # and its password step is normally a single token. Same recursion pattern as
+        # the callback/menu "complete" states.
         if (not credentials.get("email") and not credentials.get("password")
                 and len((text or "").split()) >= 2
-                and (wants_project_info(text) or wants_plot_booking(text))):
+                and (wants_project_info(text) or wants_plot_booking(text)
+                     or self._already_logged_in_this_session(session_id))):
             if self._safe_update_session_auth_state(session_id, None, None) is not None:
                 return self.handle_message(session_id, text=text)
             # DB clear failed - don't recurse (auth_state is still set in the DB and we'd
