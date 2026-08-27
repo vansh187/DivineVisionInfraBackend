@@ -82,6 +82,10 @@ DEGRADED_FALLBACK_REPLY = "Sorry, I'm having a little trouble right now. Could y
 
 MAX_TOOL_ROUNDS = 3
 HISTORY_TURN_LIMIT = 20
+# After this many failed login attempts in one auth flow, abandon the flow and let the
+# visitor keep chatting - otherwise a wrong password (or a stale auth_state that made a
+# normal question get read as a password) traps them in a "invalid email or password" loop.
+MAX_LOGIN_ATTEMPTS = 3
 GUARDRAIL_THRESHOLD = float(os.getenv("CHATBOT_GUARDRAIL_THRESHOLD", "0.5"))
 
 BOOKING_PROJECT_BUTTONS = [
@@ -1489,7 +1493,19 @@ class serviceChatbot:
         try:
             token = self._auth_service(role).login_by_email(payload.get("email"), payload.get("password"))
         except ValueError:
-            self._safe_update_session_auth_state(session_id, f"login_{role}_email", {"mode": "login", "role": role})
+            attempts = self._as_attempt_count(payload.get("login_attempts")) + 1
+            if attempts >= MAX_LOGIN_ATTEMPTS:
+                self._safe_update_session_auth_state(session_id, None, None)
+                reply = (
+                    "I still couldn't verify those login details. No problem - you can keep "
+                    "chatting, and use the Login button whenever you'd like to try again."
+                )
+                self._persist_turn(session_id, "assistant", reply)
+                return {"session_id": session_id, "reply": reply, "buttons": [AUTH_LOGIN_BUTTONS[role]]}
+            self._safe_update_session_auth_state(
+                session_id, f"login_{role}_email",
+                {"mode": "login", "role": role, "login_attempts": attempts},
+            )
             reply = "Invalid email or password. Please enter your email address again."
             self._persist_turn(session_id, "assistant", reply)
             return {"session_id": session_id, "reply": reply}
@@ -1500,10 +1516,21 @@ class serviceChatbot:
             self._persist_turn(session_id, "assistant", reply)
             return {"session_id": session_id, "reply": reply}
 
-        self._safe_update_session_auth_state(session_id, None, None)
+        # This clear MUST stick: if auth_state survives a successful login, the visitor's
+        # very next message is consumed as a password and bounces them into a bogus
+        # "invalid email or password" loop despite being logged in. Retry once, then log.
+        if self._safe_update_session_auth_state(session_id, None, None) is None:
+            if self._safe_update_session_auth_state(session_id, None, None) is None:
+                logger.error("chatbot_auth_state_clear_failed_after_login session_id=%s", session_id)
         reply = f"You are logged in as {role}."
         self._persist_turn(session_id, "assistant", reply)
         return {"session_id": session_id, "reply": reply, "auth_token": token, "auth_role": role}
+
+    def _as_attempt_count(self, raw) -> int:
+        try:
+            return max(0, int(raw))
+        except (TypeError, ValueError):
+            return 0
 
     def _auth_service(self, role: str):
         if role == "customer":
