@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 from Divinepersistence import persistenceBroker
 from DivineDTO.models import UserCreateDTO, UserLoginDTO
 from DivineService.service_zoho import serviceZoho
+from DivineService.service_email import serviceEmail, dispatch_welcome_email, CHANNEL_PARTNER
 
 load_dotenv()
 
@@ -18,7 +19,7 @@ EMAIL_RE = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECAS
 
 
 class serviceBroker:
-    def __init__(self, persistence: persistenceBroker = None, secret_key: str = None, zoho: serviceZoho = None):
+    def __init__(self, persistence: persistenceBroker = None, secret_key: str = None, zoho: serviceZoho = None, email: serviceEmail = None):
         self._persistence = persistence or persistenceBroker()
         self._secret = secret_key or os.getenv("JWT_SECRET_KEY")
         if not self._secret:
@@ -28,6 +29,11 @@ class serviceBroker:
         except Exception as e:
             logger.warning("zoho_service_init_failed: %s", e)
             self._zoho = None
+        try:
+            self._email = email or serviceEmail()
+        except Exception as e:
+            logger.warning("email_service_init_failed: %s", e)
+            self._email = None
 
     def _hash_password(self, raw: str) -> str:
         return pwd_context.hash(raw)
@@ -59,6 +65,12 @@ class serviceBroker:
         except Exception as e:
             # Best-effort CRM sync - must never fail or roll back a successful signup.
             logger.warning("zoho_broker_sync_failed broker_id=%s error=%s", user.id, e)
+        # Best-effort welcome email - dispatched on a daemon thread so it never
+        # fails, slows, or rolls back a successful signup.
+        dispatch_welcome_email(
+            self._email, CHANNEL_PARTNER, dto.email,
+            first_name=getattr(dto, 'first_name', None), username=dto.username,
+        )
         return user
 
     def login(self, dto: UserLoginDTO) -> str:

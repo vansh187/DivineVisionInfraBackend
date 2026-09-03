@@ -473,15 +473,22 @@ def test_get_falls_back_to_default_bucket_when_row_has_no_storage_bucket():
 _PDF_BYTES = b"%PDF-1.4\n%fake pdf content\n%%EOF"
 
 
-def _booking_service(payment=None):
+def _booking_service(payment=None, customer=None, email_enabled=False):
     persistence = MagicMock()
     payment_persistence = MagicMock()
     payment_persistence.get_by_id.return_value = payment
-    svc = serviceDocument(persistence, payment_persistence)
+    customer_persistence = MagicMock()
+    customer_persistence.get_by_id.return_value = customer
+    email = MagicMock()
+    email.enabled = email_enabled
+    svc = serviceDocument(persistence, payment_persistence,
+                          customer_persistence=customer_persistence, email=email)
     svc._supabase_url = "https://fake.supabase.co"
     svc._service_key = "fake-service-key"
     svc._bucket = "documents"
     svc._booking_forms_bucket = "Booking_Forms"
+    svc._email_mock = email
+    svc._customer_persistence_mock = customer_persistence
     return svc, persistence, payment_persistence
 
 
@@ -678,3 +685,85 @@ def test_upload_booking_application_cleans_up_storage_when_persistence_fails(moc
     mock_delete.assert_called_once()
     assert mock_delete.call_args.kwargs["bucket"] == "Booking_Forms"
     mock_sign.assert_not_called()
+
+
+# ---------- booking-confirmation email on upload_booking_application() ----------
+
+@patch.object(serviceDocument, "_sign_url", return_value="url")
+@patch.object(serviceDocument, "_upload_to_storage")
+def test_booking_upload_sends_confirmation_email_to_customer(mock_upload, mock_sign):
+    payment = _paid_payment(amount=2500000, currency="INR")
+    svc, persistence, _ = _booking_service(
+        payment,
+        customer=MagicMock(email="jane@example.com", first_name="Jane"),
+        email_enabled=True,
+    )
+    persistence.create_document.return_value = MagicMock(id="doc1")
+
+    svc.upload_booking_application(
+        _PDF_BYTES, "application/pdf", "project_booking_application", "ops-divine-greens", "pay1",
+        "order_Rzp123", "pay_Rzp456", '{"project_name": "Divine Greens", "plot_number": "B-14"}',
+        owner_id="C00001", owner_role="customer",
+    )
+
+    svc._customer_persistence_mock.get_by_id.assert_called_once_with("C00001")
+    svc._email_mock.send_booking_confirmation_async.assert_called_once()
+    _, kwargs = svc._email_mock.send_booking_confirmation_async.call_args
+    assert kwargs["first_name"] == "Jane"
+    assert kwargs["project_name"] == "Divine Greens"
+    assert kwargs["unit_number"] == "B-14"
+    assert kwargs["currency"] == "INR"
+    # amount comes from the payment record, not the form
+    assert kwargs["amount"] == 2500000
+
+
+@patch.object(serviceDocument, "_sign_url", return_value="url")
+@patch.object(serviceDocument, "_upload_to_storage")
+def test_booking_upload_skips_email_for_broker_owner(mock_upload, mock_sign):
+    svc, persistence, _ = _booking_service(
+        _paid_payment(owner_id="B00001"),
+        customer=MagicMock(email="b@example.com"),
+        email_enabled=True,
+    )
+    persistence.create_document.return_value = MagicMock(id="doc1")
+
+    svc.upload_booking_application(
+        _PDF_BYTES, "application/pdf", "project_booking_application", "proj1", "pay1", None, None, "{}",
+        owner_id="B00001", owner_role="broker",
+    )
+
+    svc._email_mock.send_booking_confirmation_async.assert_not_called()
+
+
+@patch.object(serviceDocument, "_sign_url", return_value="url")
+@patch.object(serviceDocument, "_upload_to_storage")
+def test_booking_upload_skips_email_when_customer_has_no_address(mock_upload, mock_sign):
+    svc, persistence, _ = _booking_service(
+        _paid_payment(), customer=MagicMock(email=None), email_enabled=True,
+    )
+    persistence.create_document.return_value = MagicMock(id="doc1")
+
+    svc.upload_booking_application(
+        _PDF_BYTES, "application/pdf", "project_booking_application", "proj1", "pay1", None, None, "{}",
+        owner_id="C00001", owner_role="customer",
+    )
+
+    svc._email_mock.send_booking_confirmation_async.assert_not_called()
+
+
+@patch.object(serviceDocument, "_sign_url", return_value="url")
+@patch.object(serviceDocument, "_upload_to_storage")
+def test_booking_upload_email_failure_does_not_break_booking(mock_upload, mock_sign):
+    svc, persistence, _ = _booking_service(
+        _paid_payment(), customer=MagicMock(email="jane@example.com", first_name="Jane"),
+        email_enabled=True,
+    )
+    persistence.create_document.return_value = MagicMock(id="doc1")
+    svc._email_mock.send_booking_confirmation_async.side_effect = RuntimeError("resend down")
+
+    doc, signed_url, expires_in = svc.upload_booking_application(
+        _PDF_BYTES, "application/pdf", "project_booking_application", "proj1", "pay1", None, None, "{}",
+        owner_id="C00001", owner_role="customer",
+    )
+    assert doc.id == "doc1"
+    assert expires_in == 3600

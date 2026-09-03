@@ -80,6 +80,33 @@ SYSTEM_INSTRUCTION = SYSTEM_INSTRUCTION + LOAN_SYSTEM_INSTRUCTION
 SAFE_FALLBACK_REPLY = "I don't want to guess on that — let me get you an exact answer from our team. Would you like a callback?"
 DEGRADED_FALLBACK_REPLY = "Sorry, I'm having a little trouble right now. Could you try again in a moment, or would you like our team to call you back?"
 
+# ---- Best-effort recovery -------------------------------------------------
+# The client's requirement: the bot must never dead-end with "I can't answer that". When the
+# normal loop fails to land a grounded reply (tool budget spent, provider error, garbled text,
+# or a draft the guardrail rejects), the recovery path re-reads the WHOLE conversation, runs a
+# wider search across the knowledge base and inventory, and asks the model for its single best
+# answer. If that answer checks out against retrieved data it goes as-is; if it can only be
+# answered from general knowledge it still goes out, tagged as general guidance with a callback
+# offer, rather than being withheld. The one remaining dead-end is a total LLM outage.
+RECOVERY_HISTORY_TURN_LIMIT = 40
+RECOVERY_KB_TOP_K = 10
+RECOVERY_KB_MIN_SIMILARITY = 0.15
+INDICATIVE_GENERAL_SUFFIX = (
+    " (This is general guidance, not confirmed project detail — our team can give you exact, "
+    "up-to-date figures. Would you like a callback or a site visit?)"
+)
+RECOVERY_DIRECTIVE = (
+    "RECOVERY MODE. Earlier attempts to answer this visitor did not produce a confident reply, "
+    "but you must not give up, stall, or tell them to try again later — give the single most "
+    "useful answer you can from everything below. Ground every specific figure in the retrieved "
+    "knowledge-base or inventory data. Where the data does not cover the question you may offer "
+    "general real-estate guidance, but never state a specific price, plot number, RERA number, or "
+    "legal guarantee that is not present in the data. Keep every home-loan rule already given: "
+    "never say a loan is approved, never quote a specific bank's rate or policy, always keep the "
+    "'indicative calculation' disclaimer. Match the visitor's language/register and keep it short "
+    "and warm."
+)
+
 MAX_TOOL_ROUNDS = 3
 HISTORY_TURN_LIMIT = 20
 # After this many failed login attempts in one auth flow, abandon the flow and let the
@@ -1682,16 +1709,19 @@ class serviceChatbot:
                     history.append({"role": "tool", "tool_call_id": call_id, "name": name, "content": json.dumps(tool_result)})
                 continue
 
-            draft_reply = step["text"] or SAFE_FALLBACK_REPLY
-            if looks_degenerate(draft_reply):
+            draft_reply = step["text"] or ""
+            if not draft_reply or looks_degenerate(draft_reply):
                 logger.warning("degenerate_reply_detected: provider=%s", provider)
-                return self._final_text_only(provider, latest_text, retrieved_chunks, used_kb, structured_result)
+                return self._recover(session, provider, latest_text, retrieved_chunks, structured_result)
             if not used_kb:
                 return self._with_structured_result({"reply": draft_reply, "llm_provider": provider}, structured_result)
 
-            return self._with_structured_result(
-                self._apply_guardrail(draft_reply, retrieved_chunks, provider), structured_result,
-            )
+            guarded = self._apply_guardrail(draft_reply, retrieved_chunks, provider)
+            if guarded.get("guardrail_passed"):
+                return self._with_structured_result(guarded, structured_result)
+            # Guardrail rejected the draft as ungrounded - don't dead-end on the canned line.
+            # Re-read the whole chat, search wider, and answer best-effort instead.
+            return self._recover(session, provider, latest_text, retrieved_chunks, structured_result)
 
         # The tool-round budget ran out (or a provider genuinely failed) without ever landing
         # on a text reply. Rather than keep negotiating "please stop calling tools now" on the
@@ -1699,7 +1729,7 @@ class serviceChatbot:
         # and which Groq hard-rejects outright when disobeyed - finish with one guaranteed-clean
         # call: no tools registered, no tool-call-shaped history, just the gathered facts. A
         # model with no tool schema in the request has no structural way to attempt a tool call.
-        return self._final_text_only(provider, latest_text, retrieved_chunks, used_kb, structured_result)
+        return self._recover(session, provider, latest_text, retrieved_chunks, structured_result)
 
     def _with_structured_result(self, result: dict, structured_result: dict) -> dict:
         # Centralizes attaching a loan-tool's structured payload (EMI/eligibility/affordability/
@@ -1711,37 +1741,123 @@ class serviceChatbot:
             result["structured_result"] = structured_result
         return result
 
-    def _final_text_only(self, provider: str, latest_text: str, retrieved_chunks: list, used_kb: bool,
-                          structured_result: dict = None):
-        context_note = ""
-        if retrieved_chunks:
-            joined = "\n".join(c["content"] for c in retrieved_chunks)
-            context_note = f"\n\nRelevant knowledge base info you already looked up:\n{joined}"
-        prompt = f"The visitor just said: \"{latest_text}\"{context_note}\n\nReply now, directly, in plain text."
+    def _recover(self, session, provider: str, latest_text: str, retrieved_chunks: list,
+                  structured_result: dict = None):
+        """Last line of defence - the normal loop failed to land a confident answer (tool
+        budget spent, provider error, garbled text, or a draft the guardrail rejected). Never
+        dead-end here: re-read the whole conversation, widen the data search across the KB and
+        inventory, and get the model to synthesise its best possible reply. Sent as-is if the
+        guardrail now finds it grounded; otherwise sent tagged as general guidance with a
+        callback offer. Only a total LLM outage falls through to the degraded line."""
+        extra_chunks, inventory_notes = self._broadened_data_search(session, latest_text)
+        seen = {c["content"] for c in retrieved_chunks}
+        all_chunks = retrieved_chunks + [c for c in extra_chunks if c["content"] not in seen]
+        transcript = self._full_transcript(session.id)
 
-        # Try the given provider first, then the other one - a degenerate/garbled reply is
-        # treated the same as a provider failure here: never send it, just try the next option.
+        context_parts = []
+        if all_chunks:
+            context_parts.append("KNOWLEDGE BASE MATCHES:\n" + "\n---\n".join(c["content"] for c in all_chunks))
+        if inventory_notes:
+            context_parts.append("INVENTORY / PLOT SIZES:\n" + inventory_notes)
+        context_note = "\n\n".join(context_parts) or "(no matching records found in the knowledge base or inventory)"
+
+        prompt = (
+            f"{RECOVERY_DIRECTIVE}\n\n"
+            f"CONVERSATION SO FAR:\n{transcript or '(no earlier turns)'}\n\n"
+            f"DATA RETRIEVED FROM OUR SYSTEMS:\n{context_note}\n\n"
+            f"The visitor's latest message: \"{latest_text}\"\n\n"
+            "Reply now, directly, in the visitor's own language/register, in plain text."
+        )
+
+        # Try the given provider first, then the other - a degenerate/garbled reply is treated
+        # the same as a provider failure: never send it, just try the next option.
         for attempt_provider in ([provider, "groq"] if provider == "gemini" else ["groq", "gemini"]):
             try:
                 if attempt_provider == "gemini":
                     step = self._gemini.generate(SYSTEM_INSTRUCTION, [{"role": "user", "text": prompt}])
                 else:
                     step = self._groq.generate(SYSTEM_INSTRUCTION, [{"role": "user", "content": prompt}])
-                draft_reply = step["text"] or SAFE_FALLBACK_REPLY
-                if looks_degenerate(draft_reply):
-                    logger.warning("degenerate_reply_detected: provider=%s (final_text_only)", attempt_provider)
-                    continue
-                if not used_kb:
-                    return self._with_structured_result({"reply": draft_reply, "llm_provider": attempt_provider}, structured_result)
-                return self._with_structured_result(
-                    self._apply_guardrail(draft_reply, retrieved_chunks, attempt_provider), structured_result,
-                )
             except (GeminiError, GroqError):
                 continue
+            draft_reply = step["text"] or ""
+            if not draft_reply or looks_degenerate(draft_reply):
+                logger.warning("degenerate_reply_detected: provider=%s (recovery)", attempt_provider)
+                continue
 
+            grounded = False
+            if all_chunks:
+                try:
+                    grounded = self._groq.judge(draft_reply, [c["content"] for c in all_chunks]) >= GUARDRAIL_THRESHOLD
+                except Exception as e:
+                    if not isinstance(e, GroqError):
+                        logger.warning("recovery_guardrail_check_failed: %s", e)
+                    grounded = False
+            if not grounded:
+                draft_reply = self._tag_general_guidance(draft_reply)
+            return self._with_structured_result(
+                {"reply": draft_reply, "llm_provider": attempt_provider, "guardrail_passed": grounded},
+                structured_result,
+            )
+
+        # Both providers are down - nothing left to synthesise from.
         return self._with_structured_result(
-            {"reply": SAFE_FALLBACK_REPLY if used_kb else DEGRADED_FALLBACK_REPLY, "llm_provider": None}, structured_result,
+            {"reply": DEGRADED_FALLBACK_REPLY, "llm_provider": None, "guardrail_passed": False}, structured_result,
         )
+
+    def _tag_general_guidance(self, reply: str) -> str:
+        # A recovery answer that isn't backed by retrieved data still goes out, but flagged as
+        # general and pointed at the team - unless the model already hedged / offered a next step.
+        lowered = reply.lower()
+        if any(marker in lowered for marker in ("callback", "call you back", "site visit", "our team")):
+            return reply
+        return reply.rstrip() + INDICATIVE_GENERAL_SUFFIX
+
+    def _full_transcript(self, session_id: str) -> str:
+        try:
+            rows = self._persistence.list_recent_messages(session_id, limit=RECOVERY_HISTORY_TURN_LIMIT)
+        except Exception as e:
+            logger.warning("recovery_transcript_load_failed: %s", e)
+            return ""
+        lines = []
+        for row in rows:
+            if row.content and row.role in ("user", "assistant"):
+                who = "Visitor" if row.role == "user" else "Assistant"
+                lines.append(f"{who}: {row.content}")
+        return "\n".join(lines)
+
+    def _broadened_data_search(self, session, latest_text: str):
+        """Wider retrieval for the recovery path: more KB chunks at a lower similarity floor,
+        plus a compact dump of inventory plot-size data. Returns (chunks, inventory_notes_text)."""
+        chunks = []
+        query = (latest_text or "").strip()
+        if query:
+            try:
+                embedding = self._gemini.embed(query)
+                rows = self._persistence.search_kb_chunks(embedding, top_k=RECOVERY_KB_TOP_K)
+                chunks = [
+                    {"content": r.content, "similarity": float(r.similarity)}
+                    for r in rows if r.similarity and r.similarity > RECOVERY_KB_MIN_SIMILARITY
+                ]
+            except Exception as e:
+                logger.warning("recovery_kb_search_failed: %s", e)
+
+        notes = []
+        if self._inventory:
+            try:
+                for r in self._inventory.distinct_plot_sizes():
+                    area = _as_number(getattr(r, "area_sqyd", None))
+                    width = _as_number(getattr(r, "width_mtr", None))
+                    length = _as_number(getattr(r, "length_mtr", None))
+                    dims = f", {width} x {length} m" if width and length else ""
+                    notes.append(
+                        f"- {getattr(r, 'project_name', None) or 'Project'}: "
+                        f"{getattr(r, 'unit_type', None) or 'plot'} ~{area} sq.yd{dims} "
+                        f"({int(getattr(r, 'available_count', 0) or 0)} of "
+                        f"{int(getattr(r, 'unit_count', 0) or 0)} available)"
+                    )
+            except Exception as e:
+                logger.warning("recovery_inventory_lookup_failed: %s", e)
+        return chunks, "\n".join(notes)
 
     def _apply_guardrail(self, draft_reply: str, retrieved_chunks: list, provider: str):
         try:
