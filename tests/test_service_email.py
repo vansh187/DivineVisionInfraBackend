@@ -146,3 +146,66 @@ def test_dispatch_welcome_email_never_raises():
     svc.enabled = True
     svc.send_welcome_async.side_effect = RuntimeError("boom")
     dispatch_welcome_email(svc, CUSTOMER, "c@example.com")  # must not raise
+
+
+# ---------- booking confirmation ----------
+
+def test_booking_confirmation_payload():
+    ok, payload = _sent_payload(
+        _svc().send_booking_confirmation, "jane@example.com",
+        first_name="Jane", project_name="Divine Greens", unit_number="B-14",
+        amount=2500000, currency="INR",
+    )
+    assert ok is True
+    assert payload["from"] == "Divine Vision Infra <noreply@divinevisioninfra.com>"
+    assert payload["to"] == ["jane@example.com"]
+    assert "reply_to" not in payload
+    assert "Booking Confirmed" in payload["html"]
+    assert "Dear Jane" in payload["html"]
+    assert "Divine Greens" in payload["html"]
+    assert "B-14" in payload["html"]
+    assert "2,500,000" in payload["html"]
+    assert "View My Booking" in payload["html"]
+    assert "not monitored" in payload["html"].lower()
+    assert payload["text"]
+
+
+def test_booking_confirmation_omits_missing_detail_rows():
+    _, payload = _sent_payload(
+        _svc().send_booking_confirmation, "jane@example.com", first_name="Jane",
+    )
+    assert "Amount Received" not in payload["html"]
+    assert "Project" not in payload["html"] or "Divine Greens" not in payload["html"]
+    assert "Dear Jane" in payload["html"]
+
+
+def test_booking_confirmation_escapes_name_and_details():
+    _, payload = _sent_payload(
+        _svc().send_booking_confirmation, "x@example.com",
+        first_name="<b>Jane</b>", project_name="<script>x</script>", unit_number="A&1",
+    )
+    assert "<script>x</script>" not in payload["html"]
+    assert "&lt;script&gt;" in payload["html"]
+    assert "<b>Jane</b>" not in payload["html"]
+
+
+def test_booking_confirmation_skips_invalid_email():
+    with patch("DivineService.service_email.requests.post") as post:
+        assert _svc().send_booking_confirmation("not-an-email") is False
+        post.assert_not_called()
+
+
+def test_dispatch_booking_confirmation_skips_when_disabled():
+    from DivineService.service_email import dispatch_booking_confirmation_email
+    svc = MagicMock()
+    svc.enabled = False
+    dispatch_booking_confirmation_email(svc, "x@example.com", first_name="Jane")
+    svc.send_booking_confirmation_async.assert_not_called()
+
+
+def test_dispatch_booking_confirmation_never_raises():
+    from DivineService.service_email import dispatch_booking_confirmation_email
+    svc = MagicMock()
+    svc.enabled = True
+    svc.send_booking_confirmation_async.side_effect = RuntimeError("boom")
+    dispatch_booking_confirmation_email(svc, "x@example.com")  # must not raise

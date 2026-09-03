@@ -89,6 +89,31 @@ class serviceEmail:
             logger.warning("welcome_email_failed email=%s user_type=%s error=%s", email, user_type, e)
             return False
 
+    def send_booking_confirmation_async(self, email: str, first_name: str = None, project_name: str = None,
+                                        unit_number: str = None, amount=None, currency: str = "INR") -> None:
+        self._run_async(
+            self.send_booking_confirmation, email, first_name=first_name, project_name=project_name,
+            unit_number=unit_number, amount=amount, currency=currency,
+        )
+
+    def send_booking_confirmation(self, email: str, first_name: str = None, project_name: str = None,
+                                  unit_number: str = None, amount=None, currency: str = "INR") -> bool:
+        """Congratulations email sent once a plot booking is backed by a completed
+        payment. Called after the booking is already persisted - never raises."""
+        try:
+            to = (email or "").strip()
+            if not to or "@" not in to:
+                logger.info("booking_confirmation_skipped: no valid email")
+                return False
+            display = (first_name or "").strip() or "there"
+            details = _booking_detail_rows(project_name, unit_number, amount, currency)
+            html = _booking_confirmation_html(display, details, self._customer_login_url, has_logo=bool(self._logo_b64))
+            text = _booking_confirmation_text(display, details, self._customer_login_url)
+            return self._send(to=to, subject=_BOOKING_SUBJECT, html=html, text=text)
+        except Exception as e:  # never let a confirmation email break a booking
+            logger.warning("booking_confirmation_failed email=%s error=%s", email, e)
+            return False
+
     # ----------------------------------------------------------------- private
 
     def _send(self, to: str, subject: str, html: str, text: str = None) -> bool:
@@ -142,6 +167,21 @@ def dispatch_welcome_email(email_service, user_type: str, email: str,
             email_service.send_welcome_async(user_type, email, first_name=first_name, username=username)
     except Exception as e:
         logger.warning("welcome_email_dispatch_failed user_type=%s error=%s", user_type, e)
+
+
+def dispatch_booking_confirmation_email(email_service, email: str, first_name: str = None,
+                                        project_name: str = None, unit_number: str = None,
+                                        amount=None, currency: str = "INR") -> None:
+    """Fire-and-forget booking-confirmation email. Skips silently when email is
+    unconfigured or no address is given, and can never raise into the caller."""
+    try:
+        if email_service and getattr(email_service, "enabled", False) and email:
+            email_service.send_booking_confirmation_async(
+                email, first_name=first_name, project_name=project_name,
+                unit_number=unit_number, amount=amount, currency=currency,
+            )
+    except Exception as e:
+        logger.warning("booking_confirmation_dispatch_failed error=%s", e)
 
 
 def _load_logo_b64(path: str):
@@ -362,6 +402,199 @@ def _welcome_html(variant: str, name: str, login_url: str, has_logo: bool) -> st
               <div style="height:8px;line-height:8px;font-size:0;">&nbsp;</div>
               <div style="font-size:12px;line-height:1.6;color:#95a5a6;">
                 {c['footer_note']}
+              </div>
+            </td>
+          </tr>
+          <tr><td style="height:6px;background-color:#e67e22;font-size:0;line-height:0;">&nbsp;</td></tr>
+
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>"""
+
+
+_BOOKING_SUBJECT = "Your Booking Is Confirmed — Divine Vision Infra"
+_BOOKING_INTRO = (
+    "Congratulations. Your booking with <strong>Divine Vision Infra</strong> is "
+    "confirmed, your payment has been received, and your plot is now reserved in "
+    "your name. This is the beginning of something built to stand for generations."
+)
+_BOOKING_CLOSING = (
+    "Our team will be in touch shortly with your documentation and the next steps. "
+    "You can view your booking at any time from your dashboard."
+)
+
+
+def _format_amount(amount, currency: str = "INR") -> str:
+    try:
+        value = float(amount)
+    except (TypeError, ValueError):
+        return ""
+    if value <= 0:
+        return ""
+    symbol = "₹" if (currency or "INR").upper() == "INR" else f"{currency} "
+    return f"{symbol}{value:,.0f}"
+
+
+def _booking_detail_rows(project_name, unit_number, amount, currency: str = "INR"):
+    """[(label, value)] for the details block - only rows that actually have a value."""
+    rows = []
+    if project_name and str(project_name).strip():
+        rows.append(("Project", str(project_name).strip()))
+    if unit_number and str(unit_number).strip():
+        rows.append(("Unit / Plot", str(unit_number).strip()))
+    money = _format_amount(amount, currency)
+    if money:
+        rows.append(("Amount Received", money))
+    return rows
+
+
+def _booking_confirmation_text(name: str, details, login_url: str) -> str:
+    lines = "\n".join(f"  - {label}: {value}" for label, value in details)
+    block = f"Your booking\n{lines}\n\n" if lines else ""
+    return (
+        f"Dear {name},\n\n"
+        f"{_strip_tags(_BOOKING_INTRO)}\n\n"
+        f"{block}"
+        f"{_strip_tags(_VISION_LINE)}\n\n"
+        f"{_strip_tags(_BOOKING_CLOSING)}\n\n"
+        f"View my booking: {login_url}\n\n"
+        "This mailbox is not monitored. For assistance, visit www.divinevisioninfra.com.\n\n"
+        "Warm regards,\nThe Divine Vision Infra Team\n"
+        "Divine Vision Infra"
+    )
+
+
+def _booking_confirmation_html(name: str, details, login_url: str, has_logo: bool) -> str:
+    safe_name = _escape(name)
+    safe_url = _escape(login_url)
+
+    if has_logo:
+        brand_mark = (
+            f'<img src="cid:{_LOGO_CID}" width="180" alt="Divine Vision Infra" '
+            f'style="display:block;border:0;outline:none;width:180px;max-width:60%;height:auto;margin:0 auto;">'
+        )
+    else:
+        brand_mark = (
+            f'<div style="font-family:{_FONT_HEAD};font-size:22px;letter-spacing:6px;'
+            f'text-transform:uppercase;color:#ffffff;font-weight:700;">Divine Vision Infra</div>'
+        )
+
+    detail_block = ""
+    if details:
+        detail_rows = ""
+        last = len(details) - 1
+        for i, (label, value) in enumerate(details):
+            bottom = "border-bottom:1px solid #e5e8ea;" if i == last else ""
+            detail_rows += f"""
+                <tr>
+                  <td style="padding:14px 0;border-top:1px solid #e5e8ea;{bottom}font-family:{_FONT_BODY};width:42%;">
+                    <span style="font-family:{_FONT_HEAD};font-size:13px;letter-spacing:2px;text-transform:uppercase;color:#7b8a99;font-weight:700;">{_escape(label)}</span>
+                  </td>
+                  <td style="padding:14px 0;border-top:1px solid #e5e8ea;{bottom}font-family:{_FONT_BODY};text-align:right;">
+                    <span style="font-size:16px;line-height:1.5;color:#2c3e50;font-weight:700;">{_escape(value)}</span>
+                  </td>
+                </tr>"""
+        detail_block = f"""
+          <tr>
+            <td style="padding:6px 48px 8px 48px;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">{detail_rows}
+              </table>
+            </td>
+          </tr>"""
+
+    return f"""\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="x-apple-disable-message-reformatting">
+<title>{_BOOKING_SUBJECT}</title>
+</head>
+<body style="margin:0;padding:0;background-color:#1c2833;">
+  <div style="display:none;max-height:0;overflow:hidden;opacity:0;">
+    Your plot booking and payment have been received.
+  </div>
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#1c2833;">
+    <tr>
+      <td align="center" style="padding:40px 16px;">
+        <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="width:600px;max-width:600px;background-color:#ffffff;border-radius:2px;overflow:hidden;border:1px solid #2c3e50;">
+
+          <tr><td style="height:6px;background-color:#e67e22;font-size:0;line-height:0;">&nbsp;</td></tr>
+
+          <tr>
+            <td align="center" style="background-color:#2c3e50;padding:40px 40px 36px 40px;">
+              {brand_mark}
+              <div style="height:20px;line-height:20px;font-size:0;">&nbsp;</div>
+              <div style="font-family:{_FONT_HEAD};font-size:32px;letter-spacing:3px;text-transform:uppercase;color:#ffffff;font-weight:700;line-height:1.2;">
+                Booking Confirmed
+              </div>
+              <div style="height:14px;line-height:14px;font-size:0;">&nbsp;</div>
+              <div style="width:64px;height:3px;background-color:#e67e22;margin:0 auto;font-size:0;line-height:0;">&nbsp;</div>
+            </td>
+          </tr>
+
+          <tr>
+            <td style="padding:44px 48px 12px 48px;font-family:{_FONT_BODY};color:#2c3e50;">
+              <p style="margin:0 0 20px 0;font-size:18px;line-height:1.6;color:#2c3e50;">
+                Dear {safe_name},
+              </p>
+              <p style="margin:0 0 22px 0;font-size:16px;line-height:1.7;color:#4a5b6b;">
+                {_BOOKING_INTRO}
+              </p>
+            </td>
+          </tr>
+{detail_block}
+          <tr>
+            <td style="padding:16px 48px 4px 48px;font-family:{_FONT_BODY};">
+              <p style="margin:0 0 22px 0;font-size:16px;line-height:1.7;color:#4a5b6b;">
+                {_VISION_LINE}
+              </p>
+              <p style="margin:0;font-size:16px;line-height:1.7;color:#4a5b6b;">
+                {_BOOKING_CLOSING}
+              </p>
+            </td>
+          </tr>
+
+          <tr>
+            <td align="center" style="padding:32px 48px 14px 48px;">
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0">
+                <tr>
+                  <td align="center" bgcolor="#e67e22" style="border-radius:2px;">
+                    <a href="{safe_url}" target="_blank"
+                       style="display:inline-block;padding:16px 42px;font-family:{_FONT_HEAD};font-size:15px;letter-spacing:3px;text-transform:uppercase;color:#ffffff;text-decoration:none;font-weight:700;">
+                      View My Booking
+                    </a>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <tr>
+            <td style="padding:20px 48px 44px 48px;font-family:{_FONT_BODY};">
+              <p style="margin:0;font-size:15px;line-height:1.7;color:#7b8a99;">
+                This mailbox is not monitored. For assistance, visit
+                <a href="{safe_url}" target="_blank" style="color:#e67e22;text-decoration:none;">www.divinevisioninfra.com</a>.
+              </p>
+              <p style="margin:22px 0 0 0;font-size:16px;line-height:1.6;color:#2c3e50;">
+                Warm regards,<br>
+                <strong style="color:#2c3e50;">The Divine Vision Infra Team</strong>
+              </p>
+            </td>
+          </tr>
+
+          <tr>
+            <td align="center" style="background-color:#2c3e50;padding:26px 40px;font-family:{_FONT_BODY};">
+              <div style="font-family:{_FONT_HEAD};font-size:12px;letter-spacing:5px;text-transform:uppercase;color:#ffffff;font-weight:700;">
+                Divine Vision Infra
+              </div>
+              <div style="height:8px;line-height:8px;font-size:0;">&nbsp;</div>
+              <div style="font-size:12px;line-height:1.6;color:#95a5a6;">
+                This is an automated confirmation of a booking made under this account.
               </div>
             </td>
           </tr>
