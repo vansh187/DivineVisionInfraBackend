@@ -64,6 +64,12 @@ LOAN_SYSTEM_INSTRUCTION = (
     "- Before asking for anything, call update_loan_profile with whatever the visitor already "
     "stated in their message, and check what's already known this session - never re-ask for a "
     "value already captured.\n"
+    "- For eligibility, ALWAYS ask whether the visitor already has any ongoing EMIs or loan "
+    "repayments (car loan, personal loan, another home loan, credit-card EMIs) and their total "
+    "monthly amount - existing obligations directly reduce how much they can borrow. If they "
+    "say they have none, call update_loan_profile with existing_emi: 0 so it is on record, "
+    "then proceed. In the eligibility answer, briefly note how their existing EMIs affected the "
+    "available capacity.\n"
     "- If the visitor doesn't give an interest rate, the calculation tools use an illustrative "
     "default and tell you what it was - always say plainly to the visitor: \"Illustrative rate "
     "used for calculation: X%\" - never invent or claim to know current bank rates.\n"
@@ -206,6 +212,19 @@ LOAN_INITIAL_BUTTONS = [
     {"label": "Calculate EMI", "value": "loan_emi", "action": "chatbot_message"},
     {"label": "Check Property Affordability", "value": "loan_affordability", "action": "chatbot_message"},
     {"label": "Documents Required", "value": "loan_documents", "action": "chatbot_message"},
+]
+
+# Re-offered whenever the visitor asks for the "Main Menu" - mirrors the widget's
+# opening "Popular questions" chips. value == label so the frontend posts the plain
+# text, which the quick-action intent detectors (wants_home_loan / wants_project_info
+# / wants_site_visit / wants_sales_advisor) then route.
+MAIN_MENU_BUTTON = {"label": "Main Menu", "value": "main_menu", "action": "chatbot_message"}
+POPULAR_QUESTION_BUTTONS = [
+    {"label": "Home loan / finance enquiry", "value": "Home loan / finance enquiry", "action": "chatbot_message"},
+    {"label": "Pricing & payment plan", "value": "Pricing & payment plan", "action": "chatbot_message"},
+    {"label": "Book a site visit", "value": "Book a site visit", "action": "chatbot_message"},
+    {"label": "Show available plots", "value": "Show available plots", "action": "chatbot_message"},
+    {"label": "Talk to a sales advisor", "value": "Talk to a sales advisor", "action": "chatbot_message"},
 ]
 SALES_TRACK_BUTTONS = [
     {"label": "Buy a Property / End Client", "value": "sales_end_client", "action": "chatbot_menu"},
@@ -442,17 +461,21 @@ def _make_optionals_nullable(schemas: list) -> list:
     once at import so no individual schema has to remember to do it."""
     patched = []
     for tool in schemas:
-        params = dict(tool.get("parameters") or {})
-        required = set(params.get("required") or [])
-        props = {}
-        for name, spec in (params.get("properties") or {}).items():
-            spec = dict(spec)
-            declared = spec.get("type", "string")
-            if name not in required and isinstance(declared, str) and declared != "null":
-                spec["type"] = [declared, "null"]
-            props[name] = spec
-        params["properties"] = props
-        patched.append({**tool, "parameters": params})
+        try:
+            params = dict(tool.get("parameters") or {})
+            required = set(params.get("required") or [])
+            props = {}
+            for name, spec in (params.get("properties") or {}).items():
+                spec = dict(spec)
+                declared = spec.get("type", "string")
+                if name not in required and isinstance(declared, str) and declared != "null":
+                    spec["type"] = [declared, "null"]
+                props[name] = spec
+            params["properties"] = props
+            patched.append({**tool, "parameters": params})
+        except Exception as e:  # a malformed schema must not break module import
+            logger.warning("tool_schema_nullable_pass_failed name=%s error=%s", tool.get("name"), e)
+            patched.append(tool)
     return patched
 
 
@@ -760,6 +783,20 @@ def wants_sales_advisor(raw: str) -> bool:
     return bool(text) and any(p in text for p in _SALES_ADVISOR_PHRASES)
 
 
+_MAIN_MENU_PHRASES = (
+    "main menu", "main_menu", "back to menu", "back to the menu", "go to menu",
+    "show menu", "open menu", "show me the options", "show the options",
+    "show options", "other options", "start over", "go back to start",
+)
+
+
+def wants_main_menu(raw: str) -> bool:
+    text = _contact_text(raw)
+    if not text:
+        return False
+    return text in ("menu", "home") or any(p in text for p in _MAIN_MENU_PHRASES)
+
+
 def selected_booking_project(raw: str) -> str:
     text = _contact_text(raw)
     if not text:
@@ -887,6 +924,24 @@ class serviceChatbot:
 
         if getattr(session, "auth_state", None):
             return self._advance_auth_flow(session, text)
+
+        # "Main Menu" - from the loan assistant or anywhere - drops whatever flow the
+        # visitor is in and re-offers the opening "Popular questions" choices so they
+        # can pick again. Sits above the callback/menu/loan routing so it always wins.
+        if wants_main_menu(text):
+            self._safe_update_session_menu_state(session_id, None, None)
+            for clear in (
+                lambda: self._persistence.update_session_callback_state(session_id, None),
+                lambda: self._persistence.update_session_loan_state(session_id, None),
+            ):
+                try:
+                    clear()
+                except Exception as e:
+                    logger.warning("main_menu_state_clear_failed: %s", e)
+            self._persist_turn(session_id, "user", text)
+            reply = "Sure! Here's what I can help you with - pick an option:"
+            self._persist_turn(session_id, "assistant", reply)
+            return {"session_id": session_id, "reply": reply, "buttons": list(POPULAR_QUESTION_BUTTONS)}
 
         if intent == "request_callback" and not session.callback_state:
             if getattr(session, "menu_state", None):
@@ -2253,9 +2308,12 @@ class serviceChatbot:
         if not raw:
             return {}
         try:
-            return json.loads(raw)
+            parsed = json.loads(raw)
         except (TypeError, ValueError):
             return {}
+        # Stored JSON that isn't an object (a list / string / number) would break
+        # every `.get(...)` downstream - normalise to an empty profile instead.
+        return parsed if isinstance(parsed, dict) else {}
 
     def _merge_loan_payload(self, session, updates: dict) -> dict:
         payload = self._get_loan_payload(session)
@@ -2278,8 +2336,9 @@ class serviceChatbot:
             ]
             if not payload.get("co_applicant_income"):
                 buttons.insert(3, {"label": "Add Co-Applicant", "value": "loan_add_co_applicant", "action": "chatbot_message"})
+            buttons.append(dict(MAIN_MENU_BUTTON))
             return buttons
-        return list(LOAN_INITIAL_BUTTONS)
+        return list(LOAN_INITIAL_BUTTONS) + [dict(MAIN_MENU_BUTTON)]
 
     def _loan_buttons_for_response(self, session, structured_result: dict = None) -> list:
         buttons = self._loan_dynamic_buttons(session)
@@ -2338,8 +2397,16 @@ class serviceChatbot:
     def _tool_calculate_loan_eligibility(self, session, args: dict) -> dict:
         payload = self._get_loan_payload(session)
         monthly_income = payload.get("monthly_income")
+        missing = []
         if not monthly_income:
-            return {"error": "missing_fields", "fields": ["monthly_income"]}
+            missing.append("monthly_income")
+        # Existing EMIs / loan obligations directly reduce eligible capacity - insist
+        # the visitor is asked (a "none" answer must be saved as existing_emi: 0, which
+        # then makes the key present so this check passes).
+        if "existing_emi" not in payload:
+            missing.append("existing_emi")
+        if missing:
+            return {"error": "missing_fields", "fields": missing}
         try:
             result = calculate_loan_eligibility(
                 monthly_income=monthly_income, co_applicant_income=payload.get("co_applicant_income"),

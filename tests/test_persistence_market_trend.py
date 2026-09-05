@@ -74,3 +74,14 @@ def test_average_booking_rate_needs_at_least_three_bookings():
     rate, n = p.average_booking_rate_per_sqyd(city="Sonipat")
     assert n == 3
     assert rate == 34000.0  # median of 33k, 34k, 36k
+
+
+def test_average_booking_rate_swallows_db_errors():
+    from unittest.mock import MagicMock
+    p = persistenceMarketTrend()
+
+    def boom():
+        raise RuntimeError("db down")
+
+    p._session_factory = boom
+    assert p.average_booking_rate_per_sqyd(city="Sonipat") == (None, 0)

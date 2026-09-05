@@ -1,8 +1,12 @@
+import json
+import logging
 import uuid
 from datetime import date
 
 from sqlalchemy import Column, Date, Integer, Numeric, String, text
 from .persistence_db import Base, SessionLocal, engine, RowWrapper, load_queries
+
+logger = logging.getLogger(__name__)
 
 
 class MarketTrendModel(Base):
@@ -63,60 +67,68 @@ class persistenceMarketTrend:
         period_label = (period_label or "").strip() or as_of_date.isoformat()
 
         with self._session_factory() as db:
-            db.execute(
-                text("DELETE FROM divine_market_trends "
-                     "WHERE lower(city) = lower(:city) "
-                     "AND lower(property_type) = lower(:property_type) "
-                     "AND (COALESCE(lower(locality), '') = COALESCE(lower(:locality), ''))"),
-                {"city": city, "property_type": property_type, "locality": locality},
-            )
-            row = db.execute(
-                text("INSERT INTO divine_market_trends "
-                     "(id, city, locality, property_type, period_label, as_of_date, "
-                     " price_per_sqyd, previous_price_per_sqyd, rental_yield_percent, "
-                     " demand_score, supply_score, sample_size) "
-                     "VALUES (:id, :city, :locality, :property_type, :period_label, :as_of_date, "
-                     " :price, :prev, :yield, :demand, :supply, :sample) RETURNING *;"),
-                {
-                    "id": str(uuid.uuid4()), "city": city, "locality": locality,
-                    "property_type": property_type, "period_label": period_label,
-                    "as_of_date": as_of_date, "price": price_per_sqyd,
-                    "prev": previous_price_per_sqyd, "yield": rental_yield_percent,
-                    "demand": demand_score, "supply": supply_score,
-                    "sample": int(sample_size or 0),
-                },
-            ).mappings().first()
-            db.commit()
-            return RowWrapper(row)
+            try:
+                db.execute(
+                    text("DELETE FROM divine_market_trends "
+                         "WHERE lower(city) = lower(:city) "
+                         "AND lower(property_type) = lower(:property_type) "
+                         "AND (COALESCE(lower(locality), '') = COALESCE(lower(:locality), ''))"),
+                    {"city": city, "property_type": property_type, "locality": locality},
+                )
+                row = db.execute(
+                    text("INSERT INTO divine_market_trends "
+                         "(id, city, locality, property_type, period_label, as_of_date, "
+                         " price_per_sqyd, previous_price_per_sqyd, rental_yield_percent, "
+                         " demand_score, supply_score, sample_size) "
+                         "VALUES (:id, :city, :locality, :property_type, :period_label, :as_of_date, "
+                         " :price, :prev, :yield, :demand, :supply, :sample) RETURNING *;"),
+                    {
+                        "id": str(uuid.uuid4()), "city": city, "locality": locality,
+                        "property_type": property_type, "period_label": period_label,
+                        "as_of_date": as_of_date, "price": price_per_sqyd,
+                        "prev": previous_price_per_sqyd, "yield": rental_yield_percent,
+                        "demand": demand_score, "supply": supply_score,
+                        "sample": int(sample_size or 0),
+                    },
+                ).mappings().first()
+                db.commit()
+                return RowWrapper(row)
+            except Exception:
+                db.rollback()
+                raise
 
     def average_booking_rate_per_sqyd(self, city: str = None):
         """The live ₹/sq-yd implied by actual paid bookings - total consideration over
         plot area across booking-application documents. Returns (rate, sample_size) or
-        (None, 0) when there aren't enough real transactions yet. This is the source a
-        scheduled refresh should prefer over a hand-entered figure once bookings exist."""
+        (None, 0) when there aren't enough real transactions yet. Best-effort: any DB
+        or parsing failure returns (None, 0) rather than raising into the caller."""
         query = (
             "SELECT d.form_data AS form_data "
             "FROM divine_documents d "
             "WHERE d.document_type = 'booking_application' AND d.form_data IS NOT NULL"
         )
         rates = []
-        with self._session_factory() as db:
-            for r in db.execute(text(query)).mappings().all():
-                fd = r.get("form_data")
-                if isinstance(fd, str):
-                    import json
-                    try:
-                        fd = json.loads(fd)
-                    except (TypeError, ValueError):
+        try:
+            with self._session_factory() as db:
+                for r in db.execute(text(query)).mappings().all():
+                    fd = r.get("form_data")
+                    if isinstance(fd, str):
+                        try:
+                            fd = json.loads(fd)
+                        except (TypeError, ValueError):
+                            continue
+                    if not isinstance(fd, dict):
                         continue
-                if not isinstance(fd, dict):
-                    continue
-                total = _first_num(fd, ("total_consideration", "totalConsideration", "total_value", "totalValue"))
-                area = _first_num(fd, ("plot_area_sq_yd", "plotAreaSqYd", "area_sq_yd", "areaSqYd", "plot_area", "plotArea"))
-                if total and area and area > 0:
+                    total = _first_num(fd, ("total_consideration", "totalConsideration", "total_value", "totalValue"))
+                    area = _first_num(fd, ("plot_area_sq_yd", "plotAreaSqYd", "area_sq_yd", "areaSqYd", "plot_area", "plotArea"))
+                    if not (total and area and area > 0):
+                        continue
                     if city and str(fd.get("city") or fd.get("City") or "").strip().lower() not in ("", city.strip().lower()):
                         continue
                     rates.append(total / area)
+        except Exception as e:
+            logger.warning("average_booking_rate_lookup_failed city=%s error=%s", city, e)
+            return None, 0
         if len(rates) < 3:
             return None, len(rates)
         rates.sort()

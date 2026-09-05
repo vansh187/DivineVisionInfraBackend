@@ -233,3 +233,57 @@ def test_loan_math_fallback_sets_illustrative_rate_flag():
     svc._get_loan_payload = MagicMock(return_value={"requested_loan": "40 lakh", "tenure_years": 20, "interest_rate": 9.1})
     out = svc._loan_math_fallback(svc._persistence.session)
     assert out["structured_result"]["data"]["illustrative_rate_used"] is False
+
+
+# ---- eligibility must factor in existing EMIs ----
+
+def test_eligibility_tool_asks_for_existing_emi_before_calculating():
+    svc = _make_service(FakePersistence())
+    svc._get_loan_payload = MagicMock(return_value={"monthly_income": 150000})  # no existing_emi key
+    out = svc._tool_calculate_loan_eligibility(svc._persistence.session, {})
+    assert out == {"error": "missing_fields", "fields": ["existing_emi"]}
+
+
+def test_eligibility_tool_lists_income_and_existing_emi_when_both_missing():
+    svc = _make_service(FakePersistence())
+    svc._get_loan_payload = MagicMock(return_value={})
+    out = svc._tool_calculate_loan_eligibility(svc._persistence.session, {})
+    assert out["error"] == "missing_fields"
+    assert set(out["fields"]) == {"monthly_income", "existing_emi"}
+
+
+def test_eligibility_tool_proceeds_once_existing_emi_is_zero():
+    svc = _make_service(FakePersistence())
+    svc._get_loan_payload = MagicMock(return_value={"monthly_income": 150000, "existing_emi": 0.0})
+    out = svc._tool_calculate_loan_eligibility(svc._persistence.session, {})
+    assert "error" not in out
+    assert out["existing_emi"] == 0
+    assert "eligible_loan_range" in out
+
+
+def test_eligibility_tool_subtracts_a_real_existing_emi_from_capacity():
+    svc = _make_service(FakePersistence())
+    svc._get_loan_payload = MagicMock(return_value={"monthly_income": 150000, "existing_emi": 0.0})
+    no_emi = svc._tool_calculate_loan_eligibility(svc._persistence.session, {})
+    svc._get_loan_payload = MagicMock(return_value={"monthly_income": 150000, "existing_emi": 25000})
+    with_emi = svc._tool_calculate_loan_eligibility(svc._persistence.session, {})
+    assert with_emi["available_emi_capacity"] < no_emi["available_emi_capacity"]
+
+
+def test_get_loan_payload_normalises_non_dict_stored_json():
+    svc = _make_service(FakePersistence())
+    for raw in ('[1, 2, 3]', '"just a string"', "42", "not json at all"):
+        svc._persistence.session.loan_payload = raw
+        assert svc._get_loan_payload(svc._persistence.session) == {}
+
+
+def test_main_menu_intercept_survives_state_clear_failures():
+    from unittest.mock import MagicMock
+    svc = _make_service(FakePersistence(menu_state="sales_track"))
+    svc._persistence.update_session_callback_state = MagicMock(side_effect=RuntimeError("x"))
+    svc._persistence.update_session_loan_state = MagicMock(side_effect=RuntimeError("y"))
+
+    result = svc.handle_message(session_id="s1", text="main menu")
+
+    assert "pick an option" in result["reply"].lower()
+    assert len(result["buttons"]) == 5
