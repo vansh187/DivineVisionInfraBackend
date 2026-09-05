@@ -301,26 +301,39 @@ def test_menu_state_unaffected_when_never_set_old_session():
     assert persistence.session.menu_state is None
 
 
-def test_greeting_does_not_capture_topic_chip_as_name():
+def test_greeting_reprompts_on_unclear_non_name_input():
     service, persistence, _ = _service()
     service.handle_message("session-1", text="")  # widget-open greeting
 
-    # a non-loan topic chip (loan chips are handled separately - they skip the funnel)
-    result = service.handle_message("session-1", text="Pricing & payment plan")
+    # not a name (has digits) and not a recognised quick-action intent
+    result = service.handle_message("session-1", text="abc123 xyz")
 
     assert persistence.session.menu_state == "greeting_name"  # not advanced
     assert (persistence.session.menu_payload or {}).get("name") is None
     assert "name" in result["reply"].lower()
 
 
-def test_greeting_does_not_capture_a_question_as_name():
+def test_greeting_topic_chip_skips_funnel_and_is_answered(monkeypatch):
+    service, persistence, _ = _service()
+    service._run_agent_loop = MagicMock(return_value={"reply": "Here are our current plots...", "llm_provider": "test"})
+    service.handle_message("session-1", text="")
+
+    result = service.handle_message("session-1", text="Pricing & payment plan")
+
+    assert persistence.session.menu_state is None                 # funnel dropped
+    assert (persistence.session.menu_payload or {}).get("name") is None
+    assert result["reply"] == "Here are our current plots..."     # routed to the answer, not a name prompt
+
+
+def test_greeting_site_visit_chip_routes_to_callback_flow():
     service, persistence, _ = _service()
     service.handle_message("session-1", text="")
 
-    result = service.handle_message("session-1", text="what plots do you have available?")
+    result = service.handle_message("session-1", text="Book a site visit")
 
-    assert persistence.session.menu_state == "greeting_name"
-    assert "name" in result["reply"].lower()
+    assert persistence.session.menu_state is None
+    assert persistence.session.callback_state == "awaiting_name"
+    assert "name" in result["reply"].lower()  # asked as part of scheduling, not as a gate
 
 
 def test_greeting_still_accepts_a_real_name():
@@ -394,3 +407,41 @@ def test_real_name_at_greeting_does_not_trigger_loan_assistant():
 
     service._enter_loan_assistant.assert_not_called()
     assert persistence.session.menu_state == "greeting_phone"
+
+
+import pytest
+from DivineService.service_chatbot import (
+    wants_home_loan, wants_project_info, wants_site_visit, wants_sales_advisor,
+)
+
+
+@pytest.mark.parametrize("label", [
+    "Home loan / finance enquiry",
+    "Pricing & payment plan",
+    "Book a site visit",
+    "Show available plots",
+    "Talk to a sales advisor",
+])
+def test_every_popular_question_chip_is_recognised_as_a_quick_action(label):
+    assert (wants_home_loan(label) or wants_project_info(label)
+            or wants_site_visit(label) or wants_sales_advisor(label)), label
+
+
+@pytest.mark.parametrize("label,expect_state", [
+    ("Home loan / finance enquiry", None),      # -> loan assistant
+    ("Pricing & payment plan", None),           # -> KB/agent answer
+    ("Show available plots", None),             # -> KB/agent answer
+    ("Book a site visit", "awaiting_name"),     # -> callback flow (callback_state)
+    ("Talk to a sales advisor", "awaiting_name"),
+])
+def test_every_popular_question_chip_skips_the_greeting_funnel(label, expect_state):
+    service, persistence, _ = _service()
+    service._run_agent_loop = MagicMock(return_value={"reply": "ok", "llm_provider": "test"})
+    service._enter_loan_assistant = MagicMock(return_value={"session_id": "session-1", "reply": "loan"})
+    service.handle_message("session-1", text="")  # arm greeting_name
+
+    service.handle_message("session-1", text=label)
+
+    assert persistence.session.menu_state is None                     # never stuck in the funnel
+    assert (persistence.session.menu_payload or {}).get("name") is None
+    assert persistence.session.callback_state == expect_state

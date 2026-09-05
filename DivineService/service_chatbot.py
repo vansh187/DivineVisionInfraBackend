@@ -280,6 +280,12 @@ MENU_QUESTIONS = {
 # state -> (menu_payload field the matched button value is stored under, next state)
 # Only states whose answer is "pick one button, store it, move to the next question" -
 # branching states (main_menu, support_*, browsing_decision, sales_proceed) are hand-written.
+# The mandatory contact-capture steps at the very start of the funnel. A top
+# quick-action chip clicked while in one of these skips straight to its action;
+# every later state (main menu, sales/browsing/support flows) is left intact -
+# there the visitor already has the relevant buttons.
+_GREETING_STATES = ("greeting_name", "greeting_phone", "greeting_email")
+
 MENU_LINEAR_TRANSITIONS = {
     "sales_track": ("buyer_type", "sales_profile_type"),
     "sales_profile_type": ("working_profile_type", "sales_location"),
@@ -731,6 +737,29 @@ def wants_home_loan(raw: str) -> bool:
     return "loan" in text and any(w in text for w in _HOME_LOAN_SUPPORT_WORDS)
 
 
+_SITE_VISIT_PHRASES = (
+    "site visit", "site-visit", "book a site", "book a visit", "schedule a visit",
+    "schedule a site", "visit the site", "visit the project", "project visit",
+    "site tour", "proceed_site_visit",
+)
+_SALES_ADVISOR_PHRASES = (
+    "sales advisor", "sales adviser", "talk to sales", "talk to a sales",
+    "speak to sales", "speak with sales", "sales executive", "sales expert",
+    "sales team", "connect me with sales", "chat with sales", "menu_sales",
+    "talk to a sales advisor",
+)
+
+
+def wants_site_visit(raw: str) -> bool:
+    text = _contact_text(raw)
+    return bool(text) and any(p in text for p in _SITE_VISIT_PHRASES)
+
+
+def wants_sales_advisor(raw: str) -> bool:
+    text = _contact_text(raw)
+    return bool(text) and any(p in text for p in _SALES_ADVISOR_PHRASES)
+
+
 def selected_booking_project(raw: str) -> str:
     text = _contact_text(raw)
     if not text:
@@ -889,12 +918,25 @@ class serviceChatbot:
             self._persist_turn(session_id, "user", text)
             return self._start_auth_flow(session, auth_flow)
 
+        # The widget's top quick-action chips must act immediately - the client does
+        # not want name/phone/email captured as a gate before the visitor gets what
+        # they clicked for. When one of those intents arrives during the initial
+        # greeting capture, drop the funnel and let the routing below handle it
+        # (home loan -> loan assistant, pricing/plots -> KB/agent answer, booking ->
+        # project buttons, site visit / advisor -> callback flow, which asks for
+        # name/phone inline as part of the action, not as a gate). Deeper menu flows
+        # the visitor deliberately entered (sales/support/browsing) are left intact.
+        if getattr(session, "menu_state", None) in _GREETING_STATES and (
+            wants_home_loan(text) or wants_project_info(text) or wants_plot_booking(text)
+            or selected_booking_project(text) or wants_site_visit(text)
+            or wants_sales_advisor(text)
+        ):
+            self._safe_update_session_menu_state(session_id, None, None)
+            session.menu_state = None
+
         # An explicit "home loan / finance / EMI" request jumps straight into the loan
-        # assistant, even from a fresh session mid greeting-capture - the client wants
-        # the loan steps to run without forcing name/phone/email first. Gated so it
-        # fires only on the deliberate intent (wants_home_loan needs "home loan" or
-        # "loan" + a finance word, never a bare "loan") and only when the visitor is
-        # not already inside the loan assistant (no loan_payload yet).
+        # assistant. Gated so it fires only on the deliberate intent (never a bare
+        # "loan") and only when the visitor is not already inside the loan assistant.
         if wants_home_loan(text) and not self._get_loan_payload(session):
             if getattr(session, "menu_state", None):
                 self._safe_update_session_menu_state(session_id, None, None)
@@ -938,6 +980,14 @@ class serviceChatbot:
             self._persist_turn(session_id, "user", text)
             self._persist_turn(session_id, "assistant", reply)
             return {"session_id": session_id, "reply": reply, "buttons": BOOKING_PROJECT_BUTTONS}
+
+        if not session.callback_state and (wants_site_visit(text) or wants_sales_advisor(text)):
+            # "Book a site visit" / "Talk to a sales advisor" - route into the callback
+            # flow, which collects name/phone/time inline as part of scheduling rather
+            # than as a gate. _start_callback_flow_prefilled self-heals to the full
+            # name->phone->time flow when the lead has no contact on file yet.
+            self._persist_turn(session_id, "user", text)
+            return self._start_callback_flow_prefilled(session)
 
         if wants_email_contact(text):
             email = extract_email(text)
