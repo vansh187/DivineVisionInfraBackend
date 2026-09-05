@@ -445,3 +445,35 @@ def test_every_popular_question_chip_skips_the_greeting_funnel(label, expect_sta
     assert persistence.session.menu_state is None                     # never stuck in the funnel
     assert (persistence.session.menu_payload or {}).get("name") is None
     assert persistence.session.callback_state == expect_state
+
+
+from DivineService.service_chatbot import wants_main_menu, POPULAR_QUESTION_BUTTONS
+
+
+def test_wants_main_menu_matches_expected_phrases_only():
+    for t in ["Main Menu", "main_menu", "menu", "back to menu", "show me the options", "start over"]:
+        assert wants_main_menu(t), t
+    for t in ["", "menu_about", "home loan", "home loan / emi help", "what's on the menu today"]:
+        assert not wants_main_menu(t), t
+
+
+def test_main_menu_button_re_offers_popular_questions_and_clears_state():
+    service, persistence, _ = _service()
+    _complete_greeting(service, persistence)
+    service.handle_message("session-1", text="menu_sales")  # deep in a flow
+
+    result = service.handle_message("session-1", text="Main Menu")
+
+    assert persistence.session.menu_state is None
+    assert persistence.session.callback_state is None
+    labels = [b["label"] for b in result["buttons"]]
+    assert labels == [b["label"] for b in POPULAR_QUESTION_BUTTONS]
+    assert "pick an option" in result["reply"].lower()
+
+
+def test_loan_assistant_buttons_include_main_menu():
+    service, persistence, _ = _service()
+    service._get_loan_payload = MagicMock(return_value={})
+    assert any(b["value"] == "main_menu" for b in service._loan_dynamic_buttons(persistence.session))
+    service._get_loan_payload = MagicMock(return_value={"last_calculation": {"emi": {}}})
+    assert any(b["value"] == "main_menu" for b in service._loan_dynamic_buttons(persistence.session))

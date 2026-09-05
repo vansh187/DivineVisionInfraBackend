@@ -213,6 +213,19 @@ LOAN_INITIAL_BUTTONS = [
     {"label": "Check Property Affordability", "value": "loan_affordability", "action": "chatbot_message"},
     {"label": "Documents Required", "value": "loan_documents", "action": "chatbot_message"},
 ]
+
+# Re-offered whenever the visitor asks for the "Main Menu" - mirrors the widget's
+# opening "Popular questions" chips. value == label so the frontend posts the plain
+# text, which the quick-action intent detectors (wants_home_loan / wants_project_info
+# / wants_site_visit / wants_sales_advisor) then route.
+MAIN_MENU_BUTTON = {"label": "Main Menu", "value": "main_menu", "action": "chatbot_message"}
+POPULAR_QUESTION_BUTTONS = [
+    {"label": "Home loan / finance enquiry", "value": "Home loan / finance enquiry", "action": "chatbot_message"},
+    {"label": "Pricing & payment plan", "value": "Pricing & payment plan", "action": "chatbot_message"},
+    {"label": "Book a site visit", "value": "Book a site visit", "action": "chatbot_message"},
+    {"label": "Show available plots", "value": "Show available plots", "action": "chatbot_message"},
+    {"label": "Talk to a sales advisor", "value": "Talk to a sales advisor", "action": "chatbot_message"},
+]
 SALES_TRACK_BUTTONS = [
     {"label": "Buy a Property / End Client", "value": "sales_end_client", "action": "chatbot_menu"},
     {"label": "Investor / Dealer", "value": "sales_investor_dealer", "action": "chatbot_menu"},
@@ -766,6 +779,20 @@ def wants_sales_advisor(raw: str) -> bool:
     return bool(text) and any(p in text for p in _SALES_ADVISOR_PHRASES)
 
 
+_MAIN_MENU_PHRASES = (
+    "main menu", "main_menu", "back to menu", "back to the menu", "go to menu",
+    "show menu", "open menu", "show me the options", "show the options",
+    "show options", "other options", "start over", "go back to start",
+)
+
+
+def wants_main_menu(raw: str) -> bool:
+    text = _contact_text(raw)
+    if not text:
+        return False
+    return text in ("menu", "home") or any(p in text for p in _MAIN_MENU_PHRASES)
+
+
 def selected_booking_project(raw: str) -> str:
     text = _contact_text(raw)
     if not text:
@@ -893,6 +920,24 @@ class serviceChatbot:
 
         if getattr(session, "auth_state", None):
             return self._advance_auth_flow(session, text)
+
+        # "Main Menu" - from the loan assistant or anywhere - drops whatever flow the
+        # visitor is in and re-offers the opening "Popular questions" choices so they
+        # can pick again. Sits above the callback/menu/loan routing so it always wins.
+        if wants_main_menu(text):
+            self._safe_update_session_menu_state(session_id, None, None)
+            for clear in (
+                lambda: self._persistence.update_session_callback_state(session_id, None),
+                lambda: self._persistence.update_session_loan_state(session_id, None),
+            ):
+                try:
+                    clear()
+                except Exception as e:
+                    logger.warning("main_menu_state_clear_failed: %s", e)
+            self._persist_turn(session_id, "user", text)
+            reply = "Sure! Here's what I can help you with - pick an option:"
+            self._persist_turn(session_id, "assistant", reply)
+            return {"session_id": session_id, "reply": reply, "buttons": list(POPULAR_QUESTION_BUTTONS)}
 
         if intent == "request_callback" and not session.callback_state:
             if getattr(session, "menu_state", None):
@@ -2284,8 +2329,9 @@ class serviceChatbot:
             ]
             if not payload.get("co_applicant_income"):
                 buttons.insert(3, {"label": "Add Co-Applicant", "value": "loan_add_co_applicant", "action": "chatbot_message"})
+            buttons.append(dict(MAIN_MENU_BUTTON))
             return buttons
-        return list(LOAN_INITIAL_BUTTONS)
+        return list(LOAN_INITIAL_BUTTONS) + [dict(MAIN_MENU_BUTTON)]
 
     def _loan_buttons_for_response(self, session, structured_result: dict = None) -> list:
         buttons = self._loan_dynamic_buttons(session)
