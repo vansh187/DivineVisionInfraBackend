@@ -93,7 +93,58 @@ def test_report_generate_and_download_round_trip():
     assert download_resp.headers["content-type"] == "application/pdf"
     assert download_resp.content[:4] == b"%PDF"
 
+    # same report as JSON for client-side branded rendering
+    json_resp = client.get(f"/loan/report/{report_id}")
+    assert json_resp.status_code == 200
+    body = json_resp.json()
+    assert body["report_id"] == report_id
+    assert body["eligible_amount"] == 8000000
+    assert body["eligible_amount_words"].endswith("Rupees")
+    assert body["rate_pct"] == 8.5
+    assert body["tenure_months"] == 240
+    assert body["emi"] == 69000
+    assert body["monthly_income"] == 160000
+    assert body["existing_obligations"] == 12000
+    assert body["employment_type"] == "Salaried"
+    assert body["applicant"] == {"name": None, "phone": None, "email": None}
+    assert body["issued_at"]
+
 
 def test_report_download_missing_id_returns_404():
     resp = client.get("/loan/report/does-not-exist/download")
     assert resp.status_code == 404
+
+
+def test_report_data_missing_id_returns_404():
+    resp = client.get("/loan/report/does-not-exist")
+    assert resp.status_code == 404
+
+
+def test_report_data_returns_applicant_pii_only_with_matching_session_id():
+    import json as _json
+    rid, sid = "rid-pii-test", "sess-pii-test"
+    snapshot = {
+        "profile": {"monthly_income": 100000},
+        "last_calculation": {"emi": {"emi": 9000, "annual_rate_pct": 8.5, "tenure_months": 240}},
+        "applicant": {"name": "Vansh Duggal", "phone": "7276971875", "email": "v@example.com"},
+    }
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM divine_loan_reports WHERE id = :id"), {"id": rid})
+        conn.execute(
+            text("INSERT INTO divine_loan_reports(id, session_id, lead_id, snapshot_json) "
+                 "VALUES (:id, :sid, :lid, :snap)"),
+            {"id": rid, "sid": sid, "lid": "lead-x", "snap": _json.dumps(snapshot)},
+        )
+
+    # no session id -> figures only, PII blanked
+    body = client.get(f"/loan/report/{rid}").json()
+    assert body["emi"] == 9000
+    assert body["applicant"] == {"name": None, "phone": None, "email": None}
+
+    # wrong session id -> still blanked
+    body = client.get(f"/loan/report/{rid}?session_id=not-it").json()
+    assert body["applicant"] == {"name": None, "phone": None, "email": None}
+
+    # matching session id -> PII returned
+    body = client.get(f"/loan/report/{rid}?session_id={sid}").json()
+    assert body["applicant"] == {"name": "Vansh Duggal", "phone": "7276971875", "email": "v@example.com"}

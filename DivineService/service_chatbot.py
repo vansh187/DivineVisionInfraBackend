@@ -16,6 +16,9 @@ from DivineService.llm_gemini import llmGemini, GeminiError
 from DivineService.llm_groq import llmGroq, GroqError
 from DivineService.service_zoho import serviceZoho
 from DivineService.loan_utils import normalize_indian_amount
+from DivineService.loan_report_data import (
+    build_report_data, report_pdf_filename, report_download_url, report_data_url,
+)
 from DivineService.service_loan_calculator import calculate_emi, compare_tenures as _compare_tenures
 from DivineService.service_loan_eligibility import (
     calculate_loan_eligibility, calculate_affordability, ILLUSTRATIVE_RATE_DEFAULT,
@@ -71,6 +74,9 @@ LOAN_SYSTEM_INSTRUCTION = (
     "- Every EMI or eligibility answer must end with: \"This is an indicative calculation and "
     "actual lender terms may differ.\"\n"
     "- When a calculation is complete, mention the visitor can download an eligibility report.\n"
+    "- After calling generate_eligibility_report, reply with ONE short sentence saying the "
+    "report is ready and downloading now. NEVER write out a URL, a link, or any "
+    "'/loan/report' path - the download is handled for the visitor.\n"
     "- For document questions, call get_document_checklist rather than listing documents from "
     "memory, and note that exact requirements vary by lender.\n"
     "- Keep the tone warm, human, and consultative - like a knowledgeable loan advisor, not a form."
@@ -186,6 +192,15 @@ MAIN_MENU_BUTTONS = [
 ]
 
 LOAN_ENTRY_SEED_TEXT = "I want to check my home loan eligibility"
+
+# Deterministic reply for the report-ready turn. Belt-and-suspenders: the model
+# is not handed any URL to leak (see _model_facing_tool_result), but if it ever
+# improvises a link this fixed line still replaces its prose.
+REPORT_READY_REPLY = (
+    "Your home loan eligibility report is ready and downloading now. If it does not "
+    "start automatically, use the download button below. This is an indicative "
+    "calculation and actual lender terms may differ."
+)
 LOAN_INITIAL_BUTTONS = [
     {"label": "Check Loan Eligibility", "value": "loan_eligibility", "action": "chatbot_message"},
     {"label": "Calculate EMI", "value": "loan_emi", "action": "chatbot_message"},
@@ -411,7 +426,31 @@ LOAN_TOOL_SCHEMAS = [
         "parameters": {"type": "object", "properties": {}, "required": []},
     },
 ]
-TOOL_SCHEMAS = TOOL_SCHEMAS + LOAN_TOOL_SCHEMAS
+
+
+def _make_optionals_nullable(schemas: list) -> list:
+    """Both providers' models emit `null` for optional tool args they don't have a
+    value for; strict server-side validation (Groq especially) then 400s the whole
+    call. Declaring every NON-required property as nullable makes that a valid call
+    - the tool handlers already treat None / missing as "not provided". Applied
+    once at import so no individual schema has to remember to do it."""
+    patched = []
+    for tool in schemas:
+        params = dict(tool.get("parameters") or {})
+        required = set(params.get("required") or [])
+        props = {}
+        for name, spec in (params.get("properties") or {}).items():
+            spec = dict(spec)
+            declared = spec.get("type", "string")
+            if name not in required and isinstance(declared, str) and declared != "null":
+                spec["type"] = [declared, "null"]
+            props[name] = spec
+        params["properties"] = props
+        patched.append({**tool, "parameters": params})
+    return patched
+
+
+TOOL_SCHEMAS = _make_optionals_nullable(TOOL_SCHEMAS + LOAN_TOOL_SCHEMAS)
 
 LOAN_STRUCTURED_RESULT_TYPES = {
     "calculate_emi": "emi_result",
@@ -481,6 +520,42 @@ def valid_phone(raw: str) -> bool:
     if len(digits) == 10:
         return digits[0] in "6789"
     return extract_phone(raw) is not None
+
+
+# Words that mark a message as a topic/command (usually a tapped suggestion chip like
+# "Home loan / finance enquiry"), not the visitor's name. Whole-word match only, and
+# deliberately limited to strongly-topical words - generic ones like "call"/"now"/
+# "help" are omitted because they are also plausible given names or surnames, and the
+# 2-strike escape hatch in the greeting step covers the rest.
+_NOT_A_NAME_WORDS = frozenset({
+    "loan", "loans", "emi", "finance", "enquiry", "inquiry",
+    "pricing", "payment", "payments", "plot", "plots",
+    "visit", "visits", "booking", "brochure", "rera", "callback",
+    "availability", "budget", "affordability",
+    "eligibility", "tenure", "documents",
+})
+
+
+def looks_like_name(text: str) -> bool:
+    """True if `text` is plausibly a person's name rather than a tapped topic chip
+    or a sentence. Deliberately lenient - the greeting step only re-prompts twice
+    on a False before accepting whatever was typed, so a false negative costs one
+    extra prompt, never a dead end."""
+    t = (text or "").strip()
+    if not t or len(t) > 80:
+        return False
+    if any(ch.isdigit() for ch in t):
+        return False
+    if any(ch in t for ch in "/?@#:;=_"):
+        return False
+    words = [w for w in re.split(r"\s+", t) if w]
+    if not (1 <= len(words) <= 7):
+        return False
+    word_set = {w.strip(".,!'\"-").lower() for w in words}
+    if word_set & _NOT_A_NAME_WORDS:
+        return False
+    # letters, spaces and the handful of punctuation real names use
+    return all(ch.isalpha() or ch.isspace() or ch in ".-'" for ch in t)
 
 
 def normalize_phone(raw: str) -> str:
@@ -1020,7 +1095,19 @@ class serviceChatbot:
                 reply = "Please share your full name to continue."
                 self._persist_turn(session_id, "assistant", reply)
                 return {"session_id": session_id, "reply": reply}
+            name_attempts = self._as_attempt_count(payload.get("name_attempts"))
+            if not looks_like_name(text) and name_attempts < 2:
+                # A tapped suggestion chip (e.g. "Home loan / finance enquiry") or a
+                # question landed on the name step - don't store it as the name, just
+                # ask again. Bounded to 2 re-prompts so an unusual real name is never
+                # a dead end: on the 3rd try we accept whatever was typed.
+                payload["name_attempts"] = name_attempts + 1
+                self._safe_update_session_menu_state(session_id, "greeting_name", payload)
+                reply = "Sure, I can help with that. First, may I know your name?"
+                self._persist_turn(session_id, "assistant", reply)
+                return {"session_id": session_id, "reply": reply}
             payload["name"] = text.strip()
+            payload.pop("name_attempts", None)
             self._safe_update_session_menu_state(session_id, "greeting_phone", payload)
             reply = "Thanks! Please share your phone number."
             self._persist_turn(session_id, "assistant", reply)
@@ -1693,11 +1780,14 @@ class serviceChatbot:
                 if name in LOAN_STRUCTURED_RESULT_TYPES and "error" not in tool_result:
                     structured_result = {"type": LOAN_STRUCTURED_RESULT_TYPES[name], "data": tool_result}
 
+                # The frontend gets the full tool_result (via structured_result above);
+                # the model only ever sees the trimmed version.
+                model_result = self._model_facing_tool_result(name, tool_result)
                 if provider == "gemini":
                     history.append({"role": "model", "function_call": {
                         "name": name, "args": args, "thought_signature": step["function_call"].get("thought_signature"),
                     }})
-                    history.append({"role": "tool", "function_response": {"name": name, "response": tool_result}})
+                    history.append({"role": "tool", "function_response": {"name": name, "response": model_result}})
                 else:
                     # A plain round_index-based id could collide with ids already assigned
                     # during _gemini_history_to_groq's conversion (it also numbers from 0) if
@@ -1706,7 +1796,7 @@ class serviceChatbot:
                     call_id = f"call_{round_index}_{uuid.uuid4().hex[:8]}"
                     history.append({"role": "assistant", "content": None,
                                      "tool_calls": [{"id": call_id, "type": "function", "function": {"name": name, "arguments": json.dumps(args)}}]})
-                    history.append({"role": "tool", "tool_call_id": call_id, "name": name, "content": json.dumps(tool_result)})
+                    history.append({"role": "tool", "tool_call_id": call_id, "name": name, "content": json.dumps(model_result)})
                 continue
 
             draft_reply = step["text"] or ""
@@ -1739,6 +1829,12 @@ class serviceChatbot:
         # one of those paths needs to carry it through rather than only the "no KB used" branch.
         if structured_result:
             result["structured_result"] = structured_result
+            # The report-ready turn: never surface the model's prose (it leaks the raw
+            # /loan/report path). Replace it with a fixed clean line; the absolute
+            # download_url + auto_download flag travel in structured_result.data.
+            if (structured_result.get("type") == "report_ready"
+                    and (structured_result.get("data") or {}).get("download_url")):
+                result["reply"] = REPORT_READY_REPLY
         return result
 
     def _recover(self, session, provider: str, latest_text: str, retrieved_chunks: list,
@@ -1799,10 +1895,63 @@ class serviceChatbot:
                 structured_result,
             )
 
-        # Both providers are down - nothing left to synthesise from.
+        # Both providers are down. If the visitor is mid loan-calculation and we
+        # already hold enough numbers, do the arithmetic ourselves rather than
+        # dead-ending on a real-estate math question the LLM was only orchestrating.
+        loan_fallback = self._loan_math_fallback(session)
+        if loan_fallback:
+            return self._with_structured_result(
+                {"reply": loan_fallback["reply"], "llm_provider": None, "guardrail_passed": False},
+                structured_result or loan_fallback.get("structured_result"),
+            )
         return self._with_structured_result(
             {"reply": DEGRADED_FALLBACK_REPLY, "llm_provider": None, "guardrail_passed": False}, structured_result,
         )
+
+    def _loan_math_fallback(self, session):
+        """Deterministic EMI computed without the LLM, for the recovery path only.
+        Returns {"reply", "structured_result"} when principal + tenure are known,
+        else None. Never raises."""
+        try:
+            payload = self._get_loan_payload(session)
+            if not isinstance(payload, dict):
+                return None
+            last = payload.get("last_calculation") or {}
+            principal = normalize_indian_amount(
+                payload.get("requested_loan") or (last.get("emi") or {}).get("principal")
+            )
+            try:
+                tenure = float(payload["tenure_years"]) if payload.get("tenure_years") is not None else None
+            except (TypeError, ValueError):
+                tenure = None
+            if not principal or principal <= 0 or not tenure:
+                return None
+            try:
+                rate = float(payload["interest_rate"]) if payload.get("interest_rate") else None
+            except (TypeError, ValueError):
+                rate = None
+            illustrative = rate is None
+            rate = rate or ILLUSTRATIVE_RATE_DEFAULT
+            result = calculate_emi(principal, rate, tenure)
+            # Match _tool_calculate_emi: downstream (build_report_data, the EMI card)
+            # keys off this to show the "illustrative rate" disclaimer.
+            result["illustrative_rate_used"] = illustrative
+        except Exception as e:
+            logger.warning("loan_math_fallback_failed: %s", e)
+            return None
+        try:
+            self._merge_loan_payload(session, {"last_calculation": {**(payload.get("last_calculation") or {}), "emi": result}})
+        except Exception as e:
+            logger.warning("loan_math_fallback_persist_failed: %s", e)
+        rate_note = f"an illustrative {rate}% p.a. rate" if illustrative else f"a {rate}% p.a. rate"
+        reply = (
+            f"Estimated EMI for a Rs. {principal:,.0f} loan over {tenure:g} years at {rate_note}: "
+            f"about Rs. {result['emi']:,.0f} per month (total interest ~Rs. {result['total_interest']:,.0f}, "
+            f"total repayment ~Rs. {result['total_payment']:,.0f}). "
+            "This is an indicative calculation and actual lender terms may differ. "
+            "Would you like our team to call you with exact, up-to-date figures?"
+        )
+        return {"reply": reply, "structured_result": {"type": "emi_result", "data": result}}
 
     def _tag_general_guidance(self, reply: str) -> str:
         # A recovery answer that isn't backed by retrieved data still goes out, but flagged as
@@ -2050,11 +2199,13 @@ class serviceChatbot:
     def _loan_buttons_for_response(self, session, structured_result: dict = None) -> list:
         buttons = self._loan_dynamic_buttons(session)
         if structured_result and structured_result.get("type") == "report_ready":
-            download_url = structured_result["data"].get("download_url")
+            data = structured_result.get("data") or {}
+            download_url = data.get("download_url")
             if download_url:
                 buttons = [b for b in buttons if b.get("value") != "loan_download_report"]
                 buttons.insert(0, {"label": "Download My Home Loan Eligibility Report",
-                                    "value": "loan_report_ready", "action": "download_link", "url": download_url})
+                                    "value": "loan_report_ready", "action": "download_link",
+                                    "url": download_url, "filename": data.get("filename")})
         return buttons
 
     def _tool_update_loan_profile(self, session, args: dict) -> dict:
@@ -2158,8 +2309,13 @@ class serviceChatbot:
         payload = self._get_loan_payload(session)
         if not payload.get("last_calculation"):
             return {"error": "no_calculation_yet"}
-        snapshot = {"profile": {k: v for k, v in payload.items() if k != "last_calculation"},
-                    "last_calculation": payload.get("last_calculation")}
+        snapshot = {
+            "profile": {k: v for k, v in payload.items() if k != "last_calculation"},
+            "last_calculation": payload.get("last_calculation"),
+            # Stored in the snapshot so the report row is self-contained - the JSON
+            # endpoint and PDF generator don't need to re-join to the lead later.
+            "applicant": self._report_applicant(session),
+        }
         try:
             row = self._loan_persistence.create_loan_report(
                 id=str(uuid.uuid4()), snapshot=snapshot, session_id=session.id, lead_id=session.lead_id,
@@ -2167,7 +2323,43 @@ class serviceChatbot:
         except Exception as e:
             logger.warning("loan_report_create_failed: %s", e)
             return {"error": "report_generation_failed"}
-        return {"report_id": row.id, "download_url": f"/loan/report/{row.id}/download"}
+        # This dict is the FRONTEND-facing structured_result['data'] (URLs + the full
+        # flattened report incl. the visitor's own contact details). It is NOT what
+        # the LLM sees - _model_facing_tool_result strips it down before the tool
+        # response is appended to the conversation history.
+        return {
+            "report_id": row.id,
+            "download_url": report_download_url(row.id),
+            "download_path": f"/loan/report/{row.id}/download",
+            "data_url": report_data_url(row.id, session.id),
+            "filename": report_pdf_filename(row.id),
+            "auto_download": True,
+            "report": build_report_data(snapshot, row.id, getattr(row, "created_date", None)),
+        }
+
+    @staticmethod
+    def _model_facing_tool_result(name: str, tool_result: dict) -> dict:
+        """What actually goes into the LLM conversation history for a tool call.
+        For the eligibility report we hand the model only "it exists" - never the
+        URLs (which it would echo into prose) or the report payload (which carries
+        the visitor's name/phone/email the system prompt forbids it to use)."""
+        if name == "generate_eligibility_report" and isinstance(tool_result, dict) and "error" not in tool_result:
+            return {"report_id": tool_result.get("report_id"), "status": "ready"}
+        return tool_result
+
+    def _report_applicant(self, session) -> dict:
+        try:
+            lead = self._persistence.get_lead_by_id(session.lead_id)
+        except Exception as e:
+            logger.warning("report_applicant_lookup_failed: %s", e)
+            lead = None
+        if not lead:
+            return {}
+        return {
+            "name": getattr(lead, "visitor_name", None),
+            "phone": getattr(lead, "visitor_phone", None),
+            "email": getattr(lead, "visitor_email", None),
+        }
 
     def _save_lead_email(self, lead_id: str, email: str) -> bool:
         try:

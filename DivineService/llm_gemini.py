@@ -29,11 +29,36 @@ def _looks_like_quota_error(exc: Exception) -> bool:
 
 
 def _to_schema(json_schema: dict) -> types.Schema:
-    properties = {
-        name: types.Schema(type=prop.get("type", "STRING").upper(), description=prop.get("description"))
-        for name, prop in (json_schema.get("properties") or {}).items()
-    }
-    return types.Schema(type="OBJECT", properties=properties, required=json_schema.get("required") or [])
+    """Recursively convert a JSON-Schema dict into a google-genai types.Schema.
+
+    Must recurse: Gemini rejects the ENTIRE tool list with a 400 INVALID_ARGUMENT
+    if an `array` node reaches it without `items`, or if an object's nested
+    `properties` are flattened away. A union type like ["number", "null"] is
+    mapped to the non-null type plus nullable=True.
+    """
+    node = json_schema or {}
+    raw_type = node.get("type") or "object"
+    nullable = False
+    if isinstance(raw_type, (list, tuple)):
+        nullable = "null" in raw_type
+        raw_type = next((t for t in raw_type if t != "null"), "string")
+    raw_type = str(raw_type).lower()
+
+    kwargs = {"type": raw_type.upper()}
+    if nullable:
+        kwargs["nullable"] = True
+    if node.get("description"):
+        kwargs["description"] = node["description"]
+    if node.get("enum"):
+        kwargs["enum"] = [str(v) for v in node["enum"]]
+    if raw_type == "array":
+        kwargs["items"] = _to_schema(node.get("items") or {"type": "string"})
+    if raw_type == "object":
+        kwargs["properties"] = {
+            name: _to_schema(prop) for name, prop in (node.get("properties") or {}).items()
+        }
+        kwargs["required"] = node.get("required") or []
+    return types.Schema(**kwargs)
 
 
 class llmGemini:

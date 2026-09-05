@@ -299,3 +299,56 @@ def test_menu_state_unaffected_when_never_set_old_session():
 
     assert "email address" in result["reply"]
     assert persistence.session.menu_state is None
+
+
+def test_greeting_does_not_capture_topic_chip_as_name():
+    service, persistence, _ = _service()
+    service.handle_message("session-1", text="")  # widget-open greeting
+
+    result = service.handle_message("session-1", text="Home loan / finance enquiry")
+
+    assert persistence.session.menu_state == "greeting_name"  # not advanced
+    assert (persistence.session.menu_payload or {}).get("name") is None
+    assert "name" in result["reply"].lower()
+
+
+def test_greeting_does_not_capture_a_question_as_name():
+    service, persistence, _ = _service()
+    service.handle_message("session-1", text="")
+
+    result = service.handle_message("session-1", text="what plots do you have available?")
+
+    assert persistence.session.menu_state == "greeting_name"
+    assert "name" in result["reply"].lower()
+
+
+def test_greeting_still_accepts_a_real_name():
+    service, persistence, _ = _service()
+    service.handle_message("session-1", text="")
+
+    result = service.handle_message("session-1", text="Priya Sharma")
+
+    assert persistence.session.menu_state == "greeting_phone"
+    assert persistence.session.menu_payload["name"] == "Priya Sharma"
+    assert "phone" in result["reply"].lower()
+
+
+def test_greeting_accepts_unusual_name_after_two_reprompts():
+    service, persistence, _ = _service()
+    service.handle_message("session-1", text="")
+    # "Call" happens to be a surname; guard re-prompts twice, then accepts
+    service.handle_message("session-1", text="Call")
+    service.handle_message("session-1", text="Call")
+    result = service.handle_message("session-1", text="Call")
+    assert persistence.session.menu_state == "greeting_phone"
+    assert persistence.session.menu_payload["name"] == "Call"
+    assert "name_attempts" not in persistence.session.menu_payload
+    assert "phone" in result["reply"].lower()
+
+
+def test_greeting_accepts_long_multiword_name():
+    service, persistence, _ = _service()
+    service.handle_message("session-1", text="")
+    result = service.handle_message("session-1", text="Sri Venkata Naga Sai Krishna Reddy")
+    assert persistence.session.menu_state == "greeting_phone"
+    assert persistence.session.menu_payload["name"] == "Sri Venkata Naga Sai Krishna Reddy"

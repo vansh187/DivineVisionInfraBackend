@@ -15,6 +15,31 @@ class GroqError(Exception):
     """Raised on any Groq transport/API failure."""
 
 
+def _recover_tool_call_from_error(exc: Exception):
+    """gpt-oss frequently emits `null` for optional tool args it doesn't know; Groq
+    then 400s the whole call with code `tool_use_failed` - but hands back the
+    model's intended call in `error.failed_generation`. Salvage it: drop the
+    null-valued args (every tool handler already defaults a missing arg) and use
+    the call, instead of dead-ending the turn. Returns {"name","args"} or None."""
+    try:
+        body = getattr(exc, "body", None)
+        if not isinstance(body, dict):
+            return None
+        err = body.get("error") or {}
+        if err.get("code") != "tool_use_failed" or not err.get("failed_generation"):
+            return None
+        parsed = json.loads(err["failed_generation"])
+        name = parsed.get("name")
+        args = parsed.get("arguments")
+        if isinstance(args, str):
+            args = json.loads(args)
+        if not name or not isinstance(args, dict):
+            return None
+        return {"name": name, "args": {k: v for k, v in args.items() if v is not None}}
+    except Exception:
+        return None
+
+
 class llmGroq:
     def __init__(self):
         api_key = os.getenv("GROQ_API_KEY")
@@ -63,6 +88,10 @@ class llmGroq:
                 return {"text": None, "function_call": {"name": call.function.name, "args": args}}
             return {"text": choice_message.content or "", "function_call": None}
         except Exception as e:
+            recovered = _recover_tool_call_from_error(e)
+            if recovered is not None:
+                logger.warning("groq_tool_call_recovered name=%s (dropped null args)", recovered["name"])
+                return {"text": None, "function_call": recovered}
             logger.warning("groq_generate_failed: %s", e)
             raise GroqError(str(e)) from e
 
