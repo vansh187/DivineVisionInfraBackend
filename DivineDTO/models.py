@@ -300,6 +300,7 @@ class ChatbotButtonDTO(BaseModel):
     value: str
     action: str
     url: Optional[str] = None
+    filename: Optional[str] = None
 
 
 class ChatMessageResponseDTO(BaseModel):
@@ -422,6 +423,50 @@ class ReportGenerateRequestDTO(BaseModel):
 
 class ReportGenerateResponseDTO(BaseModel):
     report_id: str
+
+
+class LoanReportApplicantDTO(BaseModel):
+    name: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[str] = None
+
+
+class LoanEligibleRangeDTO(BaseModel):
+    low: Optional[float] = None
+    high: Optional[float] = None
+
+
+class LoanReportAmortRowDTO(BaseModel):
+    month: Optional[int] = None
+    principal_component: Optional[float] = None
+    interest_component: Optional[float] = None
+    balance: Optional[float] = None
+
+
+class LoanReportDataDTO(BaseModel):
+    """Flattened eligibility-report values for client-side (pdf-lib) rendering.
+    Every figure is optional - a partial snapshot yields nulls, never an error."""
+    report_id: str
+    issued_at: str
+    applicant: LoanReportApplicantDTO = Field(default_factory=LoanReportApplicantDTO)
+    eligible_amount: Optional[float] = None
+    eligible_amount_words: Optional[str] = None
+    eligible_loan_range: Optional[LoanEligibleRangeDTO] = None
+    eligibility_category: Optional[str] = None
+    rate_pct: Optional[float] = None
+    rate_is_illustrative: bool = False
+    tenure_years: Optional[float] = None
+    tenure_months: Optional[int] = None
+    emi: Optional[float] = None
+    total_interest: Optional[float] = None
+    total_payment: Optional[float] = None
+    monthly_income: Optional[float] = None
+    co_applicant_income: Optional[float] = None
+    combined_income: Optional[float] = None
+    existing_obligations: Optional[float] = None
+    foir_pct: Optional[float] = None
+    employment_type: Optional[str] = None
+    amortization_first_year: Optional[List[LoanReportAmortRowDTO]] = None
 
 
 # ---- Customer profile -------------------------------------------------------

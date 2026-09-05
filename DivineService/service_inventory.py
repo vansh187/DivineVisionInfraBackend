@@ -1,3 +1,4 @@
+import logging
 import uuid
 from collections import Counter
 from datetime import datetime, timedelta, timezone
@@ -5,6 +6,8 @@ from decimal import Decimal, InvalidOperation
 from Divinepersistence import persistenceInventory, persistenceMarketTrend, persistenceChatbot
 from .llm_gemini import llmGemini, GeminiError
 from .llm_groq import llmGroq, GroqError
+
+logger = logging.getLogger(__name__)
 
 
 MAX_SEARCH_LIMIT = 100
@@ -109,9 +112,16 @@ class serviceInventory:
         if price_cache is not None and cache_key in price_cache:
             price_per_sqyd = price_cache[cache_key]
         else:
-            trends = self._market_trend_persistence.list_market_trends(city=city, property_type=unit_type, limit=1)
-            if not trends:
-                trends = self._market_trend_persistence.list_market_trends(city=city, limit=1)
+            try:
+                trends = self._market_trend_persistence.list_market_trends(city=city, property_type=unit_type, limit=1)
+                if not trends:
+                    trends = self._market_trend_persistence.list_market_trends(city=city, limit=1)
+            except Exception as e:
+                # No market-trend row (table empty) is normal and returns []; only a
+                # genuine DB error lands here. Estimated price is optional metadata -
+                # degrade it to None rather than 500 the whole inventory search.
+                logger.warning("estimate_price_market_trend_lookup_failed city=%s error=%s", city, e)
+                trends = []
             price_per_sqyd = self._to_float_or_none(getattr(trends[0], "price_per_sqyd", None)) if trends else None
             if price_cache is not None:
                 price_cache[cache_key] = price_per_sqyd

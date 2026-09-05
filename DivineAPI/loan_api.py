@@ -1,15 +1,18 @@
-import uuid
 import io
+import json
+import uuid
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
+
+from DivineService.loan_report_data import build_report_data, report_pdf_filename
 
 from DivineDTO.models import (
     EMICalculateRequestDTO, EMICalculateResponseDTO, AmortizationRowDTO,
     EligibilityRequestDTO, EligibilityResponseDTO,
     AffordabilityRequestDTO, AffordabilityResponseDTO,
     TenureCompareRequestDTO, TenureCompareResponseDTO,
-    ReportGenerateRequestDTO, ReportGenerateResponseDTO,
+    ReportGenerateRequestDTO, ReportGenerateResponseDTO, LoanReportDataDTO,
 )
 from DivineService.service_loan_calculator import (
     calculate_emi, build_amortization_schedule, compare_tenures,
@@ -83,20 +86,52 @@ def create_report(dto: ReportGenerateRequestDTO):
     return ReportGenerateResponseDTO(report_id=row.id)
 
 
+@router.get("/report/{report_id}", response_model=LoanReportDataDTO)
+def get_report_data(report_id: str, session_id: str = None):
+    """The eligibility report as JSON (computed values only) so a client can render
+    its own branded PDF. The report id is an unguessable UUID; the financial figures
+    it returns only reflect what the user supplied in the chat. The applicant's
+    contact details (name/phone/email) are returned ONLY when `session_id` matches
+    the chat session that created the report - a bare report URL leaked via logs,
+    history or a Referer header yields the figures, never the PII."""
+    try:
+        row = _persistence.get_loan_report_by_id(report_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="report_not_found")
+        try:
+            snapshot = json.loads(row.snapshot_json)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=500, detail="report_corrupt")
+        owner_session = getattr(row, "session_id", None)
+        include_applicant = bool(owner_session) and session_id == owner_session
+        return build_report_data(
+            snapshot, row.id, getattr(row, "created_date", None), include_applicant=include_applicant,
+        )
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=500, detail="internal_error")
+
+
 @router.get("/report/{report_id}/download")
 def download_report(report_id: str):
-    row = _persistence.get_loan_report_by_id(report_id)
-    if not row:
-        raise HTTPException(status_code=404, detail="report_not_found")
-
-    import json
-    snapshot = json.loads(row.snapshot_json)
     try:
-        pdf_bytes = generate_eligibility_report_pdf(snapshot)
+        row = _persistence.get_loan_report_by_id(report_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="report_not_found")
+        try:
+            snapshot = json.loads(row.snapshot_json)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=500, detail="report_corrupt")
+        try:
+            pdf_bytes = generate_eligibility_report_pdf(snapshot)
+        except Exception:
+            raise HTTPException(status_code=500, detail="report_generation_failed")
+        return StreamingResponse(
+            io.BytesIO(pdf_bytes), media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="{report_pdf_filename(report_id)}"'},
+        )
+    except HTTPException:
+        raise
     except Exception:
-        raise HTTPException(status_code=500, detail="report_generation_failed")
-
-    return StreamingResponse(
-        io.BytesIO(pdf_bytes), media_type="application/pdf",
-        headers={"Content-Disposition": f'attachment; filename="home-loan-eligibility-{report_id}.pdf"'},
-    )
+        raise HTTPException(status_code=500, detail="internal_error")
