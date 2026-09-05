@@ -64,6 +64,12 @@ LOAN_SYSTEM_INSTRUCTION = (
     "- Before asking for anything, call update_loan_profile with whatever the visitor already "
     "stated in their message, and check what's already known this session - never re-ask for a "
     "value already captured.\n"
+    "- For eligibility, ALWAYS ask whether the visitor already has any ongoing EMIs or loan "
+    "repayments (car loan, personal loan, another home loan, credit-card EMIs) and their total "
+    "monthly amount - existing obligations directly reduce how much they can borrow. If they "
+    "say they have none, call update_loan_profile with existing_emi: 0 so it is on record, "
+    "then proceed. In the eligibility answer, briefly note how their existing EMIs affected the "
+    "available capacity.\n"
     "- If the visitor doesn't give an interest rate, the calculation tools use an illustrative "
     "default and tell you what it was - always say plainly to the visitor: \"Illustrative rate "
     "used for calculation: X%\" - never invent or claim to know current bank rates.\n"
@@ -2338,8 +2344,16 @@ class serviceChatbot:
     def _tool_calculate_loan_eligibility(self, session, args: dict) -> dict:
         payload = self._get_loan_payload(session)
         monthly_income = payload.get("monthly_income")
+        missing = []
         if not monthly_income:
-            return {"error": "missing_fields", "fields": ["monthly_income"]}
+            missing.append("monthly_income")
+        # Existing EMIs / loan obligations directly reduce eligible capacity - insist
+        # the visitor is asked (a "none" answer must be saved as existing_emi: 0, which
+        # then makes the key present so this check passes).
+        if "existing_emi" not in payload:
+            missing.append("existing_emi")
+        if missing:
+            return {"error": "missing_fields", "fields": missing}
         try:
             result = calculate_loan_eligibility(
                 monthly_income=monthly_income, co_applicant_income=payload.get("co_applicant_income"),
