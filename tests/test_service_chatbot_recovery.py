@@ -47,7 +47,9 @@ def _service(gemini, groq, kb_side_effect, inventory_rows=None):
     svc = serviceChatbot(
         persistence=persistence, gemini=gemini, groq=groq, zoho=None,
         loan_persistence=MagicMock(),
-        inventory_persistence=FakeInventory(inventory_rows or [_inv_row()]),
+        inventory_persistence=FakeInventory(
+            inventory_rows if inventory_rows is not None else [_inv_row()]
+        ),
     )
     return svc
 
@@ -113,7 +115,49 @@ def test_recovery_falls_through_to_degraded_line_only_when_all_llms_are_down():
     assert result["guardrail_passed"] is False
 
 
+def test_recovery_serves_inventory_data_when_llms_down_but_inventory_available():
+    gemini = MagicMock()
+    gemini.generate.side_effect = [
+        {"text": None, "function_call": {"name": "search_knowledge_base", "args": {"query": "sizes"}}},
+        {"text": "Prices start at 50 lakh.", "function_call": None},
+        GeminiError("gemini down"),
+    ]
+    groq = MagicMock()
+    groq.judge.side_effect = [0.1]
+    groq.generate.side_effect = GroqError("groq down")
+
+    # inventory_rows=None -> the helper supplies a default row (inventory available)
+    svc = _service(gemini, groq, kb_side_effect=[[], []])
+
+    result = svc._run_agent_loop(_session(), "what plot sizes do you have")
+
+    assert result["reply"] != DEGRADED_FALLBACK_REPLY
+    assert "OPS Divine Greens" in result["reply"]
+    assert "131.43" in result["reply"]
+
+
 def test_tag_general_guidance_left_alone_when_model_already_hedged():
     svc = _service(MagicMock(), MagicMock(), kb_side_effect=[[]])
     already = "Plots vary in size — our team can share the exact list."
     assert svc._tag_general_guidance(already) == already
+
+
+def test_degraded_reply_is_not_an_apology_and_carries_working_buttons():
+    from DivineService.service_chatbot import DEGRADED_FALLBACK_REPLY, DEGRADED_FALLBACK_BUTTONS
+    low = DEGRADED_FALLBACK_REPLY.lower()
+    assert "sorry" not in low and "trouble" not in low
+    assert DEGRADED_FALLBACK_BUTTONS  # non-empty
+    for b in DEGRADED_FALLBACK_BUTTONS:
+        assert b["action"] == "chatbot_message" and b["value"]
+
+
+def test_recover_final_fallback_returns_buttons():
+    gemini = MagicMock()
+    gemini.generate.side_effect = GeminiError("down")
+    groq = MagicMock()
+    groq.generate.side_effect = GroqError("down")
+    svc = _service(gemini, groq, kb_side_effect=[[], []], inventory_rows=[])
+    out = svc._recover(_session(), "gemini", "tell me about amenities", [])
+    from DivineService.service_chatbot import DEGRADED_FALLBACK_REPLY
+    assert out["reply"] == DEGRADED_FALLBACK_REPLY
+    assert out.get("buttons")  # never a dead end

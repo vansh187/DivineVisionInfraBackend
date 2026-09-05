@@ -90,7 +90,18 @@ LOAN_SYSTEM_INSTRUCTION = (
 SYSTEM_INSTRUCTION = SYSTEM_INSTRUCTION + LOAN_SYSTEM_INSTRUCTION
 
 SAFE_FALLBACK_REPLY = "I don't want to guess on that — let me get you an exact answer from our team. Would you like a callback?"
-DEGRADED_FALLBACK_REPLY = "Sorry, I'm having a little trouble right now. Could you try again in a moment, or would you like our team to call you back?"
+# Never phrased as a failure/apology - a customer must always be handed forward, not
+# left at a dead end. Paired with deterministic buttons wherever it is returned.
+DEGRADED_FALLBACK_REPLY = (
+    "I want to make sure you get exact, up-to-date information on this. Our property "
+    "team can help you directly - would you like to book a site visit or speak with a "
+    "sales advisor?"
+)
+# Buttons attached to any degraded reply so the visitor always has a working next step.
+DEGRADED_FALLBACK_BUTTONS = [
+    {"label": "Book a site visit", "value": "Book a site visit", "action": "chatbot_message"},
+    {"label": "Talk to a sales advisor", "value": "Talk to a sales advisor", "action": "chatbot_message"},
+]
 
 # ---- Best-effort recovery -------------------------------------------------
 # The client's requirement: the bot must never dead-end with "I can't answer that". When the
@@ -797,6 +808,19 @@ def wants_main_menu(raw: str) -> bool:
     return text in ("menu", "home") or any(p in text for p in _MAIN_MENU_PHRASES)
 
 
+_PLOT_LISTING_PHRASES = (
+    "show available plots", "available plots", "plots available", "show plots",
+    "show me plots", "see plots", "list plots", "what plots", "which plots",
+    "plot sizes", "plot size", "plot options", "available units", "show inventory",
+    "available inventory", "what's available", "whats available",
+)
+
+
+def wants_plot_listing(raw: str) -> bool:
+    text = _contact_text(raw)
+    return bool(text) and any(p in text for p in _PLOT_LISTING_PHRASES)
+
+
 def selected_booking_project(raw: str) -> str:
     text = _contact_text(raw)
     if not text:
@@ -1044,6 +1068,27 @@ class serviceChatbot:
             self._persist_turn(session_id, "user", text)
             return self._start_callback_flow_prefilled(session)
 
+        if wants_plot_listing(text):
+            # "Show available plots" - a deterministic data question. Answer straight
+            # from inventory so it never depends on the LLM being up; only fall through
+            # to the agent loop when inventory is genuinely empty/unavailable.
+            summary = self._inventory_summary_text()
+            if summary:
+                self._persist_turn(session_id, "user", text)
+                reply = (
+                    "Here are the plot sizes currently available:\n\n" + summary +
+                    "\n\nI can filter these by size or budget, or arrange a site visit - just let me know."
+                )
+                self._persist_turn(session_id, "assistant", reply)
+                return {
+                    "session_id": session_id, "reply": reply,
+                    "buttons": [
+                        {"label": "Book a site visit", "value": "Book a site visit", "action": "chatbot_message"},
+                        {"label": "Talk to a sales advisor", "value": "Talk to a sales advisor", "action": "chatbot_message"},
+                        dict(MAIN_MENU_BUTTON),
+                    ],
+                }
+
         if wants_email_contact(text):
             email = extract_email(text)
             self._persist_turn(session_id, "user", text)
@@ -1077,6 +1122,10 @@ class serviceChatbot:
             response["structured_result"] = structured_result
         if structured_result or self._get_loan_payload(session):
             response["buttons"] = self._loan_buttons_for_response(session, structured_result)
+        elif result.get("buttons"):
+            # A degraded/handoff reply from _run_agent_loop carries its own working
+            # buttons so the visitor is never left with just an apology and no route.
+            response["buttons"] = result["buttons"]
         return response
 
     # ---- Callback state machine (deterministic, no LLM) --------------------
@@ -1614,6 +1663,8 @@ class serviceChatbot:
                         "guardrail_passed": result.get("guardrail_passed")}
             if result.get("structured_result"):
                 response["structured_result"] = result["structured_result"]
+            if result.get("buttons"):
+                response["buttons"] = result["buttons"]
             return response
 
         if state.endswith("_password") or credentials.get("password"):
@@ -2044,9 +2095,43 @@ class serviceChatbot:
                 {"reply": loan_fallback["reply"], "llm_provider": None, "guardrail_passed": False},
                 structured_result or loan_fallback.get("structured_result"),
             )
+
+        # We already pulled real inventory / KB data above - serve it directly rather
+        # than the "having a little trouble" line for a question the data can answer
+        # (e.g. "Show available plots"). No LLM needed to read a list back.
+        data_reply = self._deterministic_data_reply(inventory_notes, all_chunks, latest_text)
+        if data_reply:
+            return self._with_structured_result(
+                {"reply": data_reply, "llm_provider": None, "guardrail_passed": False}, structured_result,
+            )
+
         return self._with_structured_result(
-            {"reply": DEGRADED_FALLBACK_REPLY, "llm_provider": None, "guardrail_passed": False}, structured_result,
+            {"reply": DEGRADED_FALLBACK_REPLY, "llm_provider": None, "guardrail_passed": False,
+             "buttons": list(DEGRADED_FALLBACK_BUTTONS)}, structured_result,
         )
+
+    def _deterministic_data_reply(self, inventory_notes: str, all_chunks: list, latest_text: str):
+        """A plain, no-LLM answer built straight from the retrieved data, for when both
+        providers are unreachable. Returns a string or None. Never raises."""
+        try:
+            if inventory_notes and inventory_notes.strip():
+                return (
+                    "Here's what's currently on offer from our inventory:\n\n"
+                    f"{inventory_notes.strip()}\n\n"
+                    "Our team can share exact pricing, layouts and the latest availability. "
+                    "Would you like a callback or a site visit?"
+                )
+            if all_chunks:
+                top = " ".join(c.get("content", "") for c in all_chunks[:2]).strip()
+                if top:
+                    return (
+                        f"{top[:900].strip()}\n\n"
+                        "This is from our project records - our team can confirm the current "
+                        "details. Would you like a callback?"
+                    )
+        except Exception as e:
+            logger.warning("deterministic_data_reply_failed: %s", e)
+        return None
 
     def _loan_math_fallback(self, session):
         """Deterministic EMI computed without the LLM, for the recovery path only.
@@ -2130,23 +2215,30 @@ class serviceChatbot:
             except Exception as e:
                 logger.warning("recovery_kb_search_failed: %s", e)
 
+        return chunks, self._inventory_summary_text()
+
+    def _inventory_summary_text(self) -> str:
+        """A compact "- Project: plot ~X sq.yd, W x L m (N of M available)" dump of the
+        distinct plot sizes on offer. "" when inventory is unavailable/empty. Never raises."""
+        if not self._inventory:
+            return ""
         notes = []
-        if self._inventory:
-            try:
-                for r in self._inventory.distinct_plot_sizes():
-                    area = _as_number(getattr(r, "area_sqyd", None))
-                    width = _as_number(getattr(r, "width_mtr", None))
-                    length = _as_number(getattr(r, "length_mtr", None))
-                    dims = f", {width} x {length} m" if width and length else ""
-                    notes.append(
-                        f"- {getattr(r, 'project_name', None) or 'Project'}: "
-                        f"{getattr(r, 'unit_type', None) or 'plot'} ~{area} sq.yd{dims} "
-                        f"({int(getattr(r, 'available_count', 0) or 0)} of "
-                        f"{int(getattr(r, 'unit_count', 0) or 0)} available)"
-                    )
-            except Exception as e:
-                logger.warning("recovery_inventory_lookup_failed: %s", e)
-        return chunks, "\n".join(notes)
+        try:
+            for r in self._inventory.distinct_plot_sizes():
+                area = _as_number(getattr(r, "area_sqyd", None))
+                width = _as_number(getattr(r, "width_mtr", None))
+                length = _as_number(getattr(r, "length_mtr", None))
+                dims = f", {width} x {length} m" if width and length else ""
+                notes.append(
+                    f"- {getattr(r, 'project_name', None) or 'Project'}: "
+                    f"{getattr(r, 'unit_type', None) or 'plot'} ~{area} sq.yd{dims} "
+                    f"({int(getattr(r, 'available_count', 0) or 0)} of "
+                    f"{int(getattr(r, 'unit_count', 0) or 0)} available)"
+                )
+        except Exception as e:
+            logger.warning("inventory_summary_lookup_failed: %s", e)
+            return ""
+        return "\n".join(notes)
 
     def _apply_guardrail(self, draft_reply: str, retrieved_chunks: list, provider: str):
         try:
@@ -2298,7 +2390,13 @@ class serviceChatbot:
         response = {"session_id": session_id, "reply": result["reply"], "llm_provider": result.get("llm_provider")}
         if result.get("structured_result"):
             response["structured_result"] = result["structured_result"]
-        response["buttons"] = self._loan_buttons_for_response(session, result.get("structured_result"))
+        # On a degraded entry (LLM down) offer the deterministic routes; otherwise the
+        # normal loan action buttons.
+        response["buttons"] = (
+            list(DEGRADED_FALLBACK_BUTTONS) + [dict(MAIN_MENU_BUTTON)]
+            if result.get("reply") == DEGRADED_FALLBACK_REPLY
+            else self._loan_buttons_for_response(session, result.get("structured_result"))
+        )
         return response
 
     def _get_loan_payload(self, session) -> dict:
