@@ -707,6 +707,30 @@ def wants_project_info(raw: str) -> bool:
     return any(kw in text for kw in _PROJECT_INFO_KEYWORDS)
 
 
+# Phrases that unambiguously mean "take me to the home-loan assistant" - the quick
+# suggestion chip ("Home loan / finance enquiry"), the menu button ("Home Loan /
+# EMI Help" / value "menu_loan"), or clear free text. A bare "loan" is NOT enough.
+_HOME_LOAN_PHRASES = (
+    "home loan", "homeloan", "housing loan", "house loan", "home finance",
+    "loan eligibility", "loan eligiblity", "emi help", "calculate emi", "emi calcul",
+    "loan / finance", "loan/finance", "finance enquiry", "finance inquiry",
+    "loan enquiry", "loan inquiry", "menu_loan", "loan_emi", "loan / emi",
+)
+_HOME_LOAN_SUPPORT_WORDS = (
+    "emi", "finance", "eligib", "mortgage", "tenure", "interest rate",
+    "installment", "instalment", "down payment", "affordab",
+)
+
+
+def wants_home_loan(raw: str) -> bool:
+    text = _contact_text(raw)
+    if not text:
+        return False
+    if any(p in text for p in _HOME_LOAN_PHRASES):
+        return True
+    return "loan" in text and any(w in text for w in _HOME_LOAN_SUPPORT_WORDS)
+
+
 def selected_booking_project(raw: str) -> str:
     text = _contact_text(raw)
     if not text:
@@ -864,6 +888,17 @@ class serviceChatbot:
             self._safe_update_session_menu_state(session_id, None, None)
             self._persist_turn(session_id, "user", text)
             return self._start_auth_flow(session, auth_flow)
+
+        # An explicit "home loan / finance / EMI" request jumps straight into the loan
+        # assistant, even from a fresh session mid greeting-capture - the client wants
+        # the loan steps to run without forcing name/phone/email first. Gated so it
+        # fires only on the deliberate intent (wants_home_loan needs "home loan" or
+        # "loan" + a finance word, never a bare "loan") and only when the visitor is
+        # not already inside the loan assistant (no loan_payload yet).
+        if wants_home_loan(text) and not self._get_loan_payload(session):
+            if getattr(session, "menu_state", None):
+                self._safe_update_session_menu_state(session_id, None, None)
+            return self._enter_loan_assistant(session)
 
         if getattr(session, "menu_state", None):
             return self._advance_menu_flow(session, text)

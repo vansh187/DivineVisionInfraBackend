@@ -305,7 +305,8 @@ def test_greeting_does_not_capture_topic_chip_as_name():
     service, persistence, _ = _service()
     service.handle_message("session-1", text="")  # widget-open greeting
 
-    result = service.handle_message("session-1", text="Home loan / finance enquiry")
+    # a non-loan topic chip (loan chips are handled separately - they skip the funnel)
+    result = service.handle_message("session-1", text="Pricing & payment plan")
 
     assert persistence.session.menu_state == "greeting_name"  # not advanced
     assert (persistence.session.menu_payload or {}).get("name") is None
@@ -352,3 +353,44 @@ def test_greeting_accepts_long_multiword_name():
     result = service.handle_message("session-1", text="Sri Venkata Naga Sai Krishna Reddy")
     assert persistence.session.menu_state == "greeting_phone"
     assert persistence.session.menu_payload["name"] == "Sri Venkata Naga Sai Krishna Reddy"
+
+
+from unittest.mock import MagicMock
+from DivineService.service_chatbot import wants_home_loan
+
+
+def test_wants_home_loan_matches_chip_and_menu_labels_but_not_bare_loan():
+    assert wants_home_loan("Home loan / finance enquiry")
+    assert wants_home_loan("Home Loan / EMI Help")
+    assert wants_home_loan("menu_loan")
+    assert wants_home_loan("check my loan eligibility")
+    assert wants_home_loan("i need help with emi and finance for a loan")
+    # not a home-loan intent
+    assert not wants_home_loan("")
+    assert not wants_home_loan("what plots do you have")
+    assert not wants_home_loan("i want a loan")  # bare "loan", no finance word
+    assert not wants_home_loan("what is the payment plan / installment for plots")
+
+
+def test_home_loan_chip_skips_greeting_and_enters_loan_assistant():
+    service, persistence, _ = _service()
+    service._enter_loan_assistant = MagicMock(return_value={"session_id": "session-1", "reply": "Let's check your eligibility."})
+    service.handle_message("session-1", text="")  # widget-open, arms greeting_name
+
+    result = service.handle_message("session-1", text="Home loan / finance enquiry")
+
+    service._enter_loan_assistant.assert_called_once()
+    assert persistence.session.menu_state is None            # greeting funnel cleared
+    assert (persistence.session.menu_payload or {}).get("name") is None
+    assert result["reply"] == "Let's check your eligibility."
+
+
+def test_real_name_at_greeting_does_not_trigger_loan_assistant():
+    service, persistence, _ = _service()
+    service._enter_loan_assistant = MagicMock()
+    service.handle_message("session-1", text="")
+
+    service.handle_message("session-1", text="Priya Sharma")
+
+    service._enter_loan_assistant.assert_not_called()
+    assert persistence.session.menu_state == "greeting_phone"
