@@ -268,3 +268,22 @@ def test_eligibility_tool_subtracts_a_real_existing_emi_from_capacity():
     svc._get_loan_payload = MagicMock(return_value={"monthly_income": 150000, "existing_emi": 25000})
     with_emi = svc._tool_calculate_loan_eligibility(svc._persistence.session, {})
     assert with_emi["available_emi_capacity"] < no_emi["available_emi_capacity"]
+
+
+def test_get_loan_payload_normalises_non_dict_stored_json():
+    svc = _make_service(FakePersistence())
+    for raw in ('[1, 2, 3]', '"just a string"', "42", "not json at all"):
+        svc._persistence.session.loan_payload = raw
+        assert svc._get_loan_payload(svc._persistence.session) == {}
+
+
+def test_main_menu_intercept_survives_state_clear_failures():
+    from unittest.mock import MagicMock
+    svc = _make_service(FakePersistence(menu_state="sales_track"))
+    svc._persistence.update_session_callback_state = MagicMock(side_effect=RuntimeError("x"))
+    svc._persistence.update_session_loan_state = MagicMock(side_effect=RuntimeError("y"))
+
+    result = svc.handle_message(session_id="s1", text="main menu")
+
+    assert "pick an option" in result["reply"].lower()
+    assert len(result["buttons"]) == 5

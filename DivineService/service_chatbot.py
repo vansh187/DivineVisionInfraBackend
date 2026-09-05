@@ -461,17 +461,21 @@ def _make_optionals_nullable(schemas: list) -> list:
     once at import so no individual schema has to remember to do it."""
     patched = []
     for tool in schemas:
-        params = dict(tool.get("parameters") or {})
-        required = set(params.get("required") or [])
-        props = {}
-        for name, spec in (params.get("properties") or {}).items():
-            spec = dict(spec)
-            declared = spec.get("type", "string")
-            if name not in required and isinstance(declared, str) and declared != "null":
-                spec["type"] = [declared, "null"]
-            props[name] = spec
-        params["properties"] = props
-        patched.append({**tool, "parameters": params})
+        try:
+            params = dict(tool.get("parameters") or {})
+            required = set(params.get("required") or [])
+            props = {}
+            for name, spec in (params.get("properties") or {}).items():
+                spec = dict(spec)
+                declared = spec.get("type", "string")
+                if name not in required and isinstance(declared, str) and declared != "null":
+                    spec["type"] = [declared, "null"]
+                props[name] = spec
+            params["properties"] = props
+            patched.append({**tool, "parameters": params})
+        except Exception as e:  # a malformed schema must not break module import
+            logger.warning("tool_schema_nullable_pass_failed name=%s error=%s", tool.get("name"), e)
+            patched.append(tool)
     return patched
 
 
@@ -2304,9 +2308,12 @@ class serviceChatbot:
         if not raw:
             return {}
         try:
-            return json.loads(raw)
+            parsed = json.loads(raw)
         except (TypeError, ValueError):
             return {}
+        # Stored JSON that isn't an object (a list / string / number) would break
+        # every `.get(...)` downstream - normalise to an empty profile instead.
+        return parsed if isinstance(parsed, dict) else {}
 
     def _merge_loan_payload(self, session, updates: dict) -> dict:
         payload = self._get_loan_payload(session)
