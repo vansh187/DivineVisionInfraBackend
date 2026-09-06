@@ -4,6 +4,7 @@ plus fixed company / bank details. fpdf2 core font -> amounts use "Rs." (no
 rupee glyph); never raises out of the caller's control flow beyond ValueError.
 """
 import io
+import logging
 import os
 from datetime import date, datetime
 
@@ -11,6 +12,8 @@ from fpdf import FPDF
 
 from DivineService.service_payment_schedule import build_payment_schedule
 from DivineService.loan_report_data import amount_in_words_indian
+
+logger = logging.getLogger(__name__)
 
 COMPANY = {
     "name": os.getenv("DIVINE_COMPANY_NAME", "KCG Resorts Pvt. Ltd."),
@@ -108,7 +111,34 @@ class _Letter(FPDF):
         self.cell(0, 4, _latin(COMPANY["address_line"]), align="C")
 
 
+def _fallback_pdf(customer_id: str) -> bytes:
+    pdf = FPDF(format="A4")
+    pdf.add_page()
+    pdf.set_font("Helvetica", "B", 14)
+    pdf.cell(0, 10, "DEMAND LETTER", align="C", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(6)
+    pdf.set_font("Helvetica", "", 10)
+    pdf.multi_cell(0, 6, _latin(
+        f"Customer ID: {customer_id}\n\nThis demand letter could not be generated from the "
+        f"booking record right now. Please contact {COMPANY['email']} or "
+        f"{COMPANY['mobiles']} and our team will share it."
+    ))
+    return bytes(pdf.output())
+
+
 def generate_demand_letter_pdf(form_data: dict, customer_id: str, issued_on=None) -> bytes:
+    """Never raises - a render failure yields a short fallback notice PDF instead."""
+    try:
+        return _render_demand_letter_pdf(form_data, customer_id, issued_on)
+    except Exception as e:
+        logger.warning("demand_letter_render_failed customer_id=%s error=%s", customer_id, e)
+        try:
+            return _fallback_pdf(customer_id)
+        except Exception:  # pragma: no cover - last resort
+            return b"%PDF-1.4\n%%EOF\n"
+
+
+def _render_demand_letter_pdf(form_data: dict, customer_id: str, issued_on=None) -> bytes:
     form = form_data if isinstance(form_data, dict) else {}
     issued = issued_on or date.today()
     issued_str = issued.strftime("%d %b %Y") if isinstance(issued, (date, datetime)) else _s(issued)
@@ -125,7 +155,8 @@ def generate_demand_letter_pdf(form_data: dict, customer_id: str, issued_on=None
     total = _num(_first(form, _TOTAL_KEYS))
     received = _num(_first(form, _RECEIVED_KEYS))
     rows = _first(form, _SCHEDULE_KEYS)
-    if not (isinstance(rows, list) and rows):
+    rows = [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
+    if not rows:
         plan = build_payment_schedule(total, received or 0, booking_date)
         rows = plan["rows"]
         total = plan["total_receivable"] if total is None else total

@@ -13,9 +13,17 @@ the plan, independent of how much was paid.
 
 Pure functions - no DB, no I/O, never raises.
 """
+import logging
 from datetime import date, datetime, timedelta
 
 from DivineService.loan_report_data import amount_in_words_indian
+
+logger = logging.getLogger(__name__)
+
+_EMPTY_PLAN = {
+    "total_receivable": None, "total_received": None, "total_outstanding": None,
+    "total_outstanding_words": None, "booking_date": None, "rows": [],
+}
 
 # (label, days-after-booking, percent-of-total). Must add up to 100.
 DEFAULT_MILESTONES = (
@@ -53,6 +61,15 @@ def _as_date(value):
 
 def build_payment_schedule(total_amount, booking_amount, booking_date=None,
                            milestones=DEFAULT_MILESTONES):
+    """Never raises - any failure returns the empty-plan shape."""
+    try:
+        return _build_payment_schedule(total_amount, booking_amount, booking_date, milestones)
+    except Exception as e:  # pragma: no cover - defensive
+        logger.warning("build_payment_schedule_failed: %s", e)
+        return dict(_EMPTY_PLAN)
+
+
+def _build_payment_schedule(total_amount, booking_amount, booking_date, milestones):
     """Returns a dict:
       {
         total_receivable, total_received, total_outstanding,
@@ -69,27 +86,30 @@ def build_payment_schedule(total_amount, booking_amount, booking_date=None,
     total = _num(total_amount)
     paid = max(0.0, _num(booking_amount) or 0.0)
     if total is None or total <= 0:
-        return {
-            "total_receivable": None, "total_received": None, "total_outstanding": None,
-            "total_outstanding_words": None, "booking_date": None, "rows": [],
-        }
+        return dict(_EMPTY_PLAN)
 
     total = round(total)
     paid = round(min(paid, total))
     start = _as_date(booking_date) or date.today()
-    plan = list(milestones) or [("Balance", 90, 100)]
+    plan = [m for m in (milestones or ()) if isinstance(m, (list, tuple)) and len(m) == 3] \
+        or [("Balance", 90, 100)]
 
     rows = []
     running = 0
     for i, (label, days, pct) in enumerate(plan):
-        amt = total - running if i == len(plan) - 1 else round(total * pct / 100)
+        try:
+            days = int(days)
+        except (TypeError, ValueError):
+            days = 0
+        pct_num = _num(pct) or 0.0
+        amt = total - running if i == len(plan) - 1 else round(total * pct_num / 100)
         running += amt
         rows.append({
             "label": label,
             "due_date": (start + timedelta(days=days)).isoformat(),
             "due_days": days,
             "amount": int(amt),
-            "percent": pct,
+            "percent": pct if isinstance(pct, (int, float)) else pct_num,
             "status": ("paid" if (days == 0 and paid >= amt) else "due"),
         })
 
