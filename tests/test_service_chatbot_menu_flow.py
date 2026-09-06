@@ -517,7 +517,7 @@ def test_show_available_plots_answers_from_inventory_without_llm():
     vals = [b["value"] for b in result["buttons"]]
     assert "book_plots" in vals and "main_menu" in vals
     bp = next(b for b in result["buttons"] if b["value"] == "book_plots")
-    assert bp["action"] == "open_url" and bp["url"]
+    assert bp["action"] == "navigate" and bp["url"] and bp["target"] == "_self"
 
 
 def test_show_available_plots_falls_back_to_llm_when_inventory_empty():
@@ -542,3 +542,17 @@ def test_booking_project_selection_offers_both_login_types():
     vals = {b["value"] for b in result["buttons"]}
     assert vals == {"login_customer", "login_broker"}
     assert "customer or a channel partner" in result["reply"].lower()
+
+
+def test_book_plot_url_default_is_customer_plots_and_same_tab():
+    import importlib
+    from DivineService import service_chatbot as sc
+    assert sc.BOOK_PLOT_URL == "https://www.divinevisioninfra.com/customer/plots"
+    service, persistence, _ = _service()
+    service._available_plot_options = MagicMock(return_value=list(_PLOT_OPTS))
+    service.handle_message("session-1", text="")
+    result = service.handle_message("session-1", text="Show available plots")
+    bp = next(b for b in result["buttons"] if b["value"] == "book_plots")
+    assert bp["url"].startswith("https://www.divinevisioninfra.com/customer/plots")
+    assert bp["target"] == "_self"           # same tab, never _blank
+    assert result["structured_result"]["data"]["book_url"] == sc.BOOK_PLOT_URL

@@ -301,6 +301,7 @@ class ChatbotButtonDTO(BaseModel):
     action: str
     url: Optional[str] = None
     filename: Optional[str] = None
+    target: Optional[str] = None  # e.g. "_self" - navigate in the same tab, never "_blank"
 
 
 class ChatMessageResponseDTO(BaseModel):
