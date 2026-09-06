@@ -1138,20 +1138,15 @@ class serviceChatbot:
                     for i, o in enumerate(options, 1)
                 )
                 reply = (
-                    "Here are the plot sizes currently available. Tap any size to start a "
-                    "booking:\n\n" + lines +
-                    "\n\nYou'll be asked to log in as a customer or channel partner before "
-                    "confirming a booking."
+                    "Here are the plot sizes currently available:\n\n" + lines +
+                    "\n\nTap Browse & Book Plots to view them and book. You'll be asked to "
+                    "log in as a customer or channel partner before confirming a booking."
                 )
                 self._persist_turn(session_id, "assistant", reply)
+                # No per-plot structured list - just the single Browse & Book Plots CTA,
+                # which runs the login gate then routes to the plots page.
                 return {
                     "session_id": session_id, "reply": reply,
-                    # Frontend renders each plot as a clickable row -> book_url; that page
-                    # checks auth and shows the login buttons if the visitor isn't signed in.
-                    "structured_result": {
-                        "type": "plot_list",
-                        "data": {"book_url": BOOK_PLOT_URL, "plots": options},
-                    },
                     "buttons": [
                         {"label": "Browse & Book Plots", "value": "browse_plots", "action": "chatbot_message"},
                         {"label": "Book a site visit", "value": "Book a site visit", "action": "chatbot_message"},

@@ -509,13 +509,11 @@ def test_show_available_plots_answers_from_inventory_without_llm():
     assert persistence.session.menu_state is None
     assert "113 sq yd" in result["reply"]
     assert "log in as a customer or channel partner" in result["reply"].lower()
-    # structured data drives clickable rows on the frontend
-    sr = result["structured_result"]
-    assert sr["type"] == "plot_list"
-    assert sr["data"]["plots"][0]["book_url"].endswith("size=113")
-    assert sr["data"]["book_url"]
+    # no per-plot list/buttons - just the single Browse & Book Plots CTA
+    assert "structured_result" not in result
     vals = [b["value"] for b in result["buttons"]]
     assert "browse_plots" in vals and "main_menu" in vals
+    assert not any(b["label"].lower().startswith("view plot") for b in result["buttons"])
     bp = next(b for b in result["buttons"] if b["value"] == "browse_plots")
     assert bp["action"] == "chatbot_message"  # runs the in-chat login gate first
 
@@ -547,11 +545,6 @@ def test_booking_project_selection_offers_both_login_types():
 def test_book_plot_url_default_is_customer_plots():
     from DivineService import service_chatbot as sc
     assert sc.BOOK_PLOT_URL == "https://www.divinevisioninfra.com/customer/plots"
-    service, persistence, _ = _service()
-    service._available_plot_options = MagicMock(return_value=list(_PLOT_OPTS))
-    service.handle_message("session-1", text="")
-    result = service.handle_message("session-1", text="Show available plots")
-    assert result["structured_result"]["data"]["book_url"] == sc.BOOK_PLOT_URL
 
 
 def test_browse_plots_runs_login_gate_then_redirects_same_tab():
