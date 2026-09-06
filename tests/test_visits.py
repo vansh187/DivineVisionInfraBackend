@@ -139,6 +139,85 @@ def test_cancel_visit_happy_path_removes_it_from_list():
     assert _shared_visit_id not in ids
 
 
+# ---------- PATCH /visits/{id} : mark completed (per-id path, own rate-limit bucket) ----------
+
+_complete_visit_id = None
+
+
+def test_patch_visit_requires_auth():
+    r = client.patch("/visits/whatever", json={"status": "completed", "notes": ""})
+    assert r.status_code == 401
+
+
+def test_patch_visit_rejects_customer_caller():
+    r = client.patch("/visits/whatever", json={"status": "completed", "notes": ""},
+                     headers=_auth_headers(_CUSTOMER_TOKEN))
+    assert r.status_code == 403
+    assert r.json()["detail"] == "visits_broker_only"
+
+
+def test_patch_visit_not_found():
+    r = client.patch("/visits/does-not-exist", json={"status": "completed", "notes": "x"},
+                     headers=_auth_headers())
+    assert r.status_code == 404
+
+
+def test_patch_visit_rejects_malformed_body():
+    r = client.patch("/visits/does-not-exist", json={"status": "cancelled"}, headers=_auth_headers())
+    assert r.status_code == 422
+
+
+def _broker_id_from_token(token):
+    import jwt
+    return jwt.decode(token, os.environ["JWT_SECRET_KEY"], algorithms=["HS256"])["sub"]
+
+
+def test_patch_visit_rejects_other_brokers_visit():
+    # Insert a scheduled visit straight through persistence so this doesn't spend a
+    # /visits POST from the shared rate-limit budget.
+    global _complete_visit_id
+    import uuid
+    from datetime import date as _date
+    from Divinepersistence import persistenceVisit
+    _complete_visit_id = str(uuid.uuid4())
+    persistenceVisit().create_visit(
+        id=_complete_visit_id, broker_id=_broker_id_from_token(_BROKER_TOKEN),
+        customer_name="Ravi Kumar", customer_contact="9998887776",
+        visit_date=_date(2026, 10, 1), visit_time="09:00", notes="pre-meeting",
+        status="scheduled",
+    )
+
+    r = client.patch(f"/visits/{_complete_visit_id}", json={"status": "completed", "notes": "no"},
+                     headers=_auth_headers(_OTHER_BROKER_TOKEN))
+    assert r.status_code == 403
+    assert r.json()["detail"] == "visit_owner_only"
+
+
+def test_patch_visit_completes_and_overwrites_notes():
+    r = client.patch(f"/visits/{_complete_visit_id}",
+                     json={"status": "completed", "notes": "Client to confirm by Friday"},
+                     headers=_auth_headers())
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["id"] == _complete_visit_id
+    assert data["status"] == "completed"
+    assert data["notes"] == "Client to confirm by Friday"
+
+
+def test_patch_visit_already_completed_returns_409():
+    r = client.patch(f"/visits/{_complete_visit_id}", json={"status": "completed", "notes": ""},
+                     headers=_auth_headers())
+    assert r.status_code == 409
+    assert r.json()["detail"] == "visit_not_scheduled"
+
+
+def test_completed_visit_moves_to_history():
+    hist = client.get("/visits/history", headers=_auth_headers())
+    assert hist.status_code == 200
+    entry = next((v for v in hist.json() if v["id"] == _complete_visit_id), None)
+    assert entry is not None and entry["status"] == "completed"
+
+
 def test_visit_history_requires_auth():
     r = client.get("/visits/history")
     assert r.status_code == 401

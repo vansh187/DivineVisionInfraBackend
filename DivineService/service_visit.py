@@ -58,3 +58,17 @@ class serviceVisit:
         if record.broker_id != requester_id:
             raise PermissionError("forbidden")
         return self._persistence.update_status(visit_id, "cancelled")
+
+    def complete_visit(self, visit_id: str, requester_id: str, notes: str):
+        """Close out a scheduled visit with an outcome note. Only the owning broker,
+        only while still 'scheduled'. Raises ValueError("not_found") -> 404,
+        PermissionError -> 403, ValueError("visit_not_scheduled") -> 409."""
+        record = self._persistence.get_by_id(visit_id)
+        if not record:
+            raise ValueError("not_found")
+        if record.broker_id != requester_id:
+            raise PermissionError("forbidden")
+        if record.status != "scheduled":
+            raise ValueError("visit_not_scheduled")
+        clean_notes = (notes or "").strip()
+        return self._persistence.complete_visit(visit_id, clean_notes or None)

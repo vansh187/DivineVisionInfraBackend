@@ -6,13 +6,14 @@ create_visit: |
 get_by_id: |
   SELECT * FROM divine_site_visits WHERE id = :id LIMIT 1;
 list_by_broker: |
-  SELECT * FROM divine_site_visits WHERE broker_id = :broker_id AND status != 'cancelled'
+  SELECT * FROM divine_site_visits WHERE broker_id = :broker_id AND status = 'scheduled'
   ORDER BY visit_date ASC, visit_time ASC;
 list_history_by_broker: |
   SELECT * FROM divine_site_visits
   WHERE broker_id = :broker_id
     AND (
       status = 'cancelled'
+      OR status = 'completed'
       OR visit_date < :today
       OR (visit_date = :today AND visit_time < :now_time)
     )
@@ -23,4 +24,8 @@ list_history_by_broker: |
     visit_time DESC;
 update_status: |
   UPDATE divine_site_visits SET status = :status, last_updated_date = :last_updated_date
+  WHERE id = :id RETURNING *;
+complete_visit: |
+  UPDATE divine_site_visits
+  SET status = 'completed', notes = :notes, last_updated_date = :last_updated_date
   WHERE id = :id RETURNING *;
