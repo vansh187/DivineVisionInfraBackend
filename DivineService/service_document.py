@@ -12,8 +12,18 @@ from fpdf.enums import XPos, YPos
 from Divinepersistence import persistenceDocument, persistencePayment, persistenceCustomer
 from DivineDTO.models import DocumentGenerateRequestDTO
 from DivineService.service_email import serviceEmail, dispatch_booking_confirmation_email
+from DivineService.service_payment_schedule import build_payment_schedule
+from DivineService.loan_utils import normalize_indian_amount
 
 logger = logging.getLogger(__name__)
+
+# form_data key spellings for the TOTAL plot amount (aligned with serviceCustomerProfile).
+_TOTAL_AMOUNT_KEYS = (
+    "total_amount", "totalAmount", "total_consideration", "totalConsideration",
+    "total_price", "totalPrice", "consideration", "plot_total_amount", "plotTotalAmount",
+    "sale_value", "saleValue",
+)
+_BOOKING_DATE_KEYS = ("booking_date", "bookingDate", "date")
 
 DEFAULT_SIGNED_URL_EXPIRY_SECONDS = 3600
 MAX_PHOTO_UPLOAD_BYTES = 8 * 1024 * 1024  # 8 MB, matches the KYC upload limit
@@ -426,6 +436,29 @@ class serviceDocument:
         if razorpay_payment_id and razorpay_payment_id != payment.razorpay_payment_id:
             raise ValueError("payment_mismatch")
 
+        # The TOTAL plot amount is now required so a full payment schedule can be
+        # derived (the booking amount alone -> blank demand/allotment letters).
+        total_amount = normalize_indian_amount(_first_present(form_data, _TOTAL_AMOUNT_KEYS))
+        if not total_amount or total_amount <= 0:
+            raise ValueError("total_amount_required")
+        booking_amount = float(payment.amount or 0)   # what was actually paid now
+        if booking_amount > total_amount:
+            raise ValueError("booking_amount_exceeds_total")
+        plan = build_payment_schedule(
+            total_amount=total_amount,
+            booking_amount=booking_amount,
+            booking_date=_first_present(form_data, _BOOKING_DATE_KEYS),
+        )
+        # Persist the derived plan back into form_data under canonical keys so the
+        # stored booking application is self-contained (demand / allotment letters
+        # and GET /customer/profile read straight from it).
+        form_data["total_consideration"] = plan["total_receivable"]
+        form_data["amount_received"] = plan["total_received"]
+        form_data["total_outstanding"] = plan["total_outstanding"]
+        form_data["total_outstanding_words"] = plan["total_outstanding_words"]
+        form_data["booking_date"] = plan["booking_date"]
+        form_data["payment_schedule"] = plan["rows"]
+
         document_id = str(uuid.uuid4())
         safe_type = _safe_path_segment(document_type)
         object_path = f"{owner_id}/{safe_type}_{document_id}.pdf"
@@ -459,7 +492,7 @@ class serviceDocument:
         self._notify_booking_confirmation(owner_id, owner_role, form_data, payment.amount, payment.currency)
 
         signed_url = self._sign_url(object_path, bucket=self._booking_forms_bucket)
-        return doc, signed_url, DEFAULT_SIGNED_URL_EXPIRY_SECONDS
+        return doc, signed_url, DEFAULT_SIGNED_URL_EXPIRY_SECONDS, plan
 
     def _notify_booking_confirmation(self, owner_id: str, owner_role: str, form_data: dict,
                                      amount=None, currency: str = "INR") -> None:

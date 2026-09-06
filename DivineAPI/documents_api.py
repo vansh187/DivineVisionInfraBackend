@@ -181,7 +181,7 @@ def upload_project_booking_application(
     # FastAPI threadpools sync routes automatically, so this doesn't block the event loop.
     try:
         file_bytes = file.file.read()
-        doc, signed_url, expires_in = _doc_service.upload_booking_application(
+        doc, signed_url, expires_in, payment_plan = _doc_service.upload_booking_application(
             file_bytes,
             file.content_type,
             document_type,
@@ -202,6 +202,7 @@ def upload_project_booking_application(
             created_date=doc.created_date,
             signed_url=signed_url,
             signed_url_expires_in=expires_in,
+            payment_plan=payment_plan,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

@@ -234,6 +234,12 @@ class serviceCustomerProfile:
             )
             booking.amount_received = amount_received or form_amount
             booking.payment_schedule = self._build_payment_schedule(form)
+            if not booking.payment_schedule and booking.total_consideration:
+                # Booking stored before schedules were derived server-side - compute
+                # it now so the demand / allotment letters still have amounts.
+                booking.payment_schedule = self._derive_payment_schedule(
+                    booking.total_consideration, booking.amount_received, booking.booking_date
+                )
         except Exception:
             self._logger.warning(
                 "profile_booking_build_failed customer_id=%s", customer_id, exc_info=True
@@ -297,6 +303,22 @@ class serviceCustomerProfile:
             return rows or None
         except Exception:
             self._logger.warning("profile_payment_schedule_section_failed", exc_info=True)
+            return None
+
+    def _derive_payment_schedule(self, total, received, booking_date):
+        try:
+            from DivineService.service_payment_schedule import build_payment_schedule
+            plan = build_payment_schedule(total, received or 0, booking_date)
+            rows = [
+                PaymentScheduleRowDTO(
+                    label=r.get("label"), percent=r.get("percent"), due_days=r.get("due_days"),
+                    due_date=r.get("due_date"), amount=r.get("amount"), status=r.get("status"),
+                )
+                for r in (plan.get("rows") or [])
+            ]
+            return rows or None
+        except Exception:
+            self._logger.warning("profile_payment_schedule_derive_failed", exc_info=True)
             return None
 
     # -- small value helpers ---------------------------------------------
