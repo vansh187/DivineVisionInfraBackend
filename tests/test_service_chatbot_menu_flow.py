@@ -515,9 +515,9 @@ def test_show_available_plots_answers_from_inventory_without_llm():
     assert sr["data"]["plots"][0]["book_url"].endswith("size=113")
     assert sr["data"]["book_url"]
     vals = [b["value"] for b in result["buttons"]]
-    assert "book_plots" in vals and "main_menu" in vals
-    bp = next(b for b in result["buttons"] if b["value"] == "book_plots")
-    assert bp["action"] == "navigate" and bp["url"] and bp["target"] == "_self"
+    assert "browse_plots" in vals and "main_menu" in vals
+    bp = next(b for b in result["buttons"] if b["value"] == "browse_plots")
+    assert bp["action"] == "chatbot_message"  # runs the in-chat login gate first
 
 
 def test_show_available_plots_falls_back_to_llm_when_inventory_empty():
@@ -544,15 +544,50 @@ def test_booking_project_selection_offers_both_login_types():
     assert "customer or a channel partner" in result["reply"].lower()
 
 
-def test_book_plot_url_default_is_customer_plots_and_same_tab():
-    import importlib
+def test_book_plot_url_default_is_customer_plots():
     from DivineService import service_chatbot as sc
     assert sc.BOOK_PLOT_URL == "https://www.divinevisioninfra.com/customer/plots"
     service, persistence, _ = _service()
     service._available_plot_options = MagicMock(return_value=list(_PLOT_OPTS))
     service.handle_message("session-1", text="")
     result = service.handle_message("session-1", text="Show available plots")
-    bp = next(b for b in result["buttons"] if b["value"] == "book_plots")
-    assert bp["url"].startswith("https://www.divinevisioninfra.com/customer/plots")
-    assert bp["target"] == "_self"           # same tab, never _blank
     assert result["structured_result"]["data"]["book_url"] == sc.BOOK_PLOT_URL
+
+
+def test_browse_plots_runs_login_gate_then_redirects_same_tab():
+    from DivineService import service_chatbot as sc
+    service, persistence, _ = _service()
+    fake_auth = MagicMock()
+    fake_auth.login_by_email.return_value = "jwt-token-123"
+    service._auth_service = MagicMock(return_value=fake_auth)
+    service.handle_message("session-1", text="")            # greeting armed
+
+    # 1. tap "Browse & Book Plots" -> asks how to log in
+    r1 = service.handle_message("session-1", text="browse_plots")
+    vals = {b["value"] for b in r1["buttons"]}
+    assert {"login_customer", "login_broker", "plots_already_logged_in"} <= vals
+    assert persistence.session.auth_state == "choose_login_for_plots"
+
+    # 2. choose customer login -> asks email
+    r2 = service.handle_message("session-1", text="login_customer")
+    assert "email" in r2["reply"].lower()
+
+    # 3. email -> 4. password -> logged in + redirect to the plots page (same tab)
+    service.handle_message("session-1", text="a@b.com")
+    r4 = service.handle_message("session-1", text="secretpw")
+    assert r4["auth_token"] == "jwt-token-123"
+    assert r4["auth_role"] == "customer"
+    assert r4["redirect_url"] == sc.BOOK_PLOT_URL
+    assert r4["redirect_target"] == "_self"
+
+
+def test_plots_already_logged_in_button_redirects_without_login():
+    from DivineService import service_chatbot as sc
+    service, persistence, _ = _service()
+    service.handle_message("session-1", text="")
+    service.handle_message("session-1", text="browse_plots")
+    r = service.handle_message("session-1", text="plots_already_logged_in")
+    assert r["redirect_url"] == sc.BOOK_PLOT_URL
+    assert r["redirect_target"] == "_self"
+    assert "auth_token" not in r
+    assert persistence.session.auth_state is None

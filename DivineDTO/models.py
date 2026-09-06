@@ -315,6 +315,10 @@ class ChatMessageResponseDTO(BaseModel):
     guardrail_passed: Optional[bool] = None
     llm_provider: Optional[str] = None
     structured_result: Optional[Dict[str, Any]] = None
+    # Client-side route to navigate to (same tab). Set e.g. after a successful
+    # in-chat login that was started from "Browse & Book Plots".
+    redirect_url: Optional[str] = None
+    redirect_target: Optional[str] = None  # "_self" - never open a new tab
 
 
 class CallbackRequestOutDTO(BaseModel):

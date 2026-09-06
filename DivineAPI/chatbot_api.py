@@ -64,6 +64,7 @@ def send_message(dto: ChatMessageRequestDTO):
             auth_role=result.get("auth_role"),
             guardrail_passed=result.get("guardrail_passed"), llm_provider=result.get("llm_provider"),
             structured_result=result.get("structured_result"),
+            redirect_url=result.get("redirect_url"), redirect_target=result.get("redirect_target"),
         )
     except HTTPException:
         raise
