@@ -837,6 +837,15 @@ def wants_plot_listing(raw: str) -> bool:
     return bool(text) and any(p in text for p in _PLOT_LISTING_PHRASES)
 
 
+_BROWSE_PLOTS_PHRASES = ("browse_plots", "browse plots", "browse and book plots",
+                        "browse & book plots", "book_plots")
+
+
+def wants_browse_plots(raw: str) -> bool:
+    text = _contact_text(raw)
+    return bool(text) and any(p in text for p in _BROWSE_PLOTS_PHRASES)
+
+
 def selected_booking_project(raw: str) -> str:
     text = _contact_text(raw)
     if not text:
@@ -957,6 +966,17 @@ class serviceChatbot:
 
         text = (text or "").strip()
 
+        # "I'm already logged in" from the Browse & Book Plots gate - bypass the
+        # in-chat login and just route to the plots page. Checked before the
+        # auth_state router so the pending "choose_login_for_plots" state is escaped.
+        if text.strip().lower() in ("plots_already_logged_in", "i'm already logged in", "im already logged in"):
+            self._safe_update_session_auth_state(session_id, None, None)
+            self._persist_turn(session_id, "user", text)
+            reply = "Great - taking you to the plots page."
+            self._persist_turn(session_id, "assistant", reply)
+            return {"session_id": session_id, "reply": reply,
+                    "redirect_url": BOOK_PLOT_URL, "redirect_target": "_self"}
+
         auth_flow = selected_auth_flow(text)
         if auth_flow and getattr(session, "auth_state", None):
             self._persist_turn(session_id, "user", text)
@@ -1070,6 +1090,26 @@ class serviceChatbot:
             self._persist_turn(session_id, "assistant", reply)
             return {"session_id": session_id, "reply": reply, "buttons": list(BOOKING_LOGIN_BUTTONS)}
 
+        if wants_browse_plots(text):
+            # "Browse & Book Plots" - the plots page needs an authenticated account.
+            # Ask which login, remembering to route to the plots page once logged in.
+            self._persist_turn(session_id, "user", text)
+            self._safe_update_session_auth_state(
+                session_id, "choose_login_for_plots", {"redirect": BOOK_PLOT_URL})
+            reply = (
+                "To browse and book plots you'll need to be logged in. How would you like "
+                "to continue?"
+            )
+            self._persist_turn(session_id, "assistant", reply)
+            return {
+                "session_id": session_id, "reply": reply,
+                "buttons": [
+                    CUSTOMER_LOGIN_BUTTON, CHANNEL_PARTNER_LOGIN_BUTTON,
+                    {"label": "I'm already logged in", "value": "plots_already_logged_in",
+                     "action": "chatbot_message"},
+                ],
+            }
+
         if wants_plot_booking(text):
             reply = "Sure, which project would you like to book the plot in?"
             self._persist_turn(session_id, "user", text)
@@ -1098,23 +1138,17 @@ class serviceChatbot:
                     for i, o in enumerate(options, 1)
                 )
                 reply = (
-                    "Here are the plot sizes currently available. Tap any size to start a "
-                    "booking:\n\n" + lines +
-                    "\n\nYou'll be asked to log in as a customer or channel partner before "
-                    "confirming a booking."
+                    "Here are the plot sizes currently available:\n\n" + lines +
+                    "\n\nTap Browse & Book Plots to view them and book. You'll be asked to "
+                    "log in as a customer or channel partner before confirming a booking."
                 )
                 self._persist_turn(session_id, "assistant", reply)
+                # No per-plot structured list - just the single Browse & Book Plots CTA,
+                # which runs the login gate then routes to the plots page.
                 return {
                     "session_id": session_id, "reply": reply,
-                    # Frontend renders each plot as a clickable row -> book_url; that page
-                    # checks auth and shows the login buttons if the visitor isn't signed in.
-                    "structured_result": {
-                        "type": "plot_list",
-                        "data": {"book_url": BOOK_PLOT_URL, "plots": options},
-                    },
                     "buttons": [
-                        {"label": "Browse & Book Plots", "value": "book_plots",
-                         "action": "navigate", "url": BOOK_PLOT_URL, "target": "_self"},
+                        {"label": "Browse & Book Plots", "value": "browse_plots", "action": "chatbot_message"},
                         {"label": "Book a site visit", "value": "Book a site visit", "action": "chatbot_message"},
                         {"label": "Talk to a sales advisor", "value": "Talk to a sales advisor", "action": "chatbot_message"},
                         dict(MAIN_MENU_BUTTON),
@@ -1651,7 +1685,12 @@ class serviceChatbot:
             reply = f"Sure, let's create your {role} account. What is your first name?"
             self._persist_turn(session_id, "assistant", reply)
             return {"session_id": session_id, "reply": reply}
-        if not self._safe_update_session_auth_state(session_id, f"login_{role}_email", {"mode": mode, "role": role}):
+        login_payload = {"mode": mode, "role": role}
+        prior = self._auth_payload(session)
+        if isinstance(prior, dict) and prior.get("redirect"):
+            # carried from "Browse & Book Plots": route there after a successful login
+            login_payload["redirect"] = prior["redirect"]
+        if not self._safe_update_session_auth_state(session_id, f"login_{role}_email", login_payload):
             reply = "Sorry, I'm having trouble starting login right now. Please try again in a moment."
             self._persist_turn(session_id, "assistant", reply)
             return {"session_id": session_id, "reply": reply}
@@ -1927,9 +1966,17 @@ class serviceChatbot:
         if self._safe_update_session_auth_state(session_id, None, None) is None:
             if self._safe_update_session_auth_state(session_id, None, None) is None:
                 logger.error("chatbot_auth_state_clear_failed_after_login session_id=%s", session_id)
-        reply = f"You are logged in as {role}."
+        redirect = payload.get("redirect") if isinstance(payload, dict) else None
+        reply = (
+            f"You're logged in as {role}. Taking you to the plots page now."
+            if redirect else f"You are logged in as {role}."
+        )
         self._persist_turn(session_id, "assistant", reply)
-        return {"session_id": session_id, "reply": reply, "auth_token": token, "auth_role": role}
+        resp = {"session_id": session_id, "reply": reply, "auth_token": token, "auth_role": role}
+        if redirect:
+            resp["redirect_url"] = redirect
+            resp["redirect_target"] = "_self"
+        return resp
 
     def _as_attempt_count(self, raw) -> int:
         try:
