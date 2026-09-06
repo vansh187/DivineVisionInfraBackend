@@ -494,7 +494,7 @@ def _booking_service(payment=None, customer=None, email_enabled=False):
 
 def _paid_payment(**overrides):
     defaults = dict(
-        id="pay1", owner_id="C00001", status="paid",
+        id="pay1", owner_id="C00001", status="paid", amount=2000000, currency="INR",
         razorpay_order_id="order_Rzp123", razorpay_payment_id="pay_Rzp456",
     )
     defaults.update(overrides)
@@ -623,7 +623,8 @@ def test_upload_booking_application_succeeds_for_cash_payment_when_no_razorpay_i
     persistence.create_document.return_value = MagicMock(id="doc1")
 
     svc.upload_booking_application(
-        _PDF_BYTES, "application/pdf", "project_booking_application", "proj1", "pay1", None, None, "{}",
+        _PDF_BYTES, "application/pdf", "project_booking_application", "proj1", "pay1", None, None,
+        '{"total_amount": 5000000}',
         owner_id="C00001", owner_role="customer",
     )
 
@@ -641,9 +642,9 @@ def test_upload_booking_application_happy_path_uses_booking_forms_bucket(mock_up
         document_type="project_booking_application", status="generated", created_date=None,
     )
 
-    doc, signed_url, expires_in = svc.upload_booking_application(
+    doc, signed_url, expires_in, plan = svc.upload_booking_application(
         _PDF_BYTES, "application/pdf", "project_booking_application", "ops-divine-greens", "pay1",
-        "order_Rzp123", "pay_Rzp456", '{"applicantName": "Jane"}',
+        "order_Rzp123", "pay_Rzp456", '{"applicantName": "Jane", "total_amount": 5000000}',
         owner_id="C00001", owner_role="customer",
     )
 
@@ -662,8 +663,18 @@ def test_upload_booking_application_happy_path_uses_booking_forms_bucket(mock_up
     # only used to verify the caller's claim - see the mismatch tests below).
     assert kwargs["razorpay_order_id"] == "order_Rzp123"
     assert kwargs["razorpay_payment_id"] == "pay_Rzp456"
-    assert kwargs["form_data"] == {"applicantName": "Jane"}
+    fd = kwargs["form_data"]
+    assert fd["applicantName"] == "Jane"
+    # the derived payment schedule is merged into form_data
+    assert fd["total_consideration"] == 5000000
+    assert fd["amount_received"] == 2000000            # booking amount = payment.amount
+    assert fd["total_outstanding"] == 3000000
+    assert isinstance(fd["payment_schedule"], list) and len(fd["payment_schedule"]) == 5
+    assert fd["payment_schedule"][0]["status"] == "paid"
+    assert sum(r["amount"] for r in fd["payment_schedule"]) == 5000000
     assert kwargs["storage_bucket"] == "Booking_Forms"
+    # the endpoint also returns the plan
+    assert plan["total_outstanding_words"]
 
 
 @patch.object(serviceDocument, "_sign_url")
@@ -675,7 +686,8 @@ def test_upload_booking_application_cleans_up_storage_when_persistence_fails(moc
 
     try:
         svc.upload_booking_application(
-            _PDF_BYTES, "application/pdf", "project_booking_application", "proj1", "pay1", None, None, "{}",
+            _PDF_BYTES, "application/pdf", "project_booking_application", "proj1", "pay1", None, None,
+            '{"total_amount": 5000000}',
             owner_id="C00001", owner_role="customer",
         )
         assert False, "expected the persistence error to propagate"
@@ -702,7 +714,8 @@ def test_booking_upload_sends_confirmation_email_to_customer(mock_upload, mock_s
 
     svc.upload_booking_application(
         _PDF_BYTES, "application/pdf", "project_booking_application", "ops-divine-greens", "pay1",
-        "order_Rzp123", "pay_Rzp456", '{"project_name": "Divine Greens", "plot_number": "B-14"}',
+        "order_Rzp123", "pay_Rzp456",
+        '{"project_name": "Divine Greens", "plot_number": "B-14", "total_amount": 5000000}',
         owner_id="C00001", owner_role="customer",
     )
 
@@ -728,8 +741,8 @@ def test_booking_upload_skips_email_for_broker_owner(mock_upload, mock_sign):
     persistence.create_document.return_value = MagicMock(id="doc1")
 
     svc.upload_booking_application(
-        _PDF_BYTES, "application/pdf", "project_booking_application", "proj1", "pay1", None, None, "{}",
-        owner_id="B00001", owner_role="broker",
+        _PDF_BYTES, "application/pdf", "project_booking_application", "proj1", "pay1", None, None,
+        '{"total_amount": 5000000}', owner_id="B00001", owner_role="broker",
     )
 
     svc._email_mock.send_booking_confirmation_async.assert_not_called()
@@ -744,8 +757,8 @@ def test_booking_upload_skips_email_when_customer_has_no_address(mock_upload, mo
     persistence.create_document.return_value = MagicMock(id="doc1")
 
     svc.upload_booking_application(
-        _PDF_BYTES, "application/pdf", "project_booking_application", "proj1", "pay1", None, None, "{}",
-        owner_id="C00001", owner_role="customer",
+        _PDF_BYTES, "application/pdf", "project_booking_application", "proj1", "pay1", None, None,
+        '{"total_amount": 5000000}', owner_id="C00001", owner_role="customer",
     )
 
     svc._email_mock.send_booking_confirmation_async.assert_not_called()
@@ -761,9 +774,9 @@ def test_booking_upload_email_failure_does_not_break_booking(mock_upload, mock_s
     persistence.create_document.return_value = MagicMock(id="doc1")
     svc._email_mock.send_booking_confirmation_async.side_effect = RuntimeError("resend down")
 
-    doc, signed_url, expires_in = svc.upload_booking_application(
-        _PDF_BYTES, "application/pdf", "project_booking_application", "proj1", "pay1", None, None, "{}",
-        owner_id="C00001", owner_role="customer",
+    doc, signed_url, expires_in, plan = svc.upload_booking_application(
+        _PDF_BYTES, "application/pdf", "project_booking_application", "proj1", "pay1", None, None,
+        '{"total_amount": 5000000}', owner_id="C00001", owner_role="customer",
     )
     assert doc.id == "doc1"
     assert expires_in == 3600

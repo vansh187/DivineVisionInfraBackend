@@ -50,6 +50,10 @@ class DocumentOutDTO(BaseModel):
     created_date: Optional[datetime]
     signed_url: str
     signed_url_expires_in: int
+    # Only set on a booking-application upload: the derived payment schedule
+    # (total_receivable, total_received, total_outstanding, total_outstanding_words,
+    # booking_date, rows[]). Feeds the demand / allotment letters.
+    payment_plan: Optional[Dict[str, Any]] = None
 
 
 class KycVerificationOutDTO(BaseModel):

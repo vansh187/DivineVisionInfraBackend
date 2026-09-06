@@ -12,8 +12,18 @@ from fpdf.enums import XPos, YPos
 from Divinepersistence import persistenceDocument, persistencePayment, persistenceCustomer
 from DivineDTO.models import DocumentGenerateRequestDTO
 from DivineService.service_email import serviceEmail, dispatch_booking_confirmation_email
+from DivineService.service_payment_schedule import build_payment_schedule
+from DivineService.loan_utils import normalize_indian_amount
 
 logger = logging.getLogger(__name__)
+
+# form_data key spellings for the TOTAL plot amount (aligned with serviceCustomerProfile).
+_TOTAL_AMOUNT_KEYS = (
+    "total_amount", "totalAmount", "total_consideration", "totalConsideration",
+    "total_price", "totalPrice", "consideration", "plot_total_amount", "plotTotalAmount",
+    "sale_value", "saleValue",
+)
+_BOOKING_DATE_KEYS = ("booking_date", "bookingDate", "date")
 
 DEFAULT_SIGNED_URL_EXPIRY_SECONDS = 3600
 MAX_PHOTO_UPLOAD_BYTES = 8 * 1024 * 1024  # 8 MB, matches the KYC upload limit
@@ -426,6 +436,29 @@ class serviceDocument:
         if razorpay_payment_id and razorpay_payment_id != payment.razorpay_payment_id:
             raise ValueError("payment_mismatch")
 
+        # The TOTAL plot amount is now required so a full payment schedule can be
+        # derived (the booking amount alone -> blank demand/allotment letters).
+        total_amount = normalize_indian_amount(_first_present(form_data, _TOTAL_AMOUNT_KEYS))
+        if not total_amount or total_amount <= 0:
+            raise ValueError("total_amount_required")
+        booking_amount = float(payment.amount or 0)   # what was actually paid now
+        if booking_amount > total_amount:
+            raise ValueError("booking_amount_exceeds_total")
+        plan = build_payment_schedule(
+            total_amount=total_amount,
+            booking_amount=booking_amount,
+            booking_date=_first_present(form_data, _BOOKING_DATE_KEYS),
+        )
+        # Persist the derived plan back into form_data under canonical keys so the
+        # stored booking application is self-contained (demand / allotment letters
+        # and GET /customer/profile read straight from it).
+        form_data["total_consideration"] = plan["total_receivable"]
+        form_data["amount_received"] = plan["total_received"]
+        form_data["total_outstanding"] = plan["total_outstanding"]
+        form_data["total_outstanding_words"] = plan["total_outstanding_words"]
+        form_data["booking_date"] = plan["booking_date"]
+        form_data["payment_schedule"] = plan["rows"]
+
         document_id = str(uuid.uuid4())
         safe_type = _safe_path_segment(document_type)
         object_path = f"{owner_id}/{safe_type}_{document_id}.pdf"
@@ -459,7 +492,7 @@ class serviceDocument:
         self._notify_booking_confirmation(owner_id, owner_role, form_data, payment.amount, payment.currency)
 
         signed_url = self._sign_url(object_path, bucket=self._booking_forms_bucket)
-        return doc, signed_url, DEFAULT_SIGNED_URL_EXPIRY_SECONDS
+        return doc, signed_url, DEFAULT_SIGNED_URL_EXPIRY_SECONDS, plan
 
     def _notify_booking_confirmation(self, owner_id: str, owner_role: str, form_data: dict,
                                      amount=None, currency: str = "INR") -> None:
@@ -505,6 +538,31 @@ class serviceDocument:
         bucket = getattr(doc, "storage_bucket", None) or self._bucket
         signed_url = self._sign_url(doc.storage_path, bucket=bucket)
         return doc, signed_url, DEFAULT_SIGNED_URL_EXPIRY_SECONDS
+
+    def get_demand_letter(self, document_id: str, requester_id: str, requester_role: str = None):
+        """Render the Demand Letter PDF for a booking application from its stored
+        form_data (payment schedule + plot/customer details). Returns (pdf_bytes,
+        filename). Ownership rules mirror get()."""
+        doc = self._persistence.get_by_id(document_id)
+        if not doc:
+            raise ValueError("not_found")
+        if doc.owner_id != requester_id or (requester_role is not None and doc.owner_role != requester_role):
+            raise PermissionError("forbidden")
+        if "booking" not in (getattr(doc, "document_type", "") or "").lower():
+            raise ValueError("not_a_booking_application")
+
+        form_data = getattr(doc, "form_data", None)
+        if isinstance(form_data, str):
+            try:
+                form_data = json.loads(form_data)
+            except ValueError:
+                form_data = {}
+        if not isinstance(form_data, dict):
+            form_data = {}
+
+        from DivineService.service_demand_letter import generate_demand_letter_pdf
+        pdf_bytes = generate_demand_letter_pdf(form_data, doc.owner_id)
+        return pdf_bytes, f"demand-letter-{document_id}.pdf"
 
     def get_latest(self, document_type: str, requester_id: str, requester_role: str = None):
         if not document_type or not document_type.strip():
