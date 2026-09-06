@@ -197,20 +197,19 @@ def test_plot_booking_detection_handles_any_size_and_common_phrases():
     assert wants_plot_booking("what is the price of 250 sq ft plot?") is False
 
 
-def test_booking_project_selection_returns_customer_login_button():
+def test_booking_project_selection_returns_both_login_buttons():
     for selected_project in ("book_project_ops", "Suraksha Project"):
         persistence = FakeChatbotPersistence()
         service = serviceChatbot(persistence=persistence, gemini=object(), groq=object())
 
         result = service.handle_message("session-1", text=selected_project)
 
-        assert "login as a customer" in result["reply"].lower()
-        assert "application form" in result["reply"].lower()
-        assert result["buttons"] == [{
-            "label": "Login as Customer",
-            "value": "login_customer",
-            "action": "chatbot_auth",
-        }]
+        assert "customer or a channel partner" in result["reply"].lower()
+        assert "booking application" in result["reply"].lower()
+        assert result["buttons"] == [
+            {"label": "Login as Customer", "value": "login_customer", "action": "chatbot_auth"},
+            {"label": "Login as Channel Partner", "value": "login_broker", "action": "chatbot_auth"},
+        ]
 
 
 def test_customer_signup_flow_collects_form_fields_and_offers_login():
