@@ -1,4 +1,7 @@
+import io
+
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi.responses import StreamingResponse
 from sqlalchemy.exc import IntegrityError
 
 from DivineDTO.models import DocumentGenerateRequestDTO, DocumentOutDTO
@@ -240,6 +243,28 @@ def get_latest_document(document_type: str, current_user: dict = Depends(get_cur
         raise HTTPException(status_code=502, detail=str(e))
     except Exception:
         raise HTTPException(status_code=500, detail="internal_error")
+
+
+@router.get("/{document_id}/demand-letter")
+def get_demand_letter(document_id: str, current_user: dict = Depends(get_current_user)):
+    """Server-rendered Demand Letter PDF for a booking application, built from the
+    stored payment schedule + plot / customer details. Owner (customer) only."""
+    try:
+        pdf_bytes, filename = _doc_service.get_demand_letter(
+            document_id, requester_id=current_user["sub"], requester_role=current_user["role"],
+        )
+        return StreamingResponse(
+            io.BytesIO(pdf_bytes), media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="forbidden")
+    except ValueError as e:
+        if str(e) == "not_a_booking_application":
+            raise HTTPException(status_code=400, detail="not_a_booking_application")
+        raise HTTPException(status_code=404, detail="not_found")
+    except Exception:
+        raise HTTPException(status_code=500, detail="demand_letter_failed")
 
 
 @router.get("/{document_id}", response_model=DocumentOutDTO)

@@ -539,6 +539,31 @@ class serviceDocument:
         signed_url = self._sign_url(doc.storage_path, bucket=bucket)
         return doc, signed_url, DEFAULT_SIGNED_URL_EXPIRY_SECONDS
 
+    def get_demand_letter(self, document_id: str, requester_id: str, requester_role: str = None):
+        """Render the Demand Letter PDF for a booking application from its stored
+        form_data (payment schedule + plot/customer details). Returns (pdf_bytes,
+        filename). Ownership rules mirror get()."""
+        doc = self._persistence.get_by_id(document_id)
+        if not doc:
+            raise ValueError("not_found")
+        if doc.owner_id != requester_id or (requester_role is not None and doc.owner_role != requester_role):
+            raise PermissionError("forbidden")
+        if "booking" not in (getattr(doc, "document_type", "") or "").lower():
+            raise ValueError("not_a_booking_application")
+
+        form_data = getattr(doc, "form_data", None)
+        if isinstance(form_data, str):
+            try:
+                form_data = json.loads(form_data)
+            except ValueError:
+                form_data = {}
+        if not isinstance(form_data, dict):
+            form_data = {}
+
+        from DivineService.service_demand_letter import generate_demand_letter_pdf
+        pdf_bytes = generate_demand_letter_pdf(form_data, doc.owner_id)
+        return pdf_bytes, f"demand-letter-{document_id}.pdf"
+
     def get_latest(self, document_type: str, requester_id: str, requester_role: str = None):
         if not document_type or not document_type.strip():
             raise ValueError("document_type_required")
