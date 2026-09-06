@@ -157,10 +157,12 @@ CHANNEL_PARTNER_LOGIN_BUTTON = {
 # are offered so a visitor can pick the right account type.
 BOOKING_LOGIN_BUTTONS = [CUSTOMER_LOGIN_BUTTON, CHANNEL_PARTNER_LOGIN_BUTTON]
 
-# Frontend "book a plot" page. The chat hands over clickable plot rows pointing here;
-# that page checks the auth token and, if absent, shows the login buttons above.
+# Frontend "browse & book plots" page. The chat hands over clickable plot rows
+# pointing here; that page checks the auth token and, if absent, shows the login
+# buttons above. Navigated to IN THE SAME TAB (action "navigate", target "_self") -
+# it is a plain client-side route, nothing is proxied through this backend.
 BOOK_PLOT_URL = (os.getenv("DIVINE_BOOK_PLOT_URL")
-                 or "https://www.divinevisioninfra.com/book-plot").rstrip("/")
+                 or "https://www.divinevisioninfra.com/customer/plots").rstrip("/")
 AUTH_FLOW_BUTTONS = [
     {"label": "Customer Signup", "value": "signup_customer", "action": "chatbot_auth"},
     {"label": "Customer Login", "value": "login_customer", "action": "chatbot_auth"},
@@ -1112,7 +1114,7 @@ class serviceChatbot:
                     },
                     "buttons": [
                         {"label": "Browse & Book Plots", "value": "book_plots",
-                         "action": "open_url", "url": BOOK_PLOT_URL},
+                         "action": "navigate", "url": BOOK_PLOT_URL, "target": "_self"},
                         {"label": "Book a site visit", "value": "Book a site visit", "action": "chatbot_message"},
                         {"label": "Talk to a sales advisor", "value": "Talk to a sales advisor", "action": "chatbot_message"},
                         dict(MAIN_MENU_BUTTON),
