@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from typing import List
 
-from DivineDTO.models import VisitScheduleRequestDTO, VisitOutDTO
+from DivineDTO.models import VisitScheduleRequestDTO, VisitCompleteRequestDTO, VisitOutDTO
 from DivineService import serviceVisit
 from DivineService.auth import get_current_user
 
@@ -78,5 +78,26 @@ def cancel_visit(visit_id: str, current_user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=404, detail="not_found")
     except PermissionError:
         raise HTTPException(status_code=403, detail="forbidden")
+    except Exception:
+        raise HTTPException(status_code=500, detail="internal_error")
+
+
+@router.patch("/{visit_id}", response_model=VisitOutDTO)
+def complete_visit(visit_id: str, dto: VisitCompleteRequestDTO,
+                   current_user: dict = Depends(get_current_user)):
+    """Broker closes out a site visit after the meeting, recording an outcome note.
+    Only the owning broker; only while the visit is still 'scheduled'."""
+    _require_broker(current_user)
+    try:
+        record = _visit_service.complete_visit(
+            visit_id, requester_id=current_user["sub"], notes=dto.notes,
+        )
+        return _to_visit_out(record)
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="visit_owner_only")
+    except ValueError as e:
+        if str(e) == "visit_not_scheduled":
+            raise HTTPException(status_code=409, detail="visit_not_scheduled")
+        raise HTTPException(status_code=404, detail="not_found")
     except Exception:
         raise HTTPException(status_code=500, detail="internal_error")

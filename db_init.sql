@@ -93,7 +93,7 @@ CREATE TABLE IF NOT EXISTS divine_site_visits (
   visit_date date NOT NULL,
   visit_time varchar(5) NOT NULL,
   notes text,
-  status varchar(20) NOT NULL DEFAULT 'scheduled' CHECK (status IN ('scheduled', 'cancelled')),
+  status varchar(20) NOT NULL DEFAULT 'scheduled' CHECK (status IN ('scheduled', 'cancelled', 'completed')),
   created_date timestamptz DEFAULT now(),
   last_updated_date timestamptz DEFAULT now()
 );

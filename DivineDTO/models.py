@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Literal
 from datetime import datetime
 
 
@@ -111,6 +111,12 @@ class VisitScheduleRequestDTO(BaseModel):
     date: str = Field(..., description="YYYY-MM-DD")
     time: str = Field(..., description="HH:MM, 24-hour")
     notes: Optional[str] = Field(None, max_length=1000)
+
+
+class VisitCompleteRequestDTO(BaseModel):
+    # Only "completed" is supported via PATCH; anything else -> 422.
+    status: Literal["completed"]
+    notes: str = Field("", max_length=1000, description="Meeting outcome; may be empty")
 
 
 class VisitOutDTO(BaseModel):

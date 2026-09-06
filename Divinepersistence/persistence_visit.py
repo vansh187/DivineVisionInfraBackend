@@ -13,7 +13,7 @@ class VisitModel(Base):
     # "HH:MM", kept as text - no timezone math needed, round-trips exactly what was typed.
     visit_time = Column(String(5), nullable=False)
     notes = Column(Text)
-    status = Column(String(20), nullable=False, default="scheduled")  # scheduled | cancelled
+    status = Column(String(20), nullable=False, default="scheduled")  # scheduled | cancelled | completed
     created_date = Column(DateTime)
     last_updated_date = Column(DateTime)
 
@@ -28,13 +28,14 @@ class persistenceVisit:
         ))
         queries.setdefault("get_by_id", 'SELECT * FROM divine_site_visits WHERE id = :id LIMIT 1;')
         queries.setdefault("list_by_broker", (
-            'SELECT * FROM divine_site_visits WHERE broker_id = :broker_id AND status != \'cancelled\' '
+            "SELECT * FROM divine_site_visits WHERE broker_id = :broker_id AND status = 'scheduled' "
             'ORDER BY visit_date ASC, visit_time ASC;'
         ))
         queries.setdefault("list_history_by_broker", (
             "SELECT * FROM divine_site_visits "
             "WHERE broker_id = :broker_id "
-            "AND (status = 'cancelled' OR visit_date < :today OR (visit_date = :today AND visit_time < :now_time)) "
+            "AND (status = 'cancelled' OR status = 'completed' "
+            "OR visit_date < :today OR (visit_date = :today AND visit_time < :now_time)) "
             "ORDER BY "
             "CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END ASC, "
             "CASE WHEN status = 'cancelled' THEN last_updated_date END DESC, "
@@ -42,6 +43,11 @@ class persistenceVisit:
         ))
         queries.setdefault("update_status", (
             'UPDATE divine_site_visits SET status = :status, last_updated_date = :last_updated_date '
+            'WHERE id = :id RETURNING *;'
+        ))
+        queries.setdefault("complete_visit", (
+            "UPDATE divine_site_visits "
+            "SET status = 'completed', notes = :notes, last_updated_date = :last_updated_date "
             'WHERE id = :id RETURNING *;'
         ))
         self._queries = queries
@@ -99,6 +105,19 @@ class persistenceVisit:
             try:
                 query = self._queries.get("update_status")
                 params = {"id": id, "status": status, "last_updated_date": datetime.now(timezone.utc)}
+                result = db.execute(text(query), params)
+                row = result.mappings().first()
+                db.commit()
+                return RowWrapper(row)
+            except Exception:
+                db.rollback()
+                raise
+
+    def complete_visit(self, id: str, notes) -> VisitModel:
+        with self._session_factory() as db:
+            try:
+                query = self._queries.get("complete_visit")
+                params = {"id": id, "notes": notes, "last_updated_date": datetime.now(timezone.utc)}
                 result = db.execute(text(query), params)
                 row = result.mappings().first()
                 db.commit()

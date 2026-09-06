@@ -146,3 +146,58 @@ def test_cancel_visit_updates_status_for_owning_broker():
 
     assert record.status == "cancelled"
     persistence.update_status.assert_called_once_with("v1", "cancelled")
+
+
+# ---------- complete_visit ----------
+
+def test_complete_visit_raises_not_found():
+    svc, persistence = _service()
+    persistence.get_by_id.return_value = None
+    try:
+        svc.complete_visit("v1", requester_id="B00001", notes="ok")
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert str(e) == "not_found"
+
+
+def test_complete_visit_raises_permission_error_for_other_broker():
+    svc, persistence = _service()
+    persistence.get_by_id.return_value = MagicMock(broker_id="B99999", status="scheduled")
+    try:
+        svc.complete_visit("v1", requester_id="B00001", notes="ok")
+        assert False, "expected PermissionError"
+    except PermissionError:
+        pass
+
+
+def test_complete_visit_rejects_non_scheduled():
+    for existing in ("completed", "cancelled"):
+        svc, persistence = _service()
+        persistence.get_by_id.return_value = MagicMock(broker_id="B00001", status=existing)
+        try:
+            svc.complete_visit("v1", requester_id="B00001", notes="ok")
+            assert False, "expected ValueError"
+        except ValueError as e:
+            assert str(e) == "visit_not_scheduled"
+        persistence.complete_visit.assert_not_called()
+
+
+def test_complete_visit_sets_completed_with_trimmed_notes():
+    svc, persistence = _service()
+    persistence.get_by_id.return_value = MagicMock(broker_id="B00001", status="scheduled")
+    persistence.complete_visit.return_value = MagicMock(id="v1", status="completed", notes="Deal likely")
+
+    rec = svc.complete_visit("v1", requester_id="B00001", notes="  Deal likely  ")
+
+    assert rec.status == "completed"
+    persistence.complete_visit.assert_called_once_with("v1", "Deal likely")
+
+
+def test_complete_visit_empty_notes_stored_as_none():
+    svc, persistence = _service()
+    persistence.get_by_id.return_value = MagicMock(broker_id="B00001", status="scheduled")
+    persistence.complete_visit.return_value = MagicMock(id="v1", status="completed", notes=None)
+
+    svc.complete_visit("v1", requester_id="B00001", notes="   ")
+
+    persistence.complete_visit.assert_called_once_with("v1", None)
