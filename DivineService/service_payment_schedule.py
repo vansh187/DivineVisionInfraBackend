@@ -1,23 +1,29 @@
-"""Derives a plot-booking payment schedule from the total plot amount and the
-booking amount already paid, matching the milestone plan used on the demand /
-allotment letters (On Booking, +45d, +90d, +180d, +270d).
+"""Derives a plot-booking payment schedule from the total plot amount, matching
+the milestone plan on the demand / allotment letters:
 
-Pure functions - no DB, no I/O, never raises. The booking amount is what the
-customer actually paid at application time; (total - booking) is split across
-the remaining milestones, the last one absorbing any rounding remainder so the
-rows sum exactly to the total.
+    On Booking             -> 10% of the total plot amount
+    Within 45 days          -> 15%
+    Within 90 days          -> 25%
+    Within 180 days         -> 25%
+    Within 270 days         -> 25%   (last milestone carries the rounding remainder)
+
+`total_received` on the returned plan is what the customer ACTUALLY paid at
+application time; `total_outstanding` = total - received. The schedule rows show
+the plan, independent of how much was paid.
+
+Pure functions - no DB, no I/O, never raises.
 """
 from datetime import date, datetime, timedelta
 
 from DivineService.loan_report_data import amount_in_words_indian
 
-# (label, days-after-booking). The first row is always the paid booking amount.
+# (label, days-after-booking, percent-of-total). Must add up to 100.
 DEFAULT_MILESTONES = (
-    ("On Booking", 0),
-    ("Within 45 days of booking", 45),
-    ("Within 90 days of booking", 90),
-    ("Within 180 days of booking", 180),
-    ("Within 270 days of booking", 270),
+    ("On Booking", 0, 10),
+    ("Within 45 days of booking", 45, 15),
+    ("Within 90 days of booking", 90, 25),
+    ("Within 180 days of booking", 180, 25),
+    ("Within 270 days of booking", 270, 25),
 )
 
 
@@ -45,7 +51,8 @@ def _as_date(value):
     return None
 
 
-def build_payment_schedule(total_amount, booking_amount, booking_date=None, milestones=DEFAULT_MILESTONES):
+def build_payment_schedule(total_amount, booking_amount, booking_date=None,
+                           milestones=DEFAULT_MILESTONES):
     """Returns a dict:
       {
         total_receivable, total_received, total_outstanding,
@@ -53,45 +60,43 @@ def build_payment_schedule(total_amount, booking_amount, booking_date=None, mile
         rows: [ {label, due_date, due_days, amount, percent, status}, ... ]
       }
     `rows` is [] and totals are None when total_amount is missing/invalid.
+
+    Each milestone's amount = round(total * percent / 100); the LAST row is
+    adjusted so the rows sum to exactly `total`. `total_received` is what was
+    actually paid (`booking_amount`); the first row is 'paid' only when that
+    covers the on-booking instalment, else 'due'.
     """
     total = _num(total_amount)
-    booked = _num(booking_amount) or 0.0
+    paid = max(0.0, _num(booking_amount) or 0.0)
     if total is None or total <= 0:
         return {
             "total_receivable": None, "total_received": None, "total_outstanding": None,
             "total_outstanding_words": None, "booking_date": None, "rows": [],
         }
 
-    booked = max(0.0, min(booked, total))
-    outstanding = round(total - booked)
+    total = round(total)
+    paid = round(min(paid, total))
     start = _as_date(booking_date) or date.today()
+    plan = list(milestones) or [("Balance", 90, 100)]
 
-    later = [m for m in milestones if m[1] > 0] or [("Balance", 90)]
-    per = outstanding // len(later)
-    remainder = outstanding - per * len(later)
-
-    rows = [{
-        "label": milestones[0][0] if milestones else "On Booking",
-        "due_date": start.isoformat(),
-        "due_days": 0,
-        "amount": round(booked),
-        "percent": round(booked / total * 100, 2) if total else None,
-        "status": "paid",
-    }]
-    for i, (label, days) in enumerate(later):
-        amt = per + (remainder if i == len(later) - 1 else 0)
+    rows = []
+    running = 0
+    for i, (label, days, pct) in enumerate(plan):
+        amt = total - running if i == len(plan) - 1 else round(total * pct / 100)
+        running += amt
         rows.append({
             "label": label,
             "due_date": (start + timedelta(days=days)).isoformat(),
             "due_days": days,
             "amount": int(amt),
-            "percent": round(amt / total * 100, 2) if total else None,
-            "status": "due",
+            "percent": pct,
+            "status": ("paid" if (days == 0 and paid >= amt) else "due"),
         })
 
+    outstanding = total - paid
     return {
-        "total_receivable": round(total),
-        "total_received": round(booked),
+        "total_receivable": total,
+        "total_received": paid,
         "total_outstanding": outstanding,
         "total_outstanding_words": amount_in_words_indian(outstanding) or None,
         "booking_date": start.isoformat(),
