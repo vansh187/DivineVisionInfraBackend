@@ -489,24 +489,40 @@ def test_wants_plot_listing_matches_show_available_plots():
         assert not wants_plot_listing(t), t
 
 
-def test_show_available_plots_answers_from_inventory_without_llm(monkeypatch):
+_PLOT_OPTS = [
+    {"project": "Suraksha Enclave", "size_sqyd": 113, "dimensions": "7.3 x 13.0 m",
+     "available": 49, "total": 49, "book_url": "https://x/book-plot?project=Suraksha+Enclave&size=113"},
+    {"project": "Suraksha Enclave", "size_sqyd": 148, "dimensions": None,
+     "available": 16, "total": 16, "book_url": "https://x/book-plot?project=Suraksha+Enclave&size=148"},
+]
+
+
+def test_show_available_plots_answers_from_inventory_without_llm():
     service, persistence, _ = _service()
     service._run_agent_loop = MagicMock()  # must NOT be called
-    service._inventory_summary_text = MagicMock(
-        return_value="- Suraksha Enclave: plot ~113 sq.yd (49 of 49 available)")
+    service._available_plot_options = MagicMock(return_value=list(_PLOT_OPTS))
     service.handle_message("session-1", text="")  # arm greeting
 
     result = service.handle_message("session-1", text="Show available plots")
 
     service._run_agent_loop.assert_not_called()
     assert persistence.session.menu_state is None
-    assert "113 sq.yd" in result["reply"]
-    assert any(b["value"] == "main_menu" for b in result["buttons"])
+    assert "113 sq yd" in result["reply"]
+    assert "log in as a customer or channel partner" in result["reply"].lower()
+    # structured data drives clickable rows on the frontend
+    sr = result["structured_result"]
+    assert sr["type"] == "plot_list"
+    assert sr["data"]["plots"][0]["book_url"].endswith("size=113")
+    assert sr["data"]["book_url"]
+    vals = [b["value"] for b in result["buttons"]]
+    assert "book_plots" in vals and "main_menu" in vals
+    bp = next(b for b in result["buttons"] if b["value"] == "book_plots")
+    assert bp["action"] == "open_url" and bp["url"]
 
 
 def test_show_available_plots_falls_back_to_llm_when_inventory_empty():
     service, persistence, _ = _service()
-    service._inventory_summary_text = MagicMock(return_value="")
+    service._available_plot_options = MagicMock(return_value=[])
     service._run_agent_loop = MagicMock(return_value={"reply": "let me check", "llm_provider": "test"})
     service.handle_message("session-1", text="")
 
@@ -514,3 +530,15 @@ def test_show_available_plots_falls_back_to_llm_when_inventory_empty():
 
     service._run_agent_loop.assert_called_once()
     assert result["reply"] == "let me check"
+
+
+def test_booking_project_selection_offers_both_login_types():
+    from DivineService.service_chatbot import selected_booking_project
+    assert selected_booking_project("suraksha project")  # sanity
+    service, persistence, _ = _service()
+    _complete_greeting(service, persistence)
+    persistence.session.menu_state = None  # booking selection happens outside the menu funnel
+    result = service.handle_message("session-1", text="book_project_suraksha")
+    vals = {b["value"] for b in result["buttons"]}
+    assert vals == {"login_customer", "login_broker"}
+    assert "customer or a channel partner" in result["reply"].lower()

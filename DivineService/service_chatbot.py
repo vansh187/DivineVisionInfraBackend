@@ -6,6 +6,7 @@ import logging
 import ipaddress
 import unicodedata
 from datetime import datetime, timezone
+from urllib.parse import quote_plus
 
 from Divinepersistence import persistenceChatbot, persistenceInventory
 from Divinepersistence.persistence_loan import persistenceLoan
@@ -147,6 +148,19 @@ CUSTOMER_LOGIN_BUTTON = {
     "value": "login_customer",
     "action": "chatbot_auth",
 }
+CHANNEL_PARTNER_LOGIN_BUTTON = {
+    "label": "Login as Channel Partner",
+    "value": "login_broker",
+    "action": "chatbot_auth",
+}
+# A booking always needs an authenticated customer / channel partner - both buttons
+# are offered so a visitor can pick the right account type.
+BOOKING_LOGIN_BUTTONS = [CUSTOMER_LOGIN_BUTTON, CHANNEL_PARTNER_LOGIN_BUTTON]
+
+# Frontend "book a plot" page. The chat hands over clickable plot rows pointing here;
+# that page checks the auth token and, if absent, shows the login buttons above.
+BOOK_PLOT_URL = (os.getenv("DIVINE_BOOK_PLOT_URL")
+                 or "https://www.divinevisioninfra.com/book-plot").rstrip("/")
 AUTH_FLOW_BUTTONS = [
     {"label": "Customer Signup", "value": "signup_customer", "action": "chatbot_auth"},
     {"label": "Customer Login", "value": "login_customer", "action": "chatbot_auth"},
@@ -1047,12 +1061,12 @@ class serviceChatbot:
         booking_project = selected_booking_project(text)
         if booking_project:
             reply = (
-                f"Great, you selected {booking_project}. Please login as a customer so you can fill the "
-                "plot booking application form."
+                f"Great, you selected {booking_project}. To fill the plot booking application, "
+                "please log in as a customer or a channel partner."
             )
             self._persist_turn(session_id, "user", text)
             self._persist_turn(session_id, "assistant", reply)
-            return {"session_id": session_id, "reply": reply, "buttons": [CUSTOMER_LOGIN_BUTTON]}
+            return {"session_id": session_id, "reply": reply, "buttons": list(BOOKING_LOGIN_BUTTONS)}
 
         if wants_plot_booking(text):
             reply = "Sure, which project would you like to book the plot in?"
@@ -1072,17 +1086,33 @@ class serviceChatbot:
             # "Show available plots" - a deterministic data question. Answer straight
             # from inventory so it never depends on the LLM being up; only fall through
             # to the agent loop when inventory is genuinely empty/unavailable.
-            summary = self._inventory_summary_text()
-            if summary:
+            options = self._available_plot_options()
+            if options:
                 self._persist_turn(session_id, "user", text)
+                lines = "\n".join(
+                    f"{i}. {o['project']} — ~{o['size_sqyd']} sq yd"
+                    + (f" ({o['dimensions']})" if o.get("dimensions") else "")
+                    + f" — {o['available']} available"
+                    for i, o in enumerate(options, 1)
+                )
                 reply = (
-                    "Here are the plot sizes currently available:\n\n" + summary +
-                    "\n\nI can filter these by size or budget, or arrange a site visit - just let me know."
+                    "Here are the plot sizes currently available. Tap any size to start a "
+                    "booking:\n\n" + lines +
+                    "\n\nYou'll be asked to log in as a customer or channel partner before "
+                    "confirming a booking."
                 )
                 self._persist_turn(session_id, "assistant", reply)
                 return {
                     "session_id": session_id, "reply": reply,
+                    # Frontend renders each plot as a clickable row -> book_url; that page
+                    # checks auth and shows the login buttons if the visitor isn't signed in.
+                    "structured_result": {
+                        "type": "plot_list",
+                        "data": {"book_url": BOOK_PLOT_URL, "plots": options},
+                    },
                     "buttons": [
+                        {"label": "Browse & Book Plots", "value": "book_plots",
+                         "action": "open_url", "url": BOOK_PLOT_URL},
                         {"label": "Book a site visit", "value": "Book a site visit", "action": "chatbot_message"},
                         {"label": "Talk to a sales advisor", "value": "Talk to a sales advisor", "action": "chatbot_message"},
                         dict(MAIN_MENU_BUTTON),
@@ -2239,6 +2269,48 @@ class serviceChatbot:
             logger.warning("inventory_summary_lookup_failed: %s", e)
             return ""
         return "\n".join(notes)
+
+    def _available_plot_options(self) -> list:
+        """Clean, size-bucketed plot list for the "Show available plots" reply. Merges
+        the raw distinct_plot_sizes rows (which split on exact area+dimension) into one
+        entry per rounded sq-yd, summing availability. Each entry carries a book_url
+        that deep-links the frontend booking page. Never raises; [] on failure/empty."""
+        if not self._inventory:
+            return []
+        buckets = {}
+        try:
+            for r in self._inventory.distinct_plot_sizes():
+                area = _as_number(getattr(r, "area_sqyd", None))
+                if not area or area <= 0:
+                    continue
+                project = (getattr(r, "project_name", None) or "").strip() or "Divine Vision Infra"
+                key = (project, round(float(area)))
+                avail = int(getattr(r, "available_count", 0) or 0)
+                total = int(getattr(r, "unit_count", 0) or 0)
+                w = _as_number(getattr(r, "width_mtr", None))
+                length = _as_number(getattr(r, "length_mtr", None))
+                b = buckets.get(key)
+                if b is None:
+                    buckets[key] = {
+                        "project": project, "size_sqyd": round(float(area)),
+                        "dimensions": (f"{w} x {length} m" if w and length else None),
+                        "available": avail, "total": total,
+                    }
+                else:
+                    b["available"] += avail
+                    b["total"] += total
+                    if not b["dimensions"] and w and length:
+                        b["dimensions"] = f"{w} x {length} m"
+        except Exception as e:
+            logger.warning("available_plot_options_lookup_failed: %s", e)
+            return []
+        options = [b for b in buckets.values() if b["available"] > 0] or list(buckets.values())
+        options.sort(key=lambda o: o["size_sqyd"])
+        for o in options:
+            o["book_url"] = (
+                f"{BOOK_PLOT_URL}?project={quote_plus(o['project'])}&size={o['size_sqyd']}"
+            )
+        return options
 
     def _apply_guardrail(self, draft_reply: str, retrieved_chunks: list, provider: str):
         try:
