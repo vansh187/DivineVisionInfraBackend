@@ -4,12 +4,15 @@ import os
 import uuid
 import razorpay
 from razorpay.errors import SignatureVerificationError
-from Divinepersistence import persistencePayment
+from Divinepersistence import persistencePayment, persistenceInventory
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_CURRENCY = "INR"
 MAX_AMOUNT_INR = 10_000_000  # 1 crore - a sanity ceiling, not a real business limit
+
+ALLOWED_PURPOSES = ("plot_booking", "other")
+BOOKING_PURPOSE = "plot_booking"
 
 # Only these events flip a payment's status - everything else (refund/dispute events,
 # order.paid, etc.) is out of scope for this feature and acknowledged without action.
@@ -17,10 +20,74 @@ _WEBHOOK_EVENT_STATUS = {"payment.captured": "paid", "payment.failed": "failed"}
 
 
 class servicePayment:
-    def __init__(self, persistence: persistencePayment = None):
+    def __init__(self, persistence: persistencePayment = None,
+                 inventory_persistence: persistenceInventory = None):
         self._persistence = persistence or persistencePayment()
+        self._inventory_persistence = inventory_persistence or persistenceInventory()
         self._key_id = os.getenv("RAZORPAY_KEY_ID")
         self._key_secret = os.getenv("RAZORPAY_KEY_SECRET")
+
+    def _clean_purpose(self, purpose: str) -> str:
+        purpose = (purpose or "other").strip().lower()
+        if purpose not in ALLOWED_PURPOSES:
+            raise ValueError("invalid_purpose")
+        return purpose
+
+    def _apply_booking_to_inventory(self, record):
+        """Called right after a plot-booking payment settles. Flips the linked
+        inventory unit to 'booked' in its own guarded UPDATE. Attaches the outcome
+        to `record` as transient attributes the API echoes back:
+
+            record.inventory_status          -> "booked" | "conflict" | None
+            record.inventory_conflict_reason -> str | None
+
+        Wrapped end to end - the money is already real, so ANY failure here becomes
+        a flag-for-review at worst, never a failed payment or a raised exception."""
+        try:
+            record.inventory_status = None
+            record.inventory_conflict_reason = None
+        except Exception:  # pragma: no cover - record is always a mutable RowWrapper
+            return record
+
+        try:
+            purpose = (getattr(record, "purpose", None) or "other")
+            inventory_id = getattr(record, "inventory_id", None)
+            payment_id = getattr(record, "id", None)
+            owner_id = getattr(record, "owner_id", None)
+            if purpose != BOOKING_PURPOSE or not inventory_id or not payment_id:
+                return record
+
+            try:
+                unit = self._inventory_persistence.book_unit(
+                    id=inventory_id, payment_id=payment_id, customer_id=owner_id,
+                )
+            except Exception as e:
+                logger.warning("payment.booking.inventory_flip_failed payment_id=%s inventory_id=%s error=%s",
+                               payment_id, inventory_id, e)
+                record.inventory_status = "conflict"
+                record.inventory_conflict_reason = "inventory_update_failed"
+                self._flag_review(payment_id, "inventory_update_failed")
+                return record
+
+            if unit is None:
+                logger.info("payment.booking.unit_not_available payment_id=%s inventory_id=%s",
+                            payment_id, inventory_id)
+                record.inventory_status = "conflict"
+                record.inventory_conflict_reason = "unit_not_available"
+                self._flag_review(payment_id, "inventory_unavailable")
+                return record
+
+            record.inventory_status = "booked"
+            return record
+        except Exception as e:  # pragma: no cover - defensive catch-all
+            logger.warning("payment.booking.apply_failed error=%s", e)
+            return record
+
+    def _flag_review(self, payment_id: str, reason: str):
+        try:
+            self._persistence.flag_manual_review(payment_id, reason)
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning("payment.booking.flag_review_failed payment_id=%s error=%s", payment_id, e)
 
     def _client(self) -> razorpay.Client:
         if not self._key_id or not self._key_secret:
@@ -34,7 +101,8 @@ class servicePayment:
             raise ValueError("amount_too_large")
 
     def _persist_new_payment(self, owner_id: str, owner_role: str, amount: float, status: str,
-                              razorpay_order_id: str = None, method: str = "razorpay", notes: dict = None):
+                              razorpay_order_id: str = None, method: str = "razorpay", notes: dict = None,
+                              purpose: str = "other", inventory_id: str = None):
         payment_id = str(uuid.uuid4())
         return self._persistence.create_payment(
             id=payment_id,
@@ -46,13 +114,18 @@ class servicePayment:
             razorpay_order_id=razorpay_order_id,
             method=method,
             notes=notes or {},
+            purpose=purpose,
+            inventory_id=inventory_id,
         )
 
-    def create_order(self, amount: float, owner_id: str, owner_role: str):
+    def create_order(self, amount: float, owner_id: str, owner_role: str,
+                     purpose: str = "other", inventory_id: str = None):
         """Creates a Razorpay Order and a matching local record. The order is created with
         payment NOT yet captured - amount only becomes "paid" once verify_payment() confirms
         a valid signature from Razorpay, never from the client's own say-so."""
         self._validate_amount(amount)
+        purpose = self._clean_purpose(purpose)
+        inventory_id = (inventory_id or "").strip() or None
 
         client = self._client()
         amount_paise = int(round(amount * 100))
@@ -68,10 +141,12 @@ class servicePayment:
         record = self._persist_new_payment(
             owner_id=owner_id, owner_role=owner_role, amount=amount,
             status="created", razorpay_order_id=order["id"],
+            purpose=purpose, inventory_id=inventory_id,
         )
         return record, self._key_id
 
-    def record_cash_payment(self, amount: float, owner_id: str, owner_role: str, note: str = None):
+    def record_cash_payment(self, amount: float, owner_id: str, owner_role: str, note: str = None,
+                            purpose: str = "other", inventory_id: str = None):
         """Records cash already collected in person - there's no gateway transaction to
         create or verify (unlike create_order/verify_payment), so this settles the record
         as "paid" immediately, straight from what was typed in. Available to both customers
@@ -80,13 +155,17 @@ class servicePayment:
         someone writing it in a physical receipt book, not a cryptographically confirmed
         transaction like the Razorpay flow."""
         self._validate_amount(amount)
+        purpose = self._clean_purpose(purpose)
+        inventory_id = (inventory_id or "").strip() or None
 
         note = (note or "").strip()
         record = self._persist_new_payment(
             owner_id=owner_id, owner_role=owner_role, amount=amount, status="paid",
             razorpay_order_id=None, method="cash", notes={"note": note} if note else {},
+            purpose=purpose, inventory_id=inventory_id,
         )
-        return record
+        # Cash settles immediately -> lock the plot now.
+        return self._apply_booking_to_inventory(record)
 
     def verify_payment(self, razorpay_order_id: str, razorpay_payment_id: str, razorpay_signature: str, owner_id: str):
         """Verifies the payment signature Razorpay's checkout hands back to the client -
@@ -118,6 +197,16 @@ class servicePayment:
             razorpay_payment_id=razorpay_payment_id,
             razorpay_signature=razorpay_signature,
         )
+        # update_payment_status doesn't carry purpose/inventory_id forward on every
+        # backend - copy them from the record we already loaded so the booking flip
+        # below always has them.
+        if getattr(updated, "purpose", None) in (None, "other"):
+            updated.purpose = getattr(record, "purpose", "other")
+        if not getattr(updated, "inventory_id", None):
+            updated.inventory_id = getattr(record, "inventory_id", None)
+
+        if verified:
+            self._apply_booking_to_inventory(updated)
         return updated, verified
 
     def handle_webhook(self, raw_body: bytes, signature: str) -> str:
@@ -181,6 +270,11 @@ class servicePayment:
         self._persistence.update_payment_status(
             id=record.id, status=new_status, razorpay_payment_id=payment_id, razorpay_signature=None,
         )
+        if new_status == "paid":
+            # Durable fallback: if the browser closed before /payments/verify ran, the
+            # webhook is what locks the plot. book_unit is idempotent for the same
+            # payment id, so a later /verify on the same order is a harmless no-op.
+            self._apply_booking_to_inventory(record)
         logger.info(
             "payment.webhook.response event=%s payment_id=%s new_status=%s result=processed",
             event_type, record.id, new_status,

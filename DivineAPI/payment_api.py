@@ -31,6 +31,12 @@ def _to_payment_out(record, verified: bool = None) -> PaymentOutDTO:
         razorpay_order_id=record.razorpay_order_id,
         razorpay_payment_id=record.razorpay_payment_id,
         created_date=record.created_date,
+        # Booking linkage. inventory_id is a stored column; inventory_status /
+        # inventory_conflict_reason are transient, set by the service only on the
+        # call that actually settled a plot_booking payment (None on a plain read).
+        inventory_id=getattr(record, "inventory_id", None),
+        inventory_status=getattr(record, "inventory_status", None),
+        inventory_conflict_reason=getattr(record, "inventory_conflict_reason", None),
     )
 
 
@@ -38,7 +44,8 @@ def _to_payment_out(record, verified: bool = None) -> PaymentOutDTO:
 def create_order(dto: PaymentOrderRequestDTO, current_user: dict = Depends(get_current_user)):
     try:
         record, key_id = _payment_service.create_order(
-            dto.amount, owner_id=current_user["sub"], owner_role=current_user["role"]
+            dto.amount, owner_id=current_user["sub"], owner_role=current_user["role"],
+            purpose=dto.purpose, inventory_id=dto.inventory_id,
         )
         return PaymentOrderOutDTO(
             payment_id=record.id,
@@ -81,7 +88,8 @@ def verify_payment(dto: PaymentVerifyRequestDTO, current_user: dict = Depends(ge
 def record_cash_payment(dto: PaymentCashRequestDTO, current_user: dict = Depends(get_current_user)):
     try:
         record = _payment_service.record_cash_payment(
-            dto.amount, owner_id=current_user["sub"], owner_role=current_user["role"], note=dto.note
+            dto.amount, owner_id=current_user["sub"], owner_role=current_user["role"], note=dto.note,
+            purpose=dto.purpose, inventory_id=dto.inventory_id,
         )
         return _to_payment_out(record)
     except ValueError as e:

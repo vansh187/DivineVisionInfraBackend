@@ -4,6 +4,7 @@ from DivineDTO.models import (
     InventorySearchResponseDTO, NLSearchRequestDTO, NLSearchResponseDTO,
     InventoryViewRequestDTO, InventoryViewResponseDTO, RecommendationResponseDTO,
     InventoryUnitOutDTO, ReserveInventoryResponseDTO, MyReservationsResponseDTO,
+    InventoryBookRepairRequestDTO, InventoryUnbookRequestDTO, InventoryBookingResultDTO,
 )
 from DivineService import serviceInventory
 from DivineService.auth import get_current_user
@@ -123,6 +124,47 @@ def mark_inventory_sold(inventory_id: str, current_user: dict = Depends(get_curr
         return _inventory_service.mark_sold(inventory_id=inventory_id, broker_id=broker_id)
     except ValueError as e:
         if str(e) == "not_reserved_by_you":
+            raise HTTPException(status_code=409, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception:
+        raise HTTPException(status_code=500, detail="internal_error")
+
+
+# --- staff booking repair (broker bearer token) -------------------------------
+# This backend has no admin identity, so these reconciliation endpoints reuse the
+# broker role. Customers never touch them - a customer booking is flipped
+# automatically when their payment settles (see servicePayment).
+
+@router.post("/{inventory_id}/book", response_model=InventoryBookingResultDTO)
+def repair_book_unit(
+    inventory_id: str,
+    body: InventoryBookRepairRequestDTO,
+    current_user: dict = Depends(get_current_user),
+):
+    broker_id = _require_broker(current_user)
+    try:
+        return _inventory_service.book_unit_repair(
+            inventory_id=inventory_id, payment_id=body.payment_id, actor_id=broker_id,
+        )
+    except ValueError as e:
+        if str(e) == "unit_not_available":
+            raise HTTPException(status_code=409, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception:
+        raise HTTPException(status_code=500, detail="internal_error")
+
+
+@router.post("/{inventory_id}/unbook", response_model=InventoryBookingResultDTO)
+def repair_unbook_unit(
+    inventory_id: str,
+    body: InventoryUnbookRequestDTO,
+    current_user: dict = Depends(get_current_user),
+):
+    broker_id = _require_broker(current_user)
+    try:
+        return _inventory_service.unbook_unit(inventory_id=inventory_id, actor_id=broker_id)
+    except ValueError as e:
+        if str(e) == "unit_not_booked":
             raise HTTPException(status_code=409, detail=str(e))
         raise HTTPException(status_code=400, detail=str(e))
     except Exception:

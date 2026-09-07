@@ -177,6 +177,7 @@ def upload_project_booking_application(
     razorpay_order_id: str = Form(None),
     razorpay_payment_id: str = Form(None),
     form_data: str = Form(None),
+    inventory_id: str = Form(None),
     current_user: dict = Depends(get_current_user),
 ):
     # Plain def, not async def: this does blocking network calls (Supabase Storage upload +
@@ -195,6 +196,7 @@ def upload_project_booking_application(
             form_data,
             owner_id=current_user["sub"],
             owner_role=current_user["role"],
+            inventory_id=inventory_id,
         )
         return DocumentOutDTO(
             id=doc.id,
@@ -206,6 +208,8 @@ def upload_project_booking_application(
             signed_url=signed_url,
             signed_url_expires_in=expires_in,
             payment_plan=payment_plan,
+            inventory_id=getattr(doc, "inventory_id", None),
+            inventory_status=getattr(doc, "inventory_status", None),
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

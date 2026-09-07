@@ -54,6 +54,18 @@ class DocumentOutDTO(BaseModel):
     # (total_receivable, total_received, total_outstanding, total_outstanding_words,
     # booking_date, rows[]). Feeds the demand / allotment letters.
     payment_plan: Optional[Dict[str, Any]] = None
+    # Booking-application upload only: the linked plot and whether this upload
+    # confirmed it as 'booked' ("booked" | "conflict" | null).
+    inventory_id: Optional[str] = None
+    inventory_status: Optional[str] = None
+
+
+class InventoryBookingResultDTO(BaseModel):
+    id: str
+    status: str
+    booked_at: Optional[datetime] = None
+    booked_payment_id: Optional[str] = None
+    booked_by: Optional[str] = None
 
 
 class KycVerificationOutDTO(BaseModel):
@@ -72,6 +84,10 @@ class KycVerificationOutDTO(BaseModel):
 
 class PaymentOrderRequestDTO(BaseModel):
     amount: float = Field(..., gt=0, description="Amount in INR (rupees), e.g. 50000.00")
+    # "plot_booking" + inventory_id locks that unit to 'booked' when the payment
+    # settles. Omit both (defaults) for any non-booking payment.
+    purpose: Literal["plot_booking", "other"] = "other"
+    inventory_id: Optional[str] = Field(None, max_length=36)
 
 
 class PaymentOrderOutDTO(BaseModel):
@@ -93,6 +109,8 @@ class PaymentVerifyRequestDTO(BaseModel):
 class PaymentCashRequestDTO(BaseModel):
     amount: float = Field(..., gt=0, description="Amount in INR (rupees) the customer handed over in cash")
     note: Optional[str] = Field(None, max_length=500)
+    purpose: Literal["plot_booking", "other"] = "other"
+    inventory_id: Optional[str] = Field(None, max_length=36)
 
 
 class PaymentOutDTO(BaseModel):
@@ -107,6 +125,12 @@ class PaymentOutDTO(BaseModel):
     razorpay_order_id: Optional[str]
     razorpay_payment_id: Optional[str]
     created_date: Optional[datetime]
+    # Booking linkage. inventory_status is "booked" when this call locked the plot,
+    # "conflict" when the payment settled but the unit was already taken (see
+    # inventory_conflict_reason), or null on a non-booking payment / plain read.
+    inventory_id: Optional[str] = None
+    inventory_status: Optional[str] = None
+    inventory_conflict_reason: Optional[str] = None
 
 
 class VisitScheduleRequestDTO(BaseModel):
@@ -216,6 +240,15 @@ class ReserveInventoryResponseDTO(ReservedUnitOutDTO):
 class MyReservationsResponseDTO(BaseModel):
     count: int
     reservations: List[ReservedUnitOutDTO]
+
+
+class InventoryBookRepairRequestDTO(BaseModel):
+    payment_id: Optional[str] = Field(None, max_length=36)
+    reason: Optional[str] = Field(None, max_length=200)
+
+
+class InventoryUnbookRequestDTO(BaseModel):
+    reason: Optional[str] = Field(None, max_length=200)
 
 
 class BrokerCommissionCreateDTO(BaseModel):
