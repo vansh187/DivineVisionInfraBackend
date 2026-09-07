@@ -11,8 +11,9 @@ logger = logging.getLogger(__name__)
 DEFAULT_CURRENCY = "INR"
 MAX_AMOUNT_INR = 10_000_000  # 1 crore - a sanity ceiling, not a real business limit
 
-ALLOWED_PURPOSES = ("plot_booking", "other")
+ALLOWED_PURPOSES = ("plot_booking", "installment", "other")
 BOOKING_PURPOSE = "plot_booking"
+INSTALLMENT_PURPOSE = "installment"
 
 # Only these events flip a payment's status - everything else (refund/dispute events,
 # order.paid, etc.) is out of scope for this feature and acknowledged without action.
@@ -21,11 +22,26 @@ _WEBHOOK_EVENT_STATUS = {"payment.captured": "paid", "payment.failed": "failed"}
 
 class servicePayment:
     def __init__(self, persistence: persistencePayment = None,
-                 inventory_persistence: persistenceInventory = None):
+                 inventory_persistence: persistenceInventory = None,
+                 milestone_service=None):
         self._persistence = persistence or persistencePayment()
         self._inventory_persistence = inventory_persistence or persistenceInventory()
+        self._milestone_service_override = milestone_service
         self._key_id = os.getenv("RAZORPAY_KEY_ID")
         self._key_secret = os.getenv("RAZORPAY_KEY_SECRET")
+
+    def _milestones(self):
+        """Lazily built so a plain payment flow never imports the milestone stack,
+        and tests can inject a fake via the constructor."""
+        if self._milestone_service_override is not None:
+            return self._milestone_service_override
+        try:
+            from DivineService.service_milestones import serviceMilestones
+            self._milestone_service_override = serviceMilestones()
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning("payment.milestone_service_init_failed error=%s", e)
+            self._milestone_service_override = None
+        return self._milestone_service_override
 
     def _clean_purpose(self, purpose: str) -> str:
         purpose = (purpose or "other").strip().lower()
@@ -131,6 +147,78 @@ class servicePayment:
         if unit is not None and (getattr(unit, "status", None) or "") not in ("available", "held"):
             raise ValueError("unit_not_available")
 
+    _INSTALLMENT_GUARD_CODES = (
+        "no_booking", "installment_not_found", "installment_already_paid",
+        "installment_out_of_order", "installment_not_payable", "installment_amount_mismatch",
+    )
+
+    def _guard_installment(self, owner_id: str, installment_no, amount, due_date) -> None:
+        """Pre-check at order time. Raises ValueError(<guard code>) so the API returns
+        400 {"detail": "<code>"}. A milestone service failure surfaces as 'no_booking'
+        rather than a 500."""
+        svc = self._milestones()
+        if svc is None:
+            raise ValueError("no_booking")
+        try:
+            _, code = svc.validate_installment(owner_id, installment_no, amount, due_date)
+        except Exception as e:  # pragma: no cover - validate_installment already guards
+            logger.warning("payment.installment.guard_failed owner_id=%s error=%s", owner_id, e)
+            raise ValueError("no_booking")
+        if code:
+            raise ValueError(code)
+
+    def _apply_installment_settlement(self, record):
+        """Called after an instalment payment settles. Re-runs the guard rails (order
+        and settle can be minutes apart) and marks the milestone paid. The money is
+        already real, so a guard failure here keeps the payment, flags it for review
+        and returns installment_status='rejected' - it never raises or 4xx."""
+        try:
+            record.installment_status = None
+        except Exception:  # pragma: no cover
+            return record
+        try:
+            if (getattr(record, "purpose", None) or "other") != INSTALLMENT_PURPOSE:
+                return record
+            owner_id = getattr(record, "owner_id", None)
+            installment_no = getattr(record, "installment_no", None)
+            amount = getattr(record, "amount", None)
+            due_date = getattr(record, "due_date", None)
+            svc = self._milestones()
+            if svc is None:
+                record.installment_status = "rejected"
+                self._flag_review(getattr(record, "id", None), "no_booking")
+                return record
+
+            milestone, code = svc.validate_installment(owner_id, installment_no, amount, due_date)
+            if code and code != "installment_already_paid":
+                record.installment_status = "rejected"
+                self._flag_review(getattr(record, "id", None), code)
+                return record
+
+            milestone_id = getattr(milestone, "id", None) if milestone else None
+            if not milestone_id:
+                record.installment_status = "rejected"
+                self._flag_review(getattr(record, "id", None), "installment_not_found")
+                return record
+
+            if code == "installment_already_paid":
+                # A duplicate settle (webhook after verify) - not an error.
+                record.installment_status = "paid"
+                return record
+
+            updated_milestone = svc.mark_paid(milestone_id, getattr(record, "id", None))
+            record.installment_status = "paid"
+            self._send_installment_receipt(record, updated_milestone or milestone)
+            return record
+        except Exception as e:  # pragma: no cover - defensive catch-all
+            logger.warning("payment.installment.settle_failed error=%s", e)
+            try:
+                record.installment_status = "rejected"
+                self._flag_review(getattr(record, "id", None), "settle_error")
+            except Exception:
+                pass
+            return record
+
     def _client(self) -> razorpay.Client:
         if not self._key_id or not self._key_secret:
             raise RuntimeError("payment_not_configured")
@@ -144,7 +232,8 @@ class servicePayment:
 
     def _persist_new_payment(self, owner_id: str, owner_role: str, amount: float, status: str,
                               razorpay_order_id: str = None, method: str = "razorpay", notes: dict = None,
-                              purpose: str = "other", inventory_id: str = None):
+                              purpose: str = "other", inventory_id: str = None,
+                              installment_no: int = None, due_date=None):
         payment_id = str(uuid.uuid4())
         return self._persistence.create_payment(
             id=payment_id,
@@ -158,18 +247,25 @@ class servicePayment:
             notes=notes or {},
             purpose=purpose,
             inventory_id=inventory_id,
+            installment_no=installment_no,
+            due_date=due_date,
         )
 
     def create_order(self, amount: float, owner_id: str, owner_role: str,
-                     purpose: str = "other", inventory_id: str = None):
+                     purpose: str = "other", inventory_id: str = None,
+                     installment_no: int = None, due_date=None):
         """Creates a Razorpay Order and a matching local record. The order is created with
         payment NOT yet captured - amount only becomes "paid" once verify_payment() confirms
         a valid signature from Razorpay, never from the client's own say-so."""
         self._validate_amount(amount)
         purpose = self._clean_purpose(purpose)
         inventory_id = (inventory_id or "").strip() or None
+        installment_no = self._clean_installment_no(installment_no)
+        due_date = self._clean_due_date(due_date)
         if purpose == BOOKING_PURPOSE and inventory_id:
             self._guard_unit_bookable(inventory_id)
+        if purpose == INSTALLMENT_PURPOSE:
+            self._guard_installment(owner_id, installment_no, amount, due_date)
 
         client = self._client()
         amount_paise = int(round(amount * 100))
@@ -186,11 +282,26 @@ class servicePayment:
             owner_id=owner_id, owner_role=owner_role, amount=amount,
             status="created", razorpay_order_id=order["id"],
             purpose=purpose, inventory_id=inventory_id,
+            installment_no=installment_no, due_date=due_date,
         )
         return record, self._key_id
 
+    def _clean_installment_no(self, value):
+        if value in (None, ""):
+            return None
+        try:
+            n = int(value)
+        except (TypeError, ValueError):
+            raise ValueError("installment_not_found")
+        return n if n > 0 else None
+
+    def _clean_due_date(self, value):
+        text = str(value or "").strip()
+        return text[:10] or None
+
     def record_cash_payment(self, amount: float, owner_id: str, owner_role: str, note: str = None,
-                            purpose: str = "other", inventory_id: str = None):
+                            purpose: str = "other", inventory_id: str = None,
+                            installment_no: int = None, due_date=None):
         """Records cash already collected in person - there's no gateway transaction to
         create or verify (unlike create_order/verify_payment), so this settles the record
         as "paid" immediately, straight from what was typed in. Available to both customers
@@ -201,14 +312,21 @@ class servicePayment:
         self._validate_amount(amount)
         purpose = self._clean_purpose(purpose)
         inventory_id = (inventory_id or "").strip() or None
+        installment_no = self._clean_installment_no(installment_no)
+        due_date = self._clean_due_date(due_date)
+        if purpose == INSTALLMENT_PURPOSE:
+            self._guard_installment(owner_id, installment_no, amount, due_date)
 
         note = (note or "").strip()
         record = self._persist_new_payment(
             owner_id=owner_id, owner_role=owner_role, amount=amount, status="paid",
             razorpay_order_id=None, method="cash", notes={"note": note} if note else {},
             purpose=purpose, inventory_id=inventory_id,
+            installment_no=installment_no, due_date=due_date,
         )
-        # Cash settles immediately -> lock the plot now.
+        # Cash settles immediately -> lock the plot / mark the milestone now.
+        if purpose == INSTALLMENT_PURPOSE:
+            return self._apply_installment_settlement(record)
         return self._apply_booking_to_inventory(record)
 
     def verify_payment(self, razorpay_order_id: str, razorpay_payment_id: str, razorpay_signature: str, owner_id: str):
@@ -241,16 +359,23 @@ class servicePayment:
             razorpay_payment_id=razorpay_payment_id,
             razorpay_signature=razorpay_signature,
         )
-        # update_payment_status doesn't carry purpose/inventory_id forward on every
-        # backend - copy them from the record we already loaded so the booking flip
-        # below always has them.
+        # update_payment_status doesn't carry purpose/inventory_id/installment fields
+        # forward on every backend - copy them from the record we already loaded so
+        # the settle step below always has them.
         if getattr(updated, "purpose", None) in (None, "other"):
             updated.purpose = getattr(record, "purpose", "other")
         if not getattr(updated, "inventory_id", None):
             updated.inventory_id = getattr(record, "inventory_id", None)
+        if getattr(updated, "installment_no", None) in (None, ""):
+            updated.installment_no = getattr(record, "installment_no", None)
+        if getattr(updated, "due_date", None) in (None, ""):
+            updated.due_date = getattr(record, "due_date", None)
 
         if verified:
-            self._apply_booking_to_inventory(updated)
+            if (getattr(updated, "purpose", None) or "other") == INSTALLMENT_PURPOSE:
+                self._apply_installment_settlement(updated)
+            else:
+                self._apply_booking_to_inventory(updated)
         return updated, verified
 
     def handle_webhook(self, raw_body: bytes, signature: str) -> str:
@@ -309,7 +434,7 @@ class servicePayment:
             # (book_unit is idempotent for the same payment id, so a re-run on an
             # already-booked unit is a harmless no-op).
             if new_status == "paid":
-                self._apply_booking_to_inventory(record)
+                self._settle_by_purpose(record)
             logger.info(
                 "payment.webhook.response event=%s payment_id=%s result=ignored_already_settled",
                 event_type, record.id,
@@ -321,14 +446,75 @@ class servicePayment:
         )
         if new_status == "paid":
             # Durable fallback: if the browser closed before /payments/verify ran, the
-            # webhook is what locks the plot. book_unit is idempotent for the same
-            # payment id, so a later /verify on the same order is a harmless no-op.
-            self._apply_booking_to_inventory(record)
+            # webhook is what locks the plot / marks the milestone. Both flips are
+            # idempotent for the same payment id, so a later /verify is a harmless no-op.
+            self._settle_by_purpose(record)
         logger.info(
             "payment.webhook.response event=%s payment_id=%s new_status=%s result=processed",
             event_type, record.id, new_status,
         )
         return f"processed:{new_status}"
+
+    def _settle_by_purpose(self, record):
+        if (getattr(record, "purpose", None) or "other") == INSTALLMENT_PURPOSE:
+            return self._apply_installment_settlement(record)
+        return self._apply_booking_to_inventory(record)
+
+    def _load_customer(self, owner_id: str):
+        try:
+            from Divinepersistence import persistenceCustomer
+            return persistenceCustomer().get_by_id(owner_id)
+        except Exception:  # pragma: no cover - name is optional on the receipt
+            return None
+
+    def _send_installment_receipt(self, record, milestone) -> None:
+        """Best-effort 'payment received' email with the receipt PDF attached.
+        Never raises - a mail failure must not affect the settled payment."""
+        try:
+            customer = self._load_customer(getattr(record, "owner_id", None))
+            email = getattr(customer, "email", None) if customer else None
+            if not email:
+                return
+            from DivineService.service_payment_receipt import generate_receipt_pdf, receipt_filename
+            from DivineService.service_email import serviceEmail, dispatch_installment_receipt_email
+            pdf = generate_receipt_pdf(record, milestone=milestone, customer=customer)
+            label = None
+            if milestone is not None:
+                label = getattr(milestone, "label", None) if not isinstance(milestone, dict) else milestone.get("label")
+            project = None
+            if milestone is not None:
+                project = getattr(milestone, "project_id", None) if not isinstance(milestone, dict) else milestone.get("project_id")
+            dispatch_installment_receipt_email(
+                serviceEmail(), email,
+                first_name=getattr(customer, "first_name", None),
+                project_name=project, milestone_label=label,
+                amount=getattr(record, "amount", None),
+                receipt_pdf=pdf, receipt_filename=receipt_filename(getattr(record, "id", "")),
+            )
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning("payment.installment.receipt_email_failed error=%s", e)
+
+    def get_receipt(self, payment_id: str, requester_id: str):
+        """(pdf_bytes, filename) for a settled payment the caller owns. Raises
+        ValueError('not_found') / PermissionError('forbidden') /
+        ValueError('payment_not_paid'). The PDF render itself never raises."""
+        record = self._persistence.get_by_id(payment_id)
+        if not record:
+            raise ValueError("not_found")
+        if record.owner_id != requester_id:
+            raise PermissionError("forbidden")
+        if (getattr(record, "status", None) or "") != "paid":
+            raise ValueError("payment_not_paid")
+
+        milestone = None
+        if (getattr(record, "purpose", None) or "other") == INSTALLMENT_PURPOSE:
+            svc = self._milestones()
+            if svc is not None:
+                milestone = svc.milestone_by_payment(record.owner_id, record.id)
+
+        from DivineService.service_payment_receipt import generate_receipt_pdf, receipt_filename
+        pdf = generate_receipt_pdf(record, milestone=milestone, customer=self._load_customer(record.owner_id))
+        return pdf, receipt_filename(record.id)
 
     def get(self, payment_id: str, requester_id: str):
         record = self._persistence.get_by_id(payment_id)

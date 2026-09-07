@@ -85,9 +85,12 @@ class KycVerificationOutDTO(BaseModel):
 class PaymentOrderRequestDTO(BaseModel):
     amount: float = Field(..., gt=0, description="Amount in INR (rupees), e.g. 50000.00")
     # "plot_booking" + inventory_id locks that unit to 'booked' when the payment
-    # settles. Omit both (defaults) for any non-booking payment.
-    purpose: Literal["plot_booking", "other"] = "other"
+    # settles. "installment" + installment_no pays a specific payment_schedule
+    # milestone. Omit for any other payment.
+    purpose: Literal["plot_booking", "installment", "other"] = "other"
     inventory_id: Optional[str] = Field(None, max_length=36)
+    installment_no: Optional[int] = Field(None, ge=1, description="1-based milestone position")
+    due_date: Optional[str] = Field(None, max_length=10, description="that milestone's ISO due date")
 
 
 class PaymentOrderOutDTO(BaseModel):
@@ -109,8 +112,10 @@ class PaymentVerifyRequestDTO(BaseModel):
 class PaymentCashRequestDTO(BaseModel):
     amount: float = Field(..., gt=0, description="Amount in INR (rupees) the customer handed over in cash")
     note: Optional[str] = Field(None, max_length=500)
-    purpose: Literal["plot_booking", "other"] = "other"
+    purpose: Literal["plot_booking", "installment", "other"] = "other"
     inventory_id: Optional[str] = Field(None, max_length=36)
+    installment_no: Optional[int] = Field(None, ge=1)
+    due_date: Optional[str] = Field(None, max_length=10)
 
 
 class PaymentOutDTO(BaseModel):
@@ -131,6 +136,12 @@ class PaymentOutDTO(BaseModel):
     inventory_id: Optional[str] = None
     inventory_status: Optional[str] = None
     inventory_conflict_reason: Optional[str] = None
+    # Instalment linkage. installment_status is "paid" when this call marked the
+    # milestone paid, "rejected" when the payment settled but failed a guard rail
+    # (money kept, flagged for review), or null on a non-instalment payment.
+    purpose: Optional[str] = None
+    installment_no: Optional[int] = None
+    installment_status: Optional[str] = None
 
 
 class VisitScheduleRequestDTO(BaseModel):
@@ -528,12 +539,27 @@ class CustomerAddressDTO(BaseModel):
 
 
 class PaymentScheduleRowDTO(BaseModel):
+    id: Optional[str] = None
     label: Optional[str] = None
     percent: Optional[float] = None
     due_days: Optional[int] = None
     due_date: Optional[str] = None
     amount: Optional[int] = None
+    status: Optional[str] = None          # paid | due | overdue | upcoming
+    pay_enabled_from: Optional[str] = None  # due_date - 5 days
+    paid_on: Optional[str] = None
+    paid_payment_id: Optional[str] = None
+
+
+class CustomerNextDueDTO(BaseModel):
+    milestone_id: Optional[str] = None
+    label: Optional[str] = None
+    amount: Optional[int] = None
+    due_date: Optional[str] = None
+    days_until_due: Optional[int] = None   # negative when overdue
     status: Optional[str] = None
+    last_reminder_kind: Optional[str] = None
+    last_reminder_at: Optional[str] = None
 
 
 class CustomerBookingDTO(BaseModel):
@@ -548,6 +574,7 @@ class CustomerBookingDTO(BaseModel):
     total_consideration: Optional[int] = None
     amount_received: Optional[int] = None
     payment_schedule: Optional[List[PaymentScheduleRowDTO]] = None
+    next_due: Optional[CustomerNextDueDTO] = None
 
 
 class CustomerProfileDTO(BaseModel):

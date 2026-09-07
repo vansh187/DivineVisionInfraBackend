@@ -7,6 +7,7 @@ from DivineService.loan_utils import normalize_indian_amount
 from DivineDTO.models import (
     CustomerAddressDTO,
     CustomerBookingDTO,
+    CustomerNextDueDTO,
     CustomerProfileDTO,
     PaymentScheduleRowDTO,
 )
@@ -79,9 +80,20 @@ class serviceCustomerProfile:
         "o": "other", "other": "other",
     }
 
-    def __init__(self, persistence: persistenceCustomerProfile = None):
+    def __init__(self, persistence: persistenceCustomerProfile = None, milestone_service=None):
         self._persistence = persistence or persistenceCustomerProfile()
         self._logger = logging.getLogger(__name__)
+        self._milestone_service = milestone_service  # lazily built in _milestones()
+
+    def _milestones(self):
+        if self._milestone_service is None:
+            try:
+                from DivineService.service_milestones import serviceMilestones
+                self._milestone_service = serviceMilestones(profile_persistence=self._persistence)
+            except Exception as exc:  # pragma: no cover - defensive
+                self._logger.warning("profile_milestone_service_init_failed error=%s", exc)
+                self._milestone_service = None
+        return self._milestone_service
 
     # -- public API ------------------------------------------------------
 
@@ -244,7 +256,55 @@ class serviceCustomerProfile:
             self._logger.warning(
                 "profile_booking_build_failed customer_id=%s", customer_id, exc_info=True
             )
+
+        # Milestone-backed enrichment: per-row status / pay_enabled_from / paid_on,
+        # a next_due summary, and amount_received re-derived from paid milestones.
+        # Falls back silently to the form-data schedule built above on any failure.
+        self._apply_milestone_schedule(booking, customer_id)
         return booking
+
+    def _apply_milestone_schedule(self, booking, customer_id):
+        try:
+            svc = self._milestones()
+            if svc is None:
+                return
+            enriched = svc.enriched_schedule(customer_id)
+            rows = (enriched or {}).get("rows") or []
+            if rows:
+                booking.payment_schedule = [
+                    PaymentScheduleRowDTO(
+                        id=self._text(r.get("id")),
+                        label=self._text(r.get("label")),
+                        percent=self._to_float(r.get("percent")),
+                        due_days=self._to_int(r.get("due_days")),
+                        due_date=self._text(r.get("due_date")),
+                        amount=self._to_int_rupees(r.get("amount")),
+                        status=self._text(r.get("status")),
+                        pay_enabled_from=self._text(r.get("pay_enabled_from")),
+                        paid_on=self._text(r.get("paid_on")),
+                        paid_payment_id=self._text(r.get("paid_payment_id")),
+                    )
+                    for r in rows
+                ]
+            nd = (enriched or {}).get("next_due")
+            if nd:
+                booking.next_due = CustomerNextDueDTO(
+                    milestone_id=self._text(nd.get("milestone_id")),
+                    label=self._text(nd.get("label")),
+                    amount=self._to_int_rupees(nd.get("amount")),
+                    due_date=self._text(nd.get("due_date")),
+                    days_until_due=self._to_int(nd.get("days_until_due")),
+                    status=self._text(nd.get("status")),
+                    last_reminder_kind=self._text(nd.get("last_reminder_kind")),
+                    last_reminder_at=self._text(nd.get("last_reminder_at")),
+                )
+            paid_total = svc.amount_received_rupees(customer_id)
+            if paid_total is not None:
+                booking.amount_received = paid_total
+        except Exception:
+            self._logger.warning(
+                "profile_milestone_schedule_failed customer_id=%s", customer_id, exc_info=True
+            )
 
     def _resolve_amount_received(self, customer_id, project_id):
         """Paid total (whole rupees) attributable to this booking.

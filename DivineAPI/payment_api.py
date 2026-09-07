@@ -1,4 +1,7 @@
+import io
+
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from sqlalchemy.exc import IntegrityError
 
 from DivineDTO.models import (
@@ -37,6 +40,11 @@ def _to_payment_out(record, verified: bool = None) -> PaymentOutDTO:
         inventory_id=getattr(record, "inventory_id", None),
         inventory_status=getattr(record, "inventory_status", None),
         inventory_conflict_reason=getattr(record, "inventory_conflict_reason", None),
+        # Instalment linkage. purpose / installment_no are stored columns;
+        # installment_status is transient (set only on the settling call).
+        purpose=getattr(record, "purpose", None),
+        installment_no=getattr(record, "installment_no", None),
+        installment_status=getattr(record, "installment_status", None),
     )
 
 
@@ -46,6 +54,7 @@ def create_order(dto: PaymentOrderRequestDTO, current_user: dict = Depends(get_c
         record, key_id = _payment_service.create_order(
             dto.amount, owner_id=current_user["sub"], owner_role=current_user["role"],
             purpose=dto.purpose, inventory_id=dto.inventory_id,
+            installment_no=dto.installment_no, due_date=dto.due_date,
         )
         return PaymentOrderOutDTO(
             payment_id=record.id,
@@ -92,6 +101,7 @@ def record_cash_payment(dto: PaymentCashRequestDTO, current_user: dict = Depends
         record = _payment_service.record_cash_payment(
             dto.amount, owner_id=current_user["sub"], owner_role=current_user["role"], note=dto.note,
             purpose=dto.purpose, inventory_id=dto.inventory_id,
+            installment_no=dto.installment_no, due_date=dto.due_date,
         )
         return _to_payment_out(record)
     except ValueError as e:
@@ -122,6 +132,25 @@ async def razorpay_webhook(request: Request):
     except Exception:
         raise HTTPException(status_code=500, detail="internal_error")
     return {"status": result}
+
+
+@router.get("/{payment_id}/receipt")
+def get_payment_receipt(payment_id: str, current_user: dict = Depends(get_current_user)):
+    """Server-rendered payment receipt / slip PDF for a settled payment. Owner only."""
+    try:
+        pdf_bytes, filename = _payment_service.get_receipt(payment_id, requester_id=current_user["sub"])
+        return StreamingResponse(
+            io.BytesIO(pdf_bytes), media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="forbidden")
+    except ValueError as e:
+        if str(e) == "payment_not_paid":
+            raise HTTPException(status_code=400, detail="payment_not_paid")
+        raise HTTPException(status_code=404, detail="not_found")
+    except Exception:
+        raise HTTPException(status_code=500, detail="receipt_failed")
 
 
 @router.get("/{payment_id}", response_model=PaymentOutDTO)

@@ -30,9 +30,19 @@ def _persistence(**overrides):
     return p
 
 
+class _NoMilestones:
+    """Keeps these tests focused on the form-data fallback path; the milestone-backed
+    enrichment is covered by tests/test_installment_payments.py."""
+    def enriched_schedule(self, *a, **k):
+        return {"rows": [], "next_due": None}
+
+    def amount_received_rupees(self, *a, **k):
+        return None
+
+
 def _service(**overrides):
     p = _persistence(**overrides)
-    return serviceCustomerProfile(p), p
+    return serviceCustomerProfile(p, milestone_service=_NoMilestones()), p
 
 
 def test_non_customer_role_is_rejected():

@@ -516,8 +516,32 @@ class serviceDocument:
             owner_id=owner_id,
         )
 
+        # Materialise the per-milestone rows so instalment payments + the payment-due
+        # reminder job have a table to work against. Best-effort: never blocks the upload.
+        self._create_payment_milestones(doc, plan, owner_id, project_id, payment,
+                                        _first_present(form_data, _BOOKING_DATE_KEYS))
+
         signed_url = self._sign_url(object_path, bucket=self._booking_forms_bucket)
         return doc, signed_url, DEFAULT_SIGNED_URL_EXPIRY_SECONDS, plan
+
+    def _create_payment_milestones(self, doc, plan, owner_id, project_id, payment, booking_date_raw):
+        try:
+            from DivineService.service_milestones import serviceMilestones
+            booking_id = getattr(doc, "id", None)
+            if not booking_id or not isinstance(plan, dict) or not plan.get("rows"):
+                return
+            svc = serviceMilestones()
+            rows = svc._rows_from_plan(
+                plan, booking_id=booking_id, customer_id=owner_id,
+                project_id=project_id, inventory_id=getattr(payment, "inventory_id", None),
+                booking_payment_id=getattr(payment, "id", None),
+                booking_date=booking_date_raw or plan.get("booking_date"),
+            )
+            if rows:
+                svc._persistence.create_milestones(rows)
+        except Exception as e:
+            logger.warning("document_milestone_create_failed doc_id=%s error=%s",
+                           getattr(doc, "id", None), e)
 
     def _confirm_inventory_booked(self, doc, payment, client_inventory_id: str, owner_id: str) -> None:
         """Attaches doc.inventory_id / doc.inventory_status. Never raises - the document

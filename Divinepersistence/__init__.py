@@ -10,5 +10,6 @@ from .persistence_market_trend import persistenceMarketTrend
 from .persistence_broker_commission import persistenceBrokerCommission
 from .persistence_chatbot import persistenceChatbot
 from .persistence_inventory import persistenceInventory
+from .persistence_milestone import persistenceMilestone
 
-__all__ = ["PersistenceDB", "persistenceCustomer", "persistenceCustomerProfile", "persistenceBroker", "persistenceDocument", "persistenceKyc", "persistencePayment", "persistenceVisit", "persistenceMarketTrend", "persistenceBrokerCommission", "persistenceChatbot", "persistenceInventory"]
+__all__ = ["PersistenceDB", "persistenceCustomer", "persistenceCustomerProfile", "persistenceBroker", "persistenceDocument", "persistenceKyc", "persistencePayment", "persistenceVisit", "persistenceMarketTrend", "persistenceBrokerCommission", "persistenceChatbot", "persistenceInventory", "persistenceMilestone"]
