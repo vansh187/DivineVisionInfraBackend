@@ -34,18 +34,19 @@ def _pay_service():
 
 def _row(**kw):
     base = {"id": "pay1", "owner_id": "C00001", "owner_role": "customer", "amount": 500000,
-            "currency": "INR", "status": "paid", "method": "cash", "purpose": "other",
+            "currency": "INR", "status": "paid", "method": "razorpay", "purpose": "other",
             "inventory_id": None, "razorpay_order_id": None, "razorpay_payment_id": None}
     base.update(kw)
     return SimpleNamespace(**base)
 
 
-def test_cash_booking_payment_flips_unit_to_booked():
+def test_broker_recorded_cash_booking_flips_unit_to_booked():
     svc, payments, inventory = _pay_service()
-    payments.create_payment.return_value = _row(purpose="plot_booking", inventory_id="INV-9")
+    payments.create_payment.return_value = _row(method="cash", owner_role="broker",
+                                                purpose="plot_booking", inventory_id="INV-9")
     inventory.book_unit.return_value = _row(id="INV-9", status="booked")
 
-    record = svc.record_cash_payment(500000, owner_id="C00001", owner_role="customer",
+    record = svc.record_cash_payment(500000, owner_id="B00001", owner_role="broker",
                                      purpose="plot_booking", inventory_id="INV-9")
 
     inventory.book_unit.assert_called_once_with(id="INV-9", payment_id="pay1", customer_id="C00001")
@@ -53,11 +54,27 @@ def test_cash_booking_payment_flips_unit_to_booked():
     assert record.inventory_conflict_reason is None
 
 
+def test_customer_self_reported_cash_booking_never_flips_inventory():
+    """A customer's unverified cash entry must not move inventory - otherwise anyone
+    locks arbitrary plots for a rupee. The payment row is still created."""
+    svc, payments, inventory = _pay_service()
+    payments.create_payment.return_value = _row(method="cash", owner_role="customer",
+                                                purpose="plot_booking", inventory_id="INV-9")
+
+    record = svc.record_cash_payment(1, owner_id="C00001", owner_role="customer",
+                                     purpose="plot_booking", inventory_id="INV-9")
+
+    inventory.book_unit.assert_not_called()
+    assert record.status == "paid"
+    assert record.inventory_status is None
+
+
 def test_cash_payment_without_booking_purpose_never_touches_inventory():
     svc, payments, inventory = _pay_service()
-    payments.create_payment.return_value = _row(purpose="other", inventory_id=None)
+    payments.create_payment.return_value = _row(method="cash", owner_role="broker",
+                                                purpose="other", inventory_id=None)
 
-    record = svc.record_cash_payment(1000, owner_id="C00001", owner_role="customer")
+    record = svc.record_cash_payment(1000, owner_id="B00001", owner_role="broker")
 
     inventory.book_unit.assert_not_called()
     assert record.inventory_status is None
@@ -65,10 +82,11 @@ def test_cash_payment_without_booking_purpose_never_touches_inventory():
 
 def test_booking_flip_conflict_flags_manual_review_but_still_settles():
     svc, payments, inventory = _pay_service()
-    payments.create_payment.return_value = _row(purpose="plot_booking", inventory_id="INV-TAKEN")
+    payments.create_payment.return_value = _row(method="cash", owner_role="broker",
+                                                purpose="plot_booking", inventory_id="INV-TAKEN")
     inventory.book_unit.return_value = None  # already booked / sold / reserved
 
-    record = svc.record_cash_payment(500000, owner_id="C00001", owner_role="customer",
+    record = svc.record_cash_payment(500000, owner_id="B00001", owner_role="broker",
                                      purpose="plot_booking", inventory_id="INV-TAKEN")
 
     assert record.status == "paid"                       # money is real - payment still settles
@@ -79,15 +97,28 @@ def test_booking_flip_conflict_flags_manual_review_but_still_settles():
 
 def test_booking_flip_swallows_inventory_db_error():
     svc, payments, inventory = _pay_service()
-    payments.create_payment.return_value = _row(purpose="plot_booking", inventory_id="INV-9")
+    payments.create_payment.return_value = _row(method="cash", owner_role="broker",
+                                                purpose="plot_booking", inventory_id="INV-9")
     inventory.book_unit.side_effect = RuntimeError("db down")
 
-    record = svc.record_cash_payment(500000, owner_id="C00001", owner_role="customer",
+    record = svc.record_cash_payment(500000, owner_id="B00001", owner_role="broker",
                                      purpose="plot_booking", inventory_id="INV-9")
 
     assert record.inventory_status == "conflict"
     assert record.inventory_conflict_reason == "inventory_update_failed"
     payments.flag_manual_review.assert_called_once_with("pay1", "inventory_update_failed")
+
+
+def test_create_order_rejects_a_booking_for_an_already_taken_unit():
+    svc, payments, inventory = _pay_service()
+    inventory.get_by_id.return_value = SimpleNamespace(id="INV-SOLD", status="sold")
+    try:
+        svc.create_order(500000, owner_id="C00001", owner_role="customer",
+                         purpose="plot_booking", inventory_id="INV-SOLD")
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert str(e) == "unit_not_available"
+    payments.create_payment.assert_not_called()
 
 
 def test_invalid_purpose_is_rejected():
@@ -134,6 +165,58 @@ def test_verify_payment_failed_signature_does_not_flip(mock_client):
 
     assert verified is False
     inventory.book_unit.assert_not_called()
+
+
+@patch("DivineService.service_payment.razorpay.Utility")
+def test_webhook_retries_flip_for_a_booking_that_settled_without_locking(mock_utility, monkeypatch):
+    """verify_payment settled the payment but a transient error left the plot unbooked.
+    The captured webhook must still finish the lock, not bail at 'already settled'."""
+    monkeypatch.setenv("RAZORPAY_WEBHOOK_SECRET", "whsec_fake")
+    mock_utility.return_value.verify_webhook_signature.return_value = True
+    svc, payments, inventory = _pay_service()
+    payments.get_by_razorpay_order_id.return_value = _row(
+        id="pay1", status="paid", method="razorpay", purpose="plot_booking",
+        inventory_id="INV-9", razorpay_order_id="order_x")
+    inventory.book_unit.return_value = _row(id="INV-9", status="booked")
+
+    body = ('{"event":"payment.captured","payload":{"payment":{"entity":'
+            '{"id":"pay_x","order_id":"order_x"}}}}')
+    result = svc.handle_webhook(body.encode(), "sig")
+
+    assert result == "ignored_already_settled"
+    inventory.book_unit.assert_called_once_with(id="INV-9", payment_id="pay1", customer_id="C00001")
+
+
+# --------------------------------------------------------------------------- #
+# document upload safety-net: only ever books the payment's OWN unit           #
+# --------------------------------------------------------------------------- #
+def test_document_safety_net_books_only_the_payments_own_unit():
+    from DivineService.service_document import serviceDocument
+    inv = MagicMock()
+    inv.book_unit.return_value = SimpleNamespace(id="INV-PAID", status="booked")
+    svc = serviceDocument(MagicMock(), inventory_persistence=inv)
+
+    doc = SimpleNamespace()
+    payment = SimpleNamespace(id="pay1", purpose="plot_booking", inventory_id="INV-PAID")
+    # client tries to smuggle a different plot in the form field - must be ignored
+    svc._confirm_inventory_booked(doc, payment=payment, client_inventory_id="INV-SOMEONE-ELSE", owner_id="C1")
+
+    inv.book_unit.assert_called_once_with(id="INV-PAID", payment_id="pay1", customer_id="C1")
+    assert doc.inventory_id == "INV-PAID"
+    assert doc.inventory_status == "booked"
+
+
+def test_document_safety_net_does_nothing_for_a_non_booking_payment():
+    from DivineService.service_document import serviceDocument
+    inv = MagicMock()
+    svc = serviceDocument(MagicMock(), inventory_persistence=inv)
+
+    doc = SimpleNamespace()
+    payment = SimpleNamespace(id="pay1", purpose="other", inventory_id=None)
+    svc._confirm_inventory_booked(doc, payment=payment, client_inventory_id="INV-X", owner_id="C1")
+
+    inv.book_unit.assert_not_called()
+    assert doc.inventory_status is None
 
 
 # --------------------------------------------------------------------------- #

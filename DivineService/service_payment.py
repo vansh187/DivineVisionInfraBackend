@@ -33,6 +33,28 @@ class servicePayment:
             raise ValueError("invalid_purpose")
         return purpose
 
+    def _booking_flip_trusted(self, record) -> bool:
+        """A plot flip permanently removes a unit from the available pool, so it may
+        only ride on money we actually trust:
+
+          * a Razorpay payment - the caller only reaches _apply_booking_to_inventory
+            after verify_payment / the webhook has confirmed the signature, so a
+            'paid' razorpay row is real; or
+          * a cash payment RECORDED BY A BROKER - staff logging cash they physically
+            collected, same trust level as the receipt book.
+
+        A customer's own self-reported cash entry is NOT trusted: it settles
+        'paid' straight from typed input with no verification, so honouring it here
+        would let anyone lock arbitrary plots for a rupee. Those still create a
+        payment row; a broker confirms the plot via POST /inventory/{id}/book."""
+        method = (getattr(record, "method", None) or "razorpay").lower()
+        role = (getattr(record, "owner_role", None) or "").lower()
+        if method == "razorpay":
+            return True
+        if method == "cash" and role == "broker":
+            return True
+        return False
+
     def _apply_booking_to_inventory(self, record):
         """Called right after a plot-booking payment settles. Flips the linked
         inventory unit to 'booked' in its own guarded UPDATE. Attaches the outcome
@@ -55,6 +77,10 @@ class servicePayment:
             payment_id = getattr(record, "id", None)
             owner_id = getattr(record, "owner_id", None)
             if purpose != BOOKING_PURPOSE or not inventory_id or not payment_id:
+                return record
+            if not self._booking_flip_trusted(record):
+                logger.info("payment.booking.flip_skipped_untrusted payment_id=%s method=%s role=%s",
+                            payment_id, getattr(record, "method", None), getattr(record, "owner_role", None))
                 return record
 
             try:
@@ -88,6 +114,22 @@ class servicePayment:
             self._persistence.flag_manual_review(payment_id, reason)
         except Exception as e:  # pragma: no cover - defensive
             logger.warning("payment.booking.flag_review_failed payment_id=%s error=%s", payment_id, e)
+
+    def _guard_unit_bookable(self, inventory_id: str) -> None:
+        """Best-effort pre-check at order time: reject starting a booking payment for
+        a unit that is already booked / sold / reserved, so the customer isn't
+        charged for a plot they can't get. This is NOT a hold - two orders for the
+        same still-available unit both pass here and the loser is caught later by
+        the guarded flip (inventory_status='conflict'); a time-boxed hold is the
+        deferred Phase-2 fix for that residual race. A lookup failure never blocks
+        the order."""
+        try:
+            unit = self._inventory_persistence.get_by_id(inventory_id)
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning("payment.booking.prelookup_failed inventory_id=%s error=%s", inventory_id, e)
+            return
+        if unit is not None and (getattr(unit, "status", None) or "") not in ("available", "held"):
+            raise ValueError("unit_not_available")
 
     def _client(self) -> razorpay.Client:
         if not self._key_id or not self._key_secret:
@@ -126,6 +168,8 @@ class servicePayment:
         self._validate_amount(amount)
         purpose = self._clean_purpose(purpose)
         inventory_id = (inventory_id or "").strip() or None
+        if purpose == BOOKING_PURPOSE and inventory_id:
+            self._guard_unit_bookable(inventory_id)
 
         client = self._client()
         amount_paise = int(round(amount * 100))
@@ -260,7 +304,12 @@ class servicePayment:
         if record.status == "paid":
             # Already settled - a later "failed" event (out-of-order delivery, or a
             # duplicate retry after we already processed "captured") must not clobber a
-            # captured payment back to failed.
+            # captured payment back to failed. But a "captured" retry IS the chance to
+            # finish a plot lock that a transient error dropped during /payments/verify
+            # (book_unit is idempotent for the same payment id, so a re-run on an
+            # already-booked unit is a harmless no-op).
+            if new_status == "paid":
+                self._apply_booking_to_inventory(record)
             logger.info(
                 "payment.webhook.response event=%s payment_id=%s result=ignored_already_settled",
                 event_type, record.id,

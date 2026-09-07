@@ -503,33 +503,52 @@ class serviceDocument:
         # Best-effort: a mail failure never affects the stored booking.
         self._notify_booking_confirmation(owner_id, owner_role, form_data, payment.amount, payment.currency)
 
-        # Safety-net plot lock. Prefer the inventory_id the client sent; fall back to
-        # the one recorded on the payment. Idempotent for the same payment id, so this
-        # is a no-op when servicePayment already flipped the unit at settle time.
+        # Safety-net plot lock. This ONLY ever re-confirms the exact unit the payment
+        # itself was created for (payment.purpose == 'plot_booking' + payment.inventory_id) -
+        # it never binds a plot from the client-supplied form field, so a caller can't
+        # attach an arbitrary plot to an unrelated paid payment. book_unit is idempotent
+        # for the same payment id, so this is a no-op when servicePayment already flipped
+        # the unit at settle time.
         self._confirm_inventory_booked(
             doc,
-            inventory_id=(inventory_id or "").strip() or getattr(payment, "inventory_id", None),
-            payment_id=payment_id,
+            payment=payment,
+            client_inventory_id=(inventory_id or "").strip() or None,
             owner_id=owner_id,
         )
 
         signed_url = self._sign_url(object_path, bucket=self._booking_forms_bucket)
         return doc, signed_url, DEFAULT_SIGNED_URL_EXPIRY_SECONDS, plan
 
-    def _confirm_inventory_booked(self, doc, inventory_id: str, payment_id: str, owner_id: str) -> None:
+    def _confirm_inventory_booked(self, doc, payment, client_inventory_id: str, owner_id: str) -> None:
         """Attaches doc.inventory_id / doc.inventory_status. Never raises - the document
-        is already stored, so a booking-flip miss is logged, not surfaced as a failure."""
+        is already stored, so a booking-flip miss is logged, not surfaced as a failure.
+
+        Trust rule: the plot is taken from the PAYMENT (purpose 'plot_booking' +
+        payment.inventory_id), never from the client form field. The form field is
+        only echoed back on the doc and, when the payment carries no inventory_id,
+        used purely to log the mismatch."""
         try:
-            doc.inventory_id = inventory_id or None
+            payment_purpose = (getattr(payment, "purpose", None) or "other")
+            payment_inventory_id = getattr(payment, "inventory_id", None)
+            doc.inventory_id = payment_inventory_id or client_inventory_id or None
             doc.inventory_status = None
-            if not inventory_id or self._inventory_persistence is None:
+
+            if payment_purpose != "plot_booking" or not payment_inventory_id:
+                if client_inventory_id and client_inventory_id != payment_inventory_id:
+                    logger.info(
+                        "document_inventory_id_ignored client=%s payment=%s purpose=%s",
+                        client_inventory_id, payment_inventory_id, payment_purpose,
+                    )
                 return
+            if self._inventory_persistence is None:
+                return
+
             unit = self._inventory_persistence.book_unit(
-                id=inventory_id, payment_id=payment_id, customer_id=owner_id,
+                id=payment_inventory_id, payment_id=getattr(payment, "id", None), customer_id=owner_id,
             )
             doc.inventory_status = "booked" if unit is not None else "conflict"
         except Exception as e:
-            logger.warning("document_inventory_confirm_failed inventory_id=%s error=%s", inventory_id, e)
+            logger.warning("document_inventory_confirm_failed error=%s", e)
             try:
                 doc.inventory_status = "conflict"
             except Exception:

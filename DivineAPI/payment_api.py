@@ -57,6 +57,8 @@ def create_order(dto: PaymentOrderRequestDTO, current_user: dict = Depends(get_c
             status=record.status,
         )
     except ValueError as e:
+        if str(e) == "unit_not_available":
+            raise HTTPException(status_code=409, detail="unit_not_available")
         raise HTTPException(status_code=400, detail=str(e))
     except IntegrityError:
         raise HTTPException(status_code=409, detail="conflict")

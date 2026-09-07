@@ -55,8 +55,12 @@ optional; omit them for any non-booking payment.
 }
 ```
 
-`400 {"detail":"invalid_purpose"}` if `purpose` is anything other than
-`plot_booking` / `other`.
+Errors:
+- `400 {"detail":"invalid_purpose"}` — `purpose` not `plot_booking` / `other`.
+- `409 {"detail":"unit_not_available"}` — the `inventory_id` is already
+  `booked` / `sold` / `reserved`. Don't start the payment; refresh the plot list.
+  (Best-effort pre-check — it is not a hold, so two customers can still both pass
+  it and race; the loser is caught at `/verify` with `inventory_status:"conflict"`.)
 
 ---
 
@@ -121,17 +125,26 @@ review on the backend.
 ```
 
 ### Response 200
-Same `PaymentOut` shape as §3 — includes `inventory_id`, `inventory_status`
-(`"booked"` / `"conflict"`), `inventory_conflict_reason`. Cash settles immediately,
-so the plot is locked on this call.
+Same `PaymentOut` shape as §3 — includes `inventory_id`, `inventory_status`,
+`inventory_conflict_reason`.
+
+**Important — who can lock a plot with cash:** the plot is flipped to `booked`
+**only when a broker/staff token records the cash** (staff confirming money they
+physically collected). A **customer's** own cash entry still creates the payment
+row but returns `inventory_status: null` and does **not** lock the plot — an
+unverified self-report can't remove a unit from the pool. Staff then confirm it
+with `POST /inventory/{id}/book` (§6), or the customer pays via Razorpay (§2–3),
+which locks it immediately.
 
 ---
 
 ## 5. `POST /documents/project-booking-application`  — optional safety-net field
 
-Add `inventory_id` as a **multipart form field**. It is only a backstop: if the
-payment already locked the plot (§3/§4) this is a harmless no-op. It covers older
-payments made before `purpose`/`inventory_id` existed.
+Add `inventory_id` as a **multipart form field**. It is only a backstop and is
+**echo-only** — the backend re-confirms the plot **from the payment itself**
+(`payment.purpose == "plot_booking"` + `payment.inventory_id`), never from this
+form field, so it can't be used to attach an unrelated plot to a paid payment. If
+the payment already locked the plot (§3/§4) this is a harmless no-op.
 
 ```
 Content-Type: multipart/form-data
@@ -214,10 +227,15 @@ webhook (or the document safety-net) is always safe to call.
 
 1. Booking payment → send `purpose: "plot_booking"` + `inventory_id` on
    `POST /payments/create-order` **and** `POST /payments/cash`.
-2. After `POST /payments/verify` / `/cash`: read `inventory_status`.
+2. `POST /payments/create-order` may now return `409 unit_not_available` → the plot
+   was taken before checkout started; refresh the list, don't open Razorpay.
+3. After `POST /payments/verify` / `/cash`: read `inventory_status`.
    - `"booked"` → proceed as normal.
    - `"conflict"` → payment succeeded but plot was taken; show the re-assign/refund
      message, don't show a payment error.
-3. `POST /documents/project-booking-application` → also send `inventory_id` (form field).
-4. The "available plots" list already only shows `available` — no change needed, the
+   - `null` on a customer **cash** booking is expected — staff confirm the plot
+     separately; treat the booking as pending-confirmation, not failed.
+4. `POST /documents/project-booking-application` → also send `inventory_id` (form
+   field, echo-only backstop).
+5. The "available plots" list already only shows `available` — no change needed, the
    booked plot just stops appearing.
