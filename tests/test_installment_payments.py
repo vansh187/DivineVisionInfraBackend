@@ -386,3 +386,12 @@ def test_reminder_job_endpoint_requires_token(monkeypatch):
     ok = client.post("/jobs/payment-reminders?key=s3cr3t")
     assert ok.status_code == 200, ok.text
     assert "scanned_customers" in ok.json()
+
+
+def test_reminder_job_endpoint_accepts_plain_get(monkeypatch):
+    # cron-job.org stores only a URL - a default GET must work too.
+    monkeypatch.setenv("DIVINE_JOBS_TOKEN", "s3cr3t")
+    assert client.get("/jobs/payment-reminders").status_code == 401
+    ok = client.get("/jobs/payment-reminders?key=s3cr3t")
+    assert ok.status_code == 200, ok.text
+    assert "scanned_customers" in ok.json()

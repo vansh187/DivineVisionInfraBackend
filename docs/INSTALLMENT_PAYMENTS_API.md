@@ -169,11 +169,14 @@ Received" email with the **receipt PDF attached** and a *View My Payments* butto
 failure never affects the settled payment.
 
 ### Payment due (scheduled)
-`POST /jobs/payment-reminders?key=<DIVINE_JOBS_TOKEN>` — call **once daily** from
-cron-job.org (same as the `/health` keep-alive).
+`GET` **or** `POST` `/jobs/payment-reminders?key=<DIVINE_JOBS_TOKEN>` — call **once
+daily** from cron-job.org (same as the `/health` keep-alive). Both methods hit the
+same handler, so the cron only needs to store the URL — no request method or body
+to configure. The token travels in the query string; there is no request body.
 
 - No token configured → `503 jobs_not_configured`. Wrong/missing key → `401`.
 - `200` → summary `{ "scanned_customers", "sent": {"T_MINUS_20": n, ...}, "skipped", "errors", "no_email" }`.
+- Safe to fire twice a day — reminders are de-duplicated, so a repeat run sends nothing extra.
 
 For each customer with a booked plot and an unpaid **earliest** milestone `M`, it
 sends **one** email per run — the most urgent kind not already sent:
@@ -190,8 +193,10 @@ amount (`₹ 4,43,576`), due date, days remaining / overdue-by, outstanding afte
 this milestone, and a **Pay Now** button → `/customer/profile#payments`.
 Subject: `Payment due - ₹4,43,576 for OPS Divine Greens Plot 204 by 10 Apr 2025`.
 
-**Recommended cron-job.org config:** `POST https://<backend>/jobs/payment-reminders?key=<DIVINE_JOBS_TOKEN>`,
-schedule `0 3 * * *` (08:30 IST ≈ 03:00 UTC), timeout 60s.
+**Recommended cron-job.org config:** URL
+`https://<backend>/jobs/payment-reminders?key=<DIVINE_JOBS_TOKEN>`, schedule
+`0 3 * * *` (08:30 IST ≈ 03:00 UTC), timeout 60s. Leave the method as the default
+(GET) or set POST — either works.
 
 ---
 
