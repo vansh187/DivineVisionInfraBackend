@@ -434,26 +434,33 @@ class serviceZoho:
 
     def push_customer_signup(self, customer_id: str, username: str, first_name: str = None,
                               last_name: str = None, email: str = None, phone: str = None) -> bool:
-        return self._push_signup_contact(
+        return self._push_signup_lead(
             record_id=customer_id, role="Customer", username=username,
             first_name=first_name, last_name=last_name, email=email, phone=phone,
         )
 
     def push_broker_signup(self, broker_id: str, username: str, first_name: str = None,
                             last_name: str = None, email: str = None, phone: str = None) -> bool:
-        return self._push_signup_contact(
+        return self._push_signup_lead(
             record_id=broker_id, role="Broker", username=username,
             first_name=first_name, last_name=last_name, email=email, phone=phone,
         )
 
-    def _push_signup_contact(self, record_id: str, role: str, username: str, first_name: str,
-                              last_name: str, email: str, phone: str) -> bool:
-        """Syncs a customer/broker signup into the Zoho CRM Contacts module. Requires an
-        email to upsert safely (Email is the only reliably unique field available here) -
-        without one the sync is skipped rather than risking duplicate Contacts on retry."""
+    def _push_signup_lead(self, record_id: str, role: str, username: str, first_name: str,
+                           last_name: str, email: str, phone: str) -> bool:
+        """Syncs a customer/broker signup into the Zoho CRM Leads module - per the client,
+        every synced record (signups and chatbot leads alike) lands in Leads, never
+        Contacts. Upserts on Email and/or Phone so a retry updates the same Lead instead
+        of duplicating it; with neither identifier there's nothing safe to dedupe on, so
+        the sync is skipped."""
         try:
-            if not email:
-                logger.info("zoho_push_signup_skipped role=%s id=%s reason=no_email", role, record_id)
+            dup_fields = []
+            if email:
+                dup_fields.append("Email")
+            if phone:
+                dup_fields.append("Phone")
+            if not dup_fields:
+                logger.info("zoho_push_signup_skipped role=%s id=%s reason=no_email_or_phone", role, record_id)
                 return False
             record = {
                 "Last_Name": last_name or username or record_id,
@@ -463,7 +470,7 @@ class serviceZoho:
                 "Lead_Source": f"Website {role} Signup",
                 "Description": f"Divine {role} signup, id={record_id}, username={username}",
             }
-            return self._upsert("Contacts", record, ["Email"])
+            return self._upsert("Leads", record, dup_fields)
         except Exception as e:
             logger.warning("zoho_push_signup_exception role=%s id=%s error=%s", role, record_id, e)
             return False

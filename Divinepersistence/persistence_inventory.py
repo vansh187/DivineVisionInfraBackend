@@ -28,6 +28,9 @@ class InventoryUnitModel(Base):
     reserved_by_broker_id = Column(String(6), index=True)
     reserved_at = Column(DateTime(timezone=True))
     reserved_until = Column(DateTime(timezone=True))
+    booked_at = Column(DateTime(timezone=True))
+    booked_payment_id = Column(String(36))
+    booked_by = Column(String(6), index=True)
     created_date = Column(DateTime(timezone=True))
     last_updated_date = Column(DateTime(timezone=True))
 
@@ -210,3 +213,44 @@ class persistenceInventory:
         with self._session_factory() as db:
             result = db.execute(text(self._q("list_reservations_for_broker")), {"broker_id": broker_id})
             return [RowWrapper(row) for row in result.mappings().all()]
+
+    # ---- customer bookings ------------------------------------------------
+    def book_unit(self, id: str, payment_id: str, customer_id: str = None):
+        """Race-safe flip to 'booked'. The guarded UPDATE only matches a unit that is
+        still 'available'/'held', OR is already 'booked' by THIS same payment (so the
+        document-upload safety-net can re-run it as a no-op). Returns the row on
+        success, None when the unit is missing or locked by someone else. Never
+        raises for a business miss - only a genuine DB error propagates."""
+        self.expire_stale_reservations()
+        with self._session_factory() as db:
+            try:
+                now = datetime.now(timezone.utc)
+                result = db.execute(text(self._q("book_unit")), {
+                    "id": id, "payment_id": payment_id, "customer_id": customer_id, "now": now,
+                })
+                row = result.mappings().first()
+                if not row:
+                    db.rollback()
+                    return None
+                db.commit()
+                return RowWrapper(row)
+            except Exception:
+                db.rollback()
+                raise
+
+    def unbook_unit(self, id: str):
+        """Repair path: 'booked' -> 'available', clearing the booking columns. Returns
+        the row on success, None if the unit isn't currently 'booked'."""
+        with self._session_factory() as db:
+            try:
+                now = datetime.now(timezone.utc)
+                result = db.execute(text(self._q("unbook_unit")), {"id": id, "now": now})
+                row = result.mappings().first()
+                if not row:
+                    db.rollback()
+                    return None
+                db.commit()
+                return RowWrapper(row)
+            except Exception:
+                db.rollback()
+                raise

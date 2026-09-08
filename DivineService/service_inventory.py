@@ -18,7 +18,9 @@ SEARCH_FETCH_CAP = 2000
 ALLOWED_UNIT_TYPES = {"plot", "floor", "flat", "commercial"}
 # 'reserved' is deliberately excluded from filterable statuses - it's a private Channel
 # Partner state, never something a public/customer search should be able to select for.
-ALLOWED_STATUSES = {"available", "held", "sold"}
+# search_units already returns ONLY 'available' when no status filter is passed, so
+# 'held'/'booked'/'sold' here just let internal tooling ask for them explicitly.
+ALLOWED_STATUSES = {"available", "held", "booked", "sold"}
 AREA_MATCH_TOLERANCE_SQYD = 100.0
 AREA_TOLERANCE_RATIO = 0.15
 RESERVATION_DURATION_DAYS = 3
@@ -427,3 +429,38 @@ class serviceInventory:
         records = self._persistence.list_reservations_for_broker(broker_id)
         reservations = [self._format_reserved_unit(r, price_cache) for r in records]
         return {"count": len(reservations), "reservations": reservations}
+
+    # ---- staff booking repair -------------------------------------------
+    def _format_booking_result(self, record) -> dict:
+        return {
+            "id": str(record.id),
+            "status": record.status,
+            "booked_at": self._to_iso_or_none(getattr(record, "booked_at", None)),
+            "booked_payment_id": getattr(record, "booked_payment_id", None),
+            "booked_by": getattr(record, "booked_by", None),
+        }
+
+    def book_unit_repair(self, inventory_id: str, payment_id: str = None,
+                         actor_id: str = None) -> dict:
+        """Force an available/held unit to 'booked' (manual reconciliation). 409 if the
+        unit is already booked by a different payment, or sold/reserved."""
+        if not (inventory_id or "").strip():
+            raise ValueError("inventory_id_required")
+        record = self._persistence.book_unit(
+            id=inventory_id,
+            payment_id=(payment_id or "").strip() or f"repair:{actor_id or 'staff'}",
+            customer_id=None,
+        )
+        if record is None:
+            raise ValueError("unit_not_available")
+        return self._format_booking_result(record)
+
+    def unbook_unit(self, inventory_id: str, actor_id: str = None) -> dict:
+        """Reverse a booking: 'booked' -> 'available' (cancellation / refund). 409 if the
+        unit is not currently 'booked'."""
+        if not (inventory_id or "").strip():
+            raise ValueError("inventory_id_required")
+        record = self._persistence.unbook_unit(id=inventory_id)
+        if record is None:
+            raise ValueError("unit_not_booked")
+        return self._format_booking_result(record)

@@ -9,7 +9,7 @@ import numpy as np
 import requests
 from fpdf import FPDF
 from fpdf.enums import XPos, YPos
-from Divinepersistence import persistenceDocument, persistencePayment, persistenceCustomer
+from Divinepersistence import persistenceDocument, persistencePayment, persistenceCustomer, persistenceInventory
 from DivineDTO.models import DocumentGenerateRequestDTO
 from DivineService.service_email import serviceEmail, dispatch_booking_confirmation_email
 from DivineService.service_payment_schedule import build_payment_schedule
@@ -108,9 +108,15 @@ def _pdf_safe_text(value) -> str:
 
 class serviceDocument:
     def __init__(self, persistence: persistenceDocument = None, payment_persistence: persistencePayment = None,
-                 customer_persistence: persistenceCustomer = None, email: serviceEmail = None):
+                 customer_persistence: persistenceCustomer = None, email: serviceEmail = None,
+                 inventory_persistence: persistenceInventory = None):
         self._persistence = persistence or persistenceDocument()
         self._payment_persistence = payment_persistence or persistencePayment()
+        try:
+            self._inventory_persistence = inventory_persistence or persistenceInventory()
+        except Exception as e:
+            logger.warning("document_inventory_persistence_init_failed: %s", e)
+            self._inventory_persistence = None
         self._supabase_url = os.getenv("SUPABASE_URL")
         self._service_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
         self._bucket = os.getenv("SUPABASE_STORAGE_BUCKET", "documents")
@@ -386,10 +392,16 @@ class serviceDocument:
         form_data_raw: str,
         owner_id: str,
         owner_role: str,
+        inventory_id: str = None,
     ):
         """Stores a signed booking-application PDF in the Booking_Forms bucket, linked to the
         payment record that unlocked it. Unlike generate(), the PDF already exists client-side
-        (it's a filled/signed form) - this endpoint only validates, stores, and links it."""
+        (it's a filled/signed form) - this endpoint only validates, stores, and links it.
+
+        `inventory_id` is a safety-net: if the payment settled through an older flow that
+        never carried it, this confirms the plot as 'booked' here (idempotent - a no-op
+        when servicePayment already flipped it). The result is attached to the returned
+        doc as `doc.inventory_id` / `doc.inventory_status` ("booked" | "conflict" | None)."""
         if not file_bytes:
             raise ValueError("empty_file")
         if len(file_bytes) > MAX_BOOKING_APPLICATION_UPLOAD_BYTES:
@@ -491,8 +503,80 @@ class serviceDocument:
         # Best-effort: a mail failure never affects the stored booking.
         self._notify_booking_confirmation(owner_id, owner_role, form_data, payment.amount, payment.currency)
 
+        # Safety-net plot lock. This ONLY ever re-confirms the exact unit the payment
+        # itself was created for (payment.purpose == 'plot_booking' + payment.inventory_id) -
+        # it never binds a plot from the client-supplied form field, so a caller can't
+        # attach an arbitrary plot to an unrelated paid payment. book_unit is idempotent
+        # for the same payment id, so this is a no-op when servicePayment already flipped
+        # the unit at settle time.
+        self._confirm_inventory_booked(
+            doc,
+            payment=payment,
+            client_inventory_id=(inventory_id or "").strip() or None,
+            owner_id=owner_id,
+        )
+
+        # Materialise the per-milestone rows so instalment payments + the payment-due
+        # reminder job have a table to work against. Best-effort: never blocks the upload.
+        self._create_payment_milestones(doc, plan, owner_id, project_id, payment,
+                                        _first_present(form_data, _BOOKING_DATE_KEYS))
+
         signed_url = self._sign_url(object_path, bucket=self._booking_forms_bucket)
         return doc, signed_url, DEFAULT_SIGNED_URL_EXPIRY_SECONDS, plan
+
+    def _create_payment_milestones(self, doc, plan, owner_id, project_id, payment, booking_date_raw):
+        try:
+            from DivineService.service_milestones import serviceMilestones
+            booking_id = getattr(doc, "id", None)
+            if not booking_id or not isinstance(plan, dict) or not plan.get("rows"):
+                return
+            svc = serviceMilestones()
+            rows = svc._rows_from_plan(
+                plan, booking_id=booking_id, customer_id=owner_id,
+                project_id=project_id, inventory_id=getattr(payment, "inventory_id", None),
+                booking_payment_id=getattr(payment, "id", None),
+                booking_date=booking_date_raw or plan.get("booking_date"),
+            )
+            if rows:
+                svc._persistence.create_milestones(rows)
+        except Exception as e:
+            logger.warning("document_milestone_create_failed doc_id=%s error=%s",
+                           getattr(doc, "id", None), e)
+
+    def _confirm_inventory_booked(self, doc, payment, client_inventory_id: str, owner_id: str) -> None:
+        """Attaches doc.inventory_id / doc.inventory_status. Never raises - the document
+        is already stored, so a booking-flip miss is logged, not surfaced as a failure.
+
+        Trust rule: the plot is taken from the PAYMENT (purpose 'plot_booking' +
+        payment.inventory_id), never from the client form field. The form field is
+        only echoed back on the doc and, when the payment carries no inventory_id,
+        used purely to log the mismatch."""
+        try:
+            payment_purpose = (getattr(payment, "purpose", None) or "other")
+            payment_inventory_id = getattr(payment, "inventory_id", None)
+            doc.inventory_id = payment_inventory_id or client_inventory_id or None
+            doc.inventory_status = None
+
+            if payment_purpose != "plot_booking" or not payment_inventory_id:
+                if client_inventory_id and client_inventory_id != payment_inventory_id:
+                    logger.info(
+                        "document_inventory_id_ignored client=%s payment=%s purpose=%s",
+                        client_inventory_id, payment_inventory_id, payment_purpose,
+                    )
+                return
+            if self._inventory_persistence is None:
+                return
+
+            unit = self._inventory_persistence.book_unit(
+                id=payment_inventory_id, payment_id=getattr(payment, "id", None), customer_id=owner_id,
+            )
+            doc.inventory_status = "booked" if unit is not None else "conflict"
+        except Exception as e:
+            logger.warning("document_inventory_confirm_failed error=%s", e)
+            try:
+                doc.inventory_status = "conflict"
+            except Exception:
+                pass
 
     def _notify_booking_confirmation(self, owner_id: str, owner_role: str, form_data: dict,
                                      amount=None, currency: str = "INR") -> None:

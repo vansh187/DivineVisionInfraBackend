@@ -125,11 +125,12 @@ def status(key: str = Query(...)):
 
 
 @router.get("/lookup")
-def lookup(key: str = Query(...), email: str = Query(...), module: str = Query("Contacts")):
+def lookup(key: str = Query(...), email: str = Query(...), module: str = Query("Leads")):
     """Diagnostic: checks whether a record with this email actually exists in Zoho right
     now (queries Zoho directly, not our own DB) - lets a specific signup/lead be
-    confirmed or ruled out without opening the Zoho UI. module defaults to Contacts
-    (customer/broker signups); pass module=Leads to check chatbot leads instead."""
+    confirmed or ruled out without opening the Zoho UI. module defaults to Leads (all
+    signups and chatbot leads sync there now); pass module=Contacts only to look up
+    legacy records written before that change."""
     try:
         if not _setup_token_valid(key):
             return JSONResponse({"detail": "forbidden"}, status_code=403)

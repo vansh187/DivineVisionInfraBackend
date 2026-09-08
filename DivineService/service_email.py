@@ -114,12 +114,123 @@ class serviceEmail:
             logger.warning("booking_confirmation_failed email=%s error=%s", email, e)
             return False
 
+    # ---- instalment reminders + receipts --------------------------------
+    def send_payment_reminder_async(self, email: str, **kwargs) -> None:
+        self._run_async(self.send_payment_reminder, email, **kwargs)
+
+    def send_payment_reminder(self, email: str, first_name: str = None, project_name: str = None,
+                              unit_number: str = None, milestone_label: str = None, amount=None,
+                              due_date: str = None, days_remaining=None, outstanding=None,
+                              kind: str = "T_MINUS_20", currency: str = "INR") -> bool:
+        """Premium 'payment due' email with a Pay Now button. Never raises."""
+        try:
+            to = (email or "").strip()
+            if not to or "@" not in to:
+                return False
+            name = (first_name or "").strip() or "there"
+            money = _format_amount(amount, currency) or ""
+            overdue = isinstance(days_remaining, (int, float)) and days_remaining < 0
+            when = _format_reminder_date(due_date)
+            if overdue:
+                headline, timing = "Payment Overdue", f"overdue by {abs(int(days_remaining))} day(s)"
+            elif isinstance(days_remaining, (int, float)) and days_remaining == 0:
+                headline, timing = "Payment Due Today", "due today"
+            else:
+                left = int(days_remaining) if isinstance(days_remaining, (int, float)) else None
+                headline = "Payment Due Soon"
+                timing = f"due in {left} day(s)" if left is not None else "due shortly"
+            rows = []
+            if project_name:
+                rows.append(("Project", str(project_name).strip()))
+            if unit_number:
+                rows.append(("Plot", str(unit_number).strip()))
+            if milestone_label:
+                rows.append(("Instalment", str(milestone_label).strip()))
+            if when:
+                rows.append(("Due Date", when))
+            if money:
+                rows.append(("Amount Due", money))
+            out_money = _format_amount(outstanding, currency)
+            if out_money:
+                rows.append(("Outstanding After This", out_money))
+            subject = _reminder_subject(money, project_name, unit_number, when)
+            body = [
+                f"This is a reminder that your next instalment for your Divine Vision Infra "
+                f"plot is <strong>{_escape(timing)}</strong>.",
+                "You can pay securely from your account in a few taps using the button below.",
+            ]
+            html = _luxury_email_html(
+                headline=headline, preheader=f"{money} {timing}".strip(), greeting_name=name,
+                body_paragraphs=body, detail_rows=rows, cta_label="Pay Now",
+                cta_url=_payments_deeplink(self._customer_login_url),
+                footer_note="Need help? Reply is not monitored - contact "
+                            f"{_SUPPORT_LINE}.",
+                has_logo=bool(self._logo_b64), accent="#c0392b" if overdue else "#e67e22",
+            )
+            text = _luxury_email_text(headline, name, body, rows, "Pay Now",
+                                      _payments_deeplink(self._customer_login_url))
+            return self._send(to=to, subject=subject, html=html, text=text)
+        except Exception as e:
+            logger.warning("payment_reminder_failed email=%s error=%s", email, e)
+            return False
+
+    def send_installment_receipt_async(self, email: str, **kwargs) -> None:
+        self._run_async(self.send_installment_receipt, email, **kwargs)
+
+    def send_installment_receipt(self, email: str, first_name: str = None, project_name: str = None,
+                                 milestone_label: str = None, amount=None, receipt_pdf: bytes = None,
+                                 receipt_filename: str = "payment-receipt.pdf",
+                                 currency: str = "INR") -> bool:
+        """Premium 'payment received' email with the receipt PDF attached. Never raises."""
+        try:
+            to = (email or "").strip()
+            if not to or "@" not in to:
+                return False
+            name = (first_name or "").strip() or "there"
+            money = _format_amount(amount, currency) or ""
+            rows = []
+            if project_name:
+                rows.append(("Project", str(project_name).strip()))
+            if milestone_label:
+                rows.append(("Instalment", str(milestone_label).strip()))
+            if money:
+                rows.append(("Amount Received", money))
+            body = [
+                f"We have received your payment of <strong>{_escape(money)}</strong>. Thank you.",
+                "Your official payment receipt is attached to this email, and is also available "
+                "any time from your account.",
+            ]
+            html = _luxury_email_html(
+                headline="Payment Received", preheader=f"Receipt for {money}".strip(),
+                greeting_name=name, body_paragraphs=body, detail_rows=rows,
+                cta_label="View My Payments", cta_url=_payments_deeplink(self._customer_login_url),
+                footer_note=f"For assistance, contact {_SUPPORT_LINE}.",
+                has_logo=bool(self._logo_b64), accent="#1e8449",
+            )
+            text = _luxury_email_text("Payment Received", name, body, rows,
+                                      "View My Payments", _payments_deeplink(self._customer_login_url))
+            attachments = None
+            if receipt_pdf:
+                try:
+                    attachments = [{
+                        "filename": receipt_filename or "payment-receipt.pdf",
+                        "content": base64.b64encode(receipt_pdf).decode("ascii"),
+                        "content_type": "application/pdf",
+                    }]
+                except Exception:
+                    attachments = None
+            return self._send(to=to, subject="Payment Received — Divine Vision Infra",
+                              html=html, text=text, attachments=attachments)
+        except Exception as e:
+            logger.warning("installment_receipt_failed email=%s error=%s", email, e)
+            return False
+
     # ----------------------------------------------------------------- private
 
-    def _send(self, to: str, subject: str, html: str, text: str = None) -> bool:
+    def _send(self, to: str, subject: str, html: str, text: str = None, attachments: list = None) -> bool:
         if not self.enabled:
             return False
-        # No reply_to: this is a no-reply welcome message. Replies bounce by design.
+        # No reply_to: this is a no-reply message. Replies bounce by design.
         payload = {
             "from": f"{_DEFAULT_FROM_NAME} <{self._from_email}>",
             "to": [to],
@@ -128,12 +239,18 @@ class serviceEmail:
         }
         if text:
             payload["text"] = text
+        files = []
         if self._logo_b64:
-            payload["attachments"] = [{
+            files.append({
                 "filename": "divine-vision-infra.png",
                 "content": self._logo_b64,
                 "content_id": _LOGO_CID,
-            }]
+            })
+        for extra in (attachments or []):
+            if isinstance(extra, dict) and extra.get("content"):
+                files.append(extra)
+        if files:
+            payload["attachments"] = files
         try:
             resp = requests.post(
                 _RESEND_ENDPOINT,
@@ -182,6 +299,27 @@ def dispatch_booking_confirmation_email(email_service, email: str, first_name: s
             )
     except Exception as e:
         logger.warning("booking_confirmation_dispatch_failed error=%s", e)
+
+
+def dispatch_installment_receipt_email(email_service, email: str, **kwargs) -> None:
+    """Fire-and-forget 'payment received' email + receipt PDF. Never raises."""
+    try:
+        if email_service and getattr(email_service, "enabled", False) and email:
+            email_service.send_installment_receipt_async(email, **kwargs)
+    except Exception as e:
+        logger.warning("installment_receipt_dispatch_failed error=%s", e)
+
+
+def dispatch_payment_reminder_email(email_service, email: str, **kwargs) -> bool:
+    """Synchronous send used by the daily reminder job (it needs the sent/failed
+    result to write the dedupe row). Never raises - returns False on any problem."""
+    try:
+        if not (email_service and getattr(email_service, "enabled", False) and email):
+            return False
+        return bool(email_service.send_payment_reminder(email, **kwargs))
+    except Exception as e:
+        logger.warning("payment_reminder_dispatch_failed error=%s", e)
+        return False
 
 
 def _load_logo_b64(path: str):
@@ -625,3 +763,148 @@ def _strip_tags(raw: str) -> str:
 
 def _strip_tags_pairs(pairs):
     return [(_strip_tags(t), _strip_tags(d)) for t, d in pairs]
+
+
+# --------------------------------------------------------- instalment emails
+
+_SUPPORT_LINE = "crm2@divinevisioninfra.com / +91-92549 72701"
+
+
+def _payments_deeplink(login_url: str) -> str:
+    base = (login_url or _DEFAULT_CUSTOMER_LOGIN_URL).strip().rstrip("/")
+    return f"{base}/customer/profile#payments"
+
+
+def _format_reminder_date(value) -> str:
+    from datetime import date as _date, datetime as _dt
+    if isinstance(value, (_date, _dt)):
+        d = value.date() if isinstance(value, _dt) else value
+        return d.strftime("%d %b %Y")
+    text = str(value or "").strip()
+    for f in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y"):
+        try:
+            return _dt.strptime(text[:10], f).strftime("%d %b %Y")
+        except ValueError:
+            continue
+    return text[:10]
+
+
+def _reminder_subject(money: str, project_name, unit_number, when: str) -> str:
+    bits = []
+    if money:
+        bits.append(money)
+    where = " ".join(str(x).strip() for x in (project_name, ("Plot " + str(unit_number)) if unit_number else "") if x)
+    tail = f" for {where}" if where else ""
+    by = f" by {when}" if when else ""
+    amount_part = bits[0] if bits else "instalment"
+    return f"Payment due - {amount_part}{tail}{by}".strip()
+
+
+def _luxury_email_html(headline: str, preheader: str, greeting_name: str, body_paragraphs: list,
+                       detail_rows: list, cta_label: str, cta_url: str, footer_note: str,
+                       has_logo: bool, accent: str = "#e67e22") -> str:
+    safe_name = _escape(greeting_name)
+    safe_url = _escape(cta_url)
+    accent = accent if (accent or "").startswith("#") else "#e67e22"
+
+    if has_logo:
+        brand_mark = (
+            f'<img src="cid:{_LOGO_CID}" width="180" alt="Divine Vision Infra" '
+            f'style="display:block;border:0;outline:none;width:180px;max-width:60%;height:auto;margin:0 auto;">'
+        )
+    else:
+        brand_mark = (
+            f'<div style="font-family:{_FONT_HEAD};font-size:22px;letter-spacing:6px;'
+            f'text-transform:uppercase;color:#ffffff;font-weight:700;">Divine Vision Infra</div>'
+        )
+
+    detail_block = ""
+    if detail_rows:
+        last = len(detail_rows) - 1
+        trs = ""
+        for i, (label, value) in enumerate(detail_rows):
+            bottom = "border-bottom:1px solid #e5e8ea;" if i == last else ""
+            trs += f"""
+                <tr>
+                  <td style="padding:13px 0;border-top:1px solid #e5e8ea;{bottom}font-family:{_FONT_BODY};width:46%;">
+                    <span style="font-family:{_FONT_HEAD};font-size:12px;letter-spacing:2px;text-transform:uppercase;color:#7b8a99;font-weight:700;">{_escape(label)}</span>
+                  </td>
+                  <td style="padding:13px 0;border-top:1px solid #e5e8ea;{bottom}font-family:{_FONT_BODY};text-align:right;">
+                    <span style="font-size:16px;line-height:1.5;color:#2c3e50;font-weight:700;">{_escape(value)}</span>
+                  </td>
+                </tr>"""
+        detail_block = f"""
+          <tr><td style="padding:6px 48px 8px 48px;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">{trs}
+            </table>
+          </td></tr>"""
+
+    paras = "".join(
+        f'<p style="margin:0 0 18px 0;font-size:16px;line-height:1.7;color:#4a5b6b;">{p}</p>'
+        for p in body_paragraphs
+    )
+
+    return f"""\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="x-apple-disable-message-reformatting">
+<title>{_escape(headline)} - Divine Vision Infra</title>
+</head>
+<body style="margin:0;padding:0;background-color:#1c2833;">
+  <div style="display:none;max-height:0;overflow:hidden;opacity:0;">{_escape(preheader)}</div>
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#1c2833;">
+    <tr><td align="center" style="padding:40px 16px;">
+      <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="width:600px;max-width:600px;background-color:#ffffff;border-radius:2px;overflow:hidden;border:1px solid #2c3e50;">
+        <tr><td style="height:6px;background-color:{accent};font-size:0;line-height:0;">&nbsp;</td></tr>
+        <tr><td align="center" style="background-color:#2c3e50;padding:40px 40px 34px 40px;">
+          {brand_mark}
+          <div style="height:18px;line-height:18px;font-size:0;">&nbsp;</div>
+          <div style="font-family:{_FONT_HEAD};font-size:30px;letter-spacing:3px;text-transform:uppercase;color:#ffffff;font-weight:700;line-height:1.2;">{_escape(headline)}</div>
+          <div style="height:12px;line-height:12px;font-size:0;">&nbsp;</div>
+          <div style="width:64px;height:3px;background-color:{accent};margin:0 auto;font-size:0;line-height:0;">&nbsp;</div>
+        </td></tr>
+        <tr><td style="padding:42px 48px 10px 48px;font-family:{_FONT_BODY};color:#2c3e50;">
+          <p style="margin:0 0 20px 0;font-size:18px;line-height:1.6;color:#2c3e50;">Dear {safe_name},</p>
+          {paras}
+        </td></tr>
+{detail_block}
+        <tr><td align="center" style="padding:30px 48px 14px 48px;">
+          <table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>
+            <td align="center" bgcolor="{accent}" style="border-radius:2px;">
+              <a href="{safe_url}" target="_blank" style="display:inline-block;padding:16px 44px;font-family:{_FONT_HEAD};font-size:15px;letter-spacing:3px;text-transform:uppercase;color:#ffffff;text-decoration:none;font-weight:700;">{_escape(cta_label)}</a>
+            </td>
+          </tr></table>
+        </td></tr>
+        <tr><td style="padding:18px 48px 42px 48px;font-family:{_FONT_BODY};">
+          <p style="margin:0;font-size:14px;line-height:1.7;color:#7b8a99;">{_escape(footer_note)}</p>
+          <p style="margin:20px 0 0 0;font-size:16px;line-height:1.6;color:#2c3e50;">Warm regards,<br><strong style="color:#2c3e50;">The Divine Vision Infra Team</strong></p>
+        </td></tr>
+        <tr><td align="center" style="background-color:#2c3e50;padding:24px 40px;font-family:{_FONT_BODY};">
+          <div style="font-family:{_FONT_HEAD};font-size:12px;letter-spacing:5px;text-transform:uppercase;color:#ffffff;font-weight:700;">Divine Vision Infra</div>
+          <div style="height:8px;line-height:8px;font-size:0;">&nbsp;</div>
+          <div style="font-size:12px;line-height:1.6;color:#95a5a6;">This is an automated message for a booking held under this account.</div>
+        </td></tr>
+        <tr><td style="height:6px;background-color:{accent};font-size:0;line-height:0;">&nbsp;</td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>"""
+
+
+def _luxury_email_text(headline: str, name: str, body_paragraphs: list, detail_rows: list,
+                       cta_label: str, cta_url: str) -> str:
+    paras = "\n\n".join(_strip_tags(p) for p in body_paragraphs)
+    lines = "\n".join(f"  - {label}: {value}" for label, value in (detail_rows or []))
+    block = f"\n\n{lines}" if lines else ""
+    return (
+        f"{headline}\n\n"
+        f"Dear {name},\n\n"
+        f"{paras}{block}\n\n"
+        f"{cta_label}: {cta_url}\n\n"
+        f"For assistance, contact {_SUPPORT_LINE}.\n\n"
+        "Warm regards,\nThe Divine Vision Infra Team"
+    )

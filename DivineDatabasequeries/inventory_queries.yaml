@@ -23,7 +23,7 @@ upsert_unit: |
 
 search_units: |
   SELECT * FROM divine_project_inventory
-  WHERE status != 'reserved'
+  WHERE (:status IS NOT NULL OR status = 'available')
     AND (:project_name IS NULL OR lower(project_name) LIKE '%' || lower(:project_name) || '%')
     AND (:city IS NULL OR lower(city) LIKE '%' || lower(:city) || '%')
     AND (:unit_type IS NULL OR lower(unit_type) = lower(:unit_type))
@@ -112,3 +112,30 @@ list_reservations_for_broker: |
   SELECT * FROM divine_project_inventory
   WHERE status = 'reserved' AND reserved_by_broker_id = :broker_id
   ORDER BY reserved_until ASC;
+
+book_unit: |
+  UPDATE divine_project_inventory
+  SET status = 'booked',
+      booked_at = :now,
+      booked_payment_id = :payment_id,
+      booked_by = :customer_id,
+      reserved_by_broker_id = NULL,
+      reserved_at = NULL,
+      reserved_until = NULL,
+      last_updated_date = :now
+  WHERE id = :id
+    AND (
+      status IN ('available', 'held')
+      OR (status = 'booked' AND booked_payment_id = :payment_id)
+    )
+  RETURNING *;
+
+unbook_unit: |
+  UPDATE divine_project_inventory
+  SET status = 'available',
+      booked_at = NULL,
+      booked_payment_id = NULL,
+      booked_by = NULL,
+      last_updated_date = :now
+  WHERE id = :id AND status = 'booked'
+  RETURNING *;

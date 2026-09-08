@@ -74,6 +74,21 @@ CREATE TABLE IF NOT EXISTS divine_payments (
   currency varchar(3) NOT NULL DEFAULT 'INR',
   status varchar(20) NOT NULL DEFAULT 'created' CHECK (status IN ('created', 'paid', 'failed')),
   method varchar(20) NOT NULL DEFAULT 'razorpay' CHECK (method IN ('razorpay', 'cash')),
+  -- 'plot_booking' binds this payment to an inventory unit (inventory_id) so the
+  -- unit is flipped to 'booked' the moment the payment settles. 'other' is any
+  -- non-booking payment and leaves inventory untouched.
+  purpose varchar(20) NOT NULL DEFAULT 'other' CHECK (purpose IN ('plot_booking', 'installment', 'other')),
+  -- No FK: divine_project_inventory is created later in this script, and a stale
+  -- inventory_id on a payment is harmless (the booking flip is guarded separately).
+  inventory_id varchar(36),
+  -- Set for purpose='installment': which payment_schedule milestone this pays.
+  installment_no integer,
+  due_date date,
+  -- Set true when a plot_booking payment settled but the unit could NOT be booked
+  -- (already booked/sold/reserved by someone else). The money is real, so the
+  -- payment still settles - it just gets flagged for a human to sort out.
+  needs_manual_review boolean NOT NULL DEFAULT false,
+  manual_review_reason varchar(60),
   razorpay_order_id varchar(64),
   razorpay_payment_id varchar(64),
   razorpay_signature varchar(255),
@@ -84,6 +99,7 @@ CREATE TABLE IF NOT EXISTS divine_payments (
 
 CREATE INDEX IF NOT EXISTS idx_divine_payments_owner_id ON divine_payments (owner_id);
 CREATE INDEX IF NOT EXISTS idx_divine_payments_razorpay_order_id ON divine_payments (razorpay_order_id);
+CREATE INDEX IF NOT EXISTS idx_divine_payments_inventory_id ON divine_payments (inventory_id);
 
 CREATE TABLE IF NOT EXISTS divine_site_visits (
   id varchar(36) PRIMARY KEY,
@@ -307,10 +323,14 @@ CREATE TABLE IF NOT EXISTS divine_project_inventory (
   length_mtr numeric(8,3),
   area_sqmt numeric(10,3) NOT NULL CHECK (area_sqmt > 0),
   area_sqyd numeric(10,2) NOT NULL CHECK (area_sqyd > 0),
-  status varchar(20) NOT NULL DEFAULT 'available' CHECK (status IN ('available','held','sold','reserved')),
+  status varchar(20) NOT NULL DEFAULT 'available' CHECK (status IN ('available','held','booked','sold','reserved')),
   reserved_by_broker_id varchar(6) REFERENCES divine_broker_users(id),
   reserved_at timestamptz,
   reserved_until timestamptz,
+  -- Set when a customer's plot-booking payment settles (status = 'booked').
+  booked_at timestamptz,
+  booked_payment_id varchar(36),
+  booked_by varchar(6),
   created_date timestamptz DEFAULT now(),
   last_updated_date timestamptz DEFAULT now(),
   UNIQUE (project_name, unit_number)
@@ -319,6 +339,8 @@ CREATE INDEX IF NOT EXISTS idx_divine_project_inventory_search
   ON divine_project_inventory (project_name, city, unit_type, status, area_sqyd);
 CREATE INDEX IF NOT EXISTS idx_divine_project_inventory_reserved_by
   ON divine_project_inventory (reserved_by_broker_id);
+CREATE INDEX IF NOT EXISTS idx_divine_project_inventory_booked_by
+  ON divine_project_inventory (booked_by);
 CREATE INDEX IF NOT EXISTS idx_divine_project_inventory_reserved_until
   ON divine_project_inventory (status, reserved_until);
 
@@ -345,3 +367,45 @@ CREATE TABLE IF NOT EXISTS divine_inventory_events (
 );
 CREATE INDEX IF NOT EXISTS idx_divine_inventory_events_inventory_id ON divine_inventory_events (inventory_id);
 CREATE INDEX IF NOT EXISTS idx_divine_inventory_events_lead_id ON divine_inventory_events (lead_id);
+
+-- ============================================================
+--  Instalment (milestone) payments on a booked plot
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS divine_payment_milestones (
+  id varchar(48) PRIMARY KEY,
+  booking_id varchar(36) NOT NULL,
+  customer_id varchar(6) NOT NULL,
+  project_id varchar(120),
+  inventory_id varchar(36),
+  milestone_no integer NOT NULL,
+  label varchar(120),
+  percent numeric(6,3),
+  due_days integer,
+  due_date date,
+  amount numeric(14,2) NOT NULL DEFAULT 0,
+  status varchar(12) NOT NULL DEFAULT 'upcoming' CHECK (status IN ('paid','due','overdue','upcoming')),
+  paid_on timestamptz,
+  paid_payment_id varchar(36),
+  created_date timestamptz DEFAULT now(),
+  last_updated_date timestamptz DEFAULT now(),
+  UNIQUE (booking_id, milestone_no)
+);
+CREATE INDEX IF NOT EXISTS idx_divine_payment_milestones_customer ON divine_payment_milestones (customer_id);
+CREATE INDEX IF NOT EXISTS idx_divine_payment_milestones_due ON divine_payment_milestones (status, due_date);
+
+CREATE TABLE IF NOT EXISTS divine_payment_reminders (
+  id varchar(36) PRIMARY KEY,
+  customer_id varchar(6) NOT NULL,
+  booking_id varchar(36),
+  milestone_id varchar(48) NOT NULL,
+  kind varchar(16) NOT NULL CHECK (kind IN ('T_MINUS_20','T_MINUS_5','DUE_TODAY','OVERDUE')),
+  week_key varchar(12) NOT NULL DEFAULT '',
+  amount numeric(14,2),
+  due_date date,
+  email_to varchar(255),
+  delivery_status varchar(20),
+  sent_at timestamptz DEFAULT now(),
+  UNIQUE (milestone_id, kind, week_key)
+);
+CREATE INDEX IF NOT EXISTS idx_divine_payment_reminders_customer ON divine_payment_reminders (customer_id);

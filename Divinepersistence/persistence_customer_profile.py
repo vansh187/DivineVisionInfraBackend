@@ -32,7 +32,7 @@ class persistenceCustomerProfile:
             "AND verified = :verified ORDER BY created_date DESC LIMIT 1;"
         ),
         "profile_get_booking_application": (
-            "SELECT id, project_id, form_data, created_date FROM divine_documents "
+            "SELECT id, project_id, payment_id, form_data, created_date FROM divine_documents "
             "WHERE owner_id = :customer_id AND owner_role = 'customer' "
             "AND document_type = 'booking_application' "
             "ORDER BY created_date DESC LIMIT 1;"
@@ -144,6 +144,7 @@ class persistenceCustomerProfile:
                 return {
                     "id": row.get("id"),
                     "project_id": row.get("project_id"),
+                    "payment_id": row.get("payment_id"),
                     "form_data": self._as_dict(row.get("form_data")),
                     "created_date": row.get("created_date"),
                 }
