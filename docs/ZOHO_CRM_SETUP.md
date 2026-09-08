@@ -8,16 +8,19 @@ production at the real Zoho CRM account instead.
 
 ## What syncs where
 
+Per the client, **everything lands in the Leads module** - nothing is written to
+Contacts.
+
 | Event | Zoho module | Trigger |
 |---|---|---|
-| Customer signup (with email) | **Contacts** | `POST /customer/signup` |
-| Broker signup (with email) | **Contacts** | `POST /broker/signup` |
+| Customer signup (with email or phone) | **Leads** | `POST /customer/signup` |
+| Broker signup (with email or phone) | **Leads** | `POST /broker/signup` |
 | Chatbot callback request | **Leads** | Visitor completes "call me back" (name + phone) |
 | Chatbot email capture | **Leads** | Visitor gives an email in chat |
 
-A signup/lead with no email (and, for chatbot leads, no phone either) is skipped -
-there's no reliable field to dedupe on. A Zoho outage or bad config never fails or
-slows down the underlying signup/chat request; it just logs a warning and moves on.
+A signup/lead with no email and no phone is skipped - there's no reliable field to
+dedupe on. A Zoho outage or bad config never fails or slows down the underlying
+signup/chat request; it just logs a warning and moves on.
 
 ## 1. Create/choose the production Zoho CRM account
 
@@ -99,13 +102,13 @@ curl -X POST "https://divinevisioninfrabackend.onrender.com/admin/zoho/test-push
 
 # Checks whether a specific email exists in Zoho right now (queries Zoho directly,
 # not this app's own DB) - useful for confirming/debugging a real signup or lead
-curl "https://divinevisioninfrabackend.onrender.com/admin/zoho/lookup?key=<TOKEN>&email=someone@example.com&module=Contacts"
-# module=Leads to check chatbot leads instead of signups
+curl "https://divinevisioninfrabackend.onrender.com/admin/zoho/lookup?key=<TOKEN>&email=someone@example.com&module=Leads"
+# everything (signups + chatbot) syncs to Leads now; module=Contacts still works for
+# looking up any legacy records written before that change of signups
 ```
 
 Then do a real signup or chatbot callback/email capture on the live site and confirm
-it shows up in Zoho CRM -> Contacts (signups) or Leads (chatbot) under the production
-account - not the dummy one.
+it shows up in Zoho CRM -> Leads under the production account - not the dummy one.
 
 ## Switching away from the dummy account later
 
