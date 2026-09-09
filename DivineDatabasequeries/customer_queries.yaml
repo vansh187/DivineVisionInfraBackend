@@ -29,7 +29,7 @@ profile_get_booking_application: |
   FROM divine_documents
   WHERE owner_id = :customer_id
     AND owner_role = 'customer'
-    AND document_type = 'booking_application'
+    AND document_type IN ('booking_application', 'project_booking_application')
   ORDER BY created_date DESC
   LIMIT 1;
 profile_get_amount_received: |
@@ -43,7 +43,7 @@ profile_count_booking_projects: |
   FROM divine_documents
   WHERE owner_id = :customer_id
     AND owner_role = 'customer'
-    AND document_type = 'booking_application'
+    AND document_type IN ('booking_application', 'project_booking_application')
     AND project_id IS NOT NULL;
 profile_get_amount_received_for_project: |
   SELECT COALESCE(SUM(amount), 0) AS amount_received
@@ -56,7 +56,7 @@ profile_get_amount_received_for_project: |
       FROM divine_documents
       WHERE owner_id = :customer_id
         AND owner_role = 'customer'
-        AND document_type = 'booking_application'
+        AND document_type IN ('booking_application', 'project_booking_application')
         AND project_id = :project_id
         AND payment_id IS NOT NULL
     );

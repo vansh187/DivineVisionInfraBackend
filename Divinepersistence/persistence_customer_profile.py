@@ -34,7 +34,7 @@ class persistenceCustomerProfile:
         "profile_get_booking_application": (
             "SELECT id, project_id, payment_id, form_data, created_date FROM divine_documents "
             "WHERE owner_id = :customer_id AND owner_role = 'customer' "
-            "AND document_type = 'booking_application' "
+            "AND document_type IN ('booking_application', 'project_booking_application') "
             "ORDER BY created_date DESC LIMIT 1;"
         ),
         "profile_get_amount_received": (
@@ -45,15 +45,16 @@ class persistenceCustomerProfile:
         "profile_count_booking_projects": (
             "SELECT COUNT(DISTINCT project_id) AS project_count FROM divine_documents "
             "WHERE owner_id = :customer_id AND owner_role = 'customer' "
-            "AND document_type = 'booking_application' AND project_id IS NOT NULL;"
+            "AND document_type IN ('booking_application', 'project_booking_application') "
+            "AND project_id IS NOT NULL;"
         ),
         "profile_get_amount_received_for_project": (
             "SELECT COALESCE(SUM(amount), 0) AS amount_received FROM divine_payments "
             "WHERE owner_id = :customer_id AND owner_role = 'customer' AND status = 'paid' "
             "AND id IN (SELECT payment_id FROM divine_documents "
             "WHERE owner_id = :customer_id AND owner_role = 'customer' "
-            "AND document_type = 'booking_application' AND project_id = :project_id "
-            "AND payment_id IS NOT NULL);"
+            "AND document_type IN ('booking_application', 'project_booking_application') "
+            "AND project_id = :project_id AND payment_id IS NOT NULL);"
         ),
     }
 
