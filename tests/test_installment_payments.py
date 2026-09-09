@@ -67,7 +67,12 @@ def teardown_module(module):
 def _seed_booking(customer_id="C00001", total=5_000_000, booking_amount=500_000,
                   booking_date="2026-01-01", project="OPS Divine Greens", unit="A-12"):
     """Insert a paid booking payment + a booking-application document straight into
-    the DB, the way upload_booking_application would (minus the storage upload)."""
+    the DB, the way upload_booking_application would (minus the storage upload).
+
+    The document_type here is ``project_booking_application`` on purpose - that is
+    the exact string the upload endpoint stores in production (the client sends it
+    as a multipart field). The profile / milestone / reminder read queries must
+    match it, so seeding the real spelling keeps this suite honest."""
     booking_id = "doc-" + uuid.uuid4().hex[:10]
     payment_id = "pay-" + uuid.uuid4().hex[:10]
     now = datetime.now(timezone.utc)
@@ -84,7 +89,7 @@ def _seed_booking(customer_id="C00001", total=5_000_000, booking_amount=500_000,
         c.execute(text(
             "INSERT INTO divine_documents(id, owner_id, owner_role, document_type, form_data, storage_path, "
             "status, project_id, payment_id, created_date, last_updated_date) VALUES (:id,:o,'customer',"
-            "'booking_application',:fd,'x/y.pdf','generated',:pj,:pay,:n,:n)"),
+            "'project_booking_application',:fd,'x/y.pdf','generated',:pj,:pay,:n,:n)"),
             {"id": booking_id, "o": customer_id, "fd": json.dumps(form), "pj": project,
              "pay": payment_id, "n": now})
     return booking_id, payment_id
@@ -298,14 +303,24 @@ def _h(token):
 
 def test_profile_exposes_enriched_schedule_and_next_due():
     cid = _sub(_TOKEN)
-    _seed_booking(customer_id=cid, booking_date=(date.today() - timedelta(days=40)).isoformat())
+    bdate = (date.today() - timedelta(days=40)).isoformat()
+    _seed_booking(customer_id=cid, booking_date=bdate)
     r = client.get("/customer/profile", headers=_h(_TOKEN))
     assert r.status_code == 200, r.text
-    sched = r.json()["booking"]["payment_schedule"]
+    booking = r.json()["booking"]
+    # Regression: the booking application is stored as 'project_booking_application';
+    # the profile read must still surface every pricing/date field for it, not just
+    # has_booking. (Previously the query only matched the exact string
+    # 'booking_application', so cash + online bookings alike came back blank.)
+    assert booking["has_booking"] is True
+    assert booking["total_consideration"] == 5_000_000
+    assert booking["booking_date"] == bdate
+    assert booking["amount_received"] == 500_000
+    sched = booking["payment_schedule"]
     assert len(sched) == 5
     assert sched[0]["status"] == "paid"
     assert sched[1]["pay_enabled_from"] and sched[1]["id"]
-    assert r.json()["booking"]["next_due"]["milestone_id"] == sched[1]["id"]
+    assert booking["next_due"]["milestone_id"] == sched[1]["id"]
 
 
 def test_create_order_installment_guard_returns_400_code():

@@ -18,7 +18,8 @@ def main():
     with engine.connect() as conn:
         rows = conn.execute(text(
             "SELECT DISTINCT owner_id FROM divine_documents "
-            "WHERE owner_role = 'customer' AND document_type = 'booking_application';"
+            "WHERE owner_role = 'customer' "
+            "AND document_type IN ('booking_application', 'project_booking_application');"
         )).mappings().all()
     customer_ids = [r["owner_id"] for r in rows if r.get("owner_id")]
     print(f"Found {len(customer_ids)} customer(s) with a booking application.")

@@ -105,7 +105,8 @@ class persistenceMarketTrend:
         query = (
             "SELECT d.form_data AS form_data "
             "FROM divine_documents d "
-            "WHERE d.document_type = 'booking_application' AND d.form_data IS NOT NULL"
+            "WHERE d.document_type IN ('booking_application', 'project_booking_application') "
+            "AND d.form_data IS NOT NULL"
         )
         rates = []
         try:
