@@ -125,12 +125,26 @@ class serviceMilestones:
         return rows
 
     def _load_booking_doc(self, customer_id: str):
-        """The customer's booking-application document as a dict, or None. Best-effort."""
+        """The customer's most-recent booking-application document as a dict, or None.
+        Best-effort."""
         try:
             return self._profile.get_booking_application(customer_id)
         except Exception as e:
             logger.warning("milestone_booking_doc_lookup_failed customer_id=%s error=%s", customer_id, e)
         return None
+
+    def _load_booking_docs(self, customer_id: str) -> list:
+        """Every booking-application document the customer holds, newest first.
+        Multi-plot customers have more than one. Best-effort: falls back to the single
+        most-recent doc, then to an empty list."""
+        try:
+            docs = self._profile.list_booking_applications(customer_id)
+            if docs:
+                return docs
+        except Exception as e:
+            logger.warning("milestone_booking_docs_lookup_failed customer_id=%s error=%s", customer_id, e)
+        one = self._load_booking_doc(customer_id)
+        return [one] if one else []
 
     def _form_of(self, record) -> dict:
         form = record.get("form_data") if isinstance(record, dict) else getattr(record, "form_data", None)
@@ -148,23 +162,73 @@ class serviceMilestones:
                 return v
         return None
 
-    def ensure_for_customer(self, customer_id: str) -> list:
-        """Return the milestone rows for this customer, creating them from the
-        stored booking application + payment plan on first read (self-heal, like
-        the lazy reservation-expiry pattern). Never raises."""
+    def ensure_for_customer(self, customer_id: str, backfill_all: bool = False) -> list:
+        """Return the milestone rows for this customer, creating them from the stored
+        booking application + payment plan on first read (self-heal, like the lazy
+        reservation-expiry pattern). Never raises.
+
+        ``backfill_all=False`` (default, the hot path): if the customer already has
+        ANY milestone rows, return them untouched with no further queries - identical
+        to the pre-multi-plot behaviour. Only when they have none does it materialise
+        from their most-recent booking application.
+
+        ``backfill_all=True`` (used by GET /customer/profile, instalment validation
+        and receipts, where completeness matters): scan EVERY booking-application
+        document and materialise any plot that has no rows yet, so a multi-plot
+        customer whose second booking predates the milestone feature still gets a
+        full plan. Costs one extra booking-application list query."""
         try:
             existing = self._persistence.list_for_customer(customer_id)
         except Exception as e:
             logger.warning("milestone_list_failed customer_id=%s error=%s", customer_id, e)
             return []
-        if existing:
+
+        if existing and not backfill_all:
             return existing
 
-        record = self._load_booking_doc(customer_id)
-        if not record:
-            return []
         try:
-            booking_id = (record.get("id") if isinstance(record, dict) else getattr(record, "id", None))
+            have_booking_ids = {getattr(r, "booking_id", None) for r in existing}
+        except Exception:
+            have_booking_ids = set()
+
+        if backfill_all:
+            records = self._load_booking_docs(customer_id)
+        elif not existing:
+            one = self._load_booking_doc(customer_id)
+            records = [one] if one else []
+        else:
+            records = []
+        if not records:
+            return existing
+
+        created_any = False
+        for record in records:
+            booking_id = None
+            try:
+                booking_id = (record.get("id") if isinstance(record, dict) else getattr(record, "id", None))
+                if not booking_id or booking_id in have_booking_ids:
+                    continue
+                rows = self._plan_rows_for_record(record, customer_id, booking_id)
+                if not rows:
+                    continue
+                self._persistence.create_milestones(rows)
+                created_any = True
+            except Exception as e:
+                logger.warning("milestone_backfill_failed customer_id=%s booking_id=%s error=%s",
+                               customer_id, booking_id, e)
+
+        if not created_any:
+            return existing
+        try:
+            return self._persistence.list_for_customer(customer_id)
+        except Exception as e:
+            logger.warning("milestone_relist_failed customer_id=%s error=%s", customer_id, e)
+            return existing
+
+    def _plan_rows_for_record(self, record, customer_id: str, booking_id: str) -> list:
+        """Build (but do not persist) the milestone rows for one booking-application
+        document. Returns [] when the doc has no usable total. Never raises."""
+        try:
             form = self._form_of(record)
             total = _to_num(self._first(form, _TOTAL_KEYS))
             if not total or total <= 0:
@@ -180,14 +244,11 @@ class serviceMilestones:
             payment_id = (record.get("payment_id") if isinstance(record, dict)
                           else getattr(record, "payment_id", None))
             inventory_id = self._resolve_inventory_id(record)
-            rows = self._rows_from_plan(plan, booking_id, customer_id, project_id,
+            return self._rows_from_plan(plan, booking_id, customer_id, project_id,
                                         inventory_id, payment_id, booking_date)
-            if not rows:
-                return []
-            self._persistence.create_milestones(rows)
-            return self._persistence.list_for_customer(customer_id)
         except Exception as e:
-            logger.warning("milestone_backfill_failed customer_id=%s error=%s", customer_id, e)
+            logger.warning("milestone_plan_rows_failed customer_id=%s booking_id=%s error=%s",
+                           customer_id, booking_id, e)
             return []
 
     def _resolve_inventory_id(self, record):
@@ -202,13 +263,23 @@ class serviceMilestones:
             return None
 
     # ---- enriched schedule for GET /customer/profile ---------------------
-    def enriched_schedule(self, customer_id: str) -> dict:
-        """{'rows': [...enriched dicts...], 'next_due': {...} | None}. Never raises."""
+    def enriched_schedule(self, customer_id: str, booking_id: str = None, rows: list = None) -> dict:
+        """{'rows': [...enriched dicts...], 'next_due': {...} | None}. Never raises.
+
+        ``booking_id`` scopes the result to a single booking (one plot). Omitted, it
+        spans every milestone the customer has - kept for the legacy single-booking
+        callers, but a multi-plot customer should always pass one.
+
+        ``rows`` lets a caller that has already fetched the customer's milestone rows
+        (e.g. GET /customer/profile, which builds many booking sections in one
+        request) pass them in so this does not re-run ``ensure_for_customer`` once
+        per booking."""
         try:
-            records = self.ensure_for_customer(customer_id)
+            records = rows if rows is not None else self.ensure_for_customer(customer_id)
         except Exception as e:  # pragma: no cover - ensure_for_customer already guards
             logger.warning("milestone_enrich_failed customer_id=%s error=%s", customer_id, e)
             return {"rows": [], "next_due": None}
+        records = self._scope_to_booking(records, booking_id)
         if not records:
             return {"rows": [], "next_due": None}
 
@@ -276,19 +347,92 @@ class serviceMilestones:
         except Exception:
             return str(value)
 
+    # ---- multi-booking scoping helpers --------------------------------
+    def _scope_to_booking(self, records: list, booking_id: str) -> list:
+        """Rows for exactly one booking-application document id. ``booking_id`` None
+        returns the list unchanged (legacy whole-customer view)."""
+        try:
+            if not booking_id:
+                return list(records or [])
+            return [r for r in (records or []) if getattr(r, "booking_id", None) == booking_id]
+        except Exception:
+            return list(records or [])
+
+    def _distinct_booking_ids(self, records: list) -> list:
+        seen = []
+        for r in (records or []):
+            bid = getattr(r, "booking_id", None)
+            if bid and bid not in seen:
+                seen.append(bid)
+        return seen
+
+    def _rows_for_installment(self, records: list, inventory_id: str) -> list:
+        """Narrow the customer's milestone rows to the single booking an instalment
+        payment belongs to. Prefers an ``inventory_id`` match (what the payment row
+        carries); then a ``booking_id`` match in case the caller passed one; then,
+        with no hint and more than one booking, the booking that is furthest behind
+        (lowest earliest-unpaid milestone_no) so a hint-less client still pays down
+        its active plot. A single-booking customer is unaffected. Never raises - any
+        fault returns the rows unfiltered (legacy behaviour)."""
+        rows = list(records or [])
+        try:
+            if not rows:
+                return rows
+            if inventory_id:
+                by_inv = [r for r in rows if getattr(r, "inventory_id", None) == inventory_id]
+                if by_inv:
+                    return by_inv
+                by_bid = [r for r in rows if getattr(r, "booking_id", None) == inventory_id]
+                if by_bid:
+                    return by_bid
+            booking_ids = self._distinct_booking_ids(rows)
+            if len(booking_ids) <= 1:
+                return rows
+        except Exception as e:
+            logger.warning("milestone_rows_for_installment_failed error=%s", e)
+            return rows
+
+        def _earliest_unpaid_no(bid):
+            unpaid = [
+                (getattr(r, "milestone_no", 0) or 0)
+                for r in rows
+                if getattr(r, "booking_id", None) == bid and getattr(r, "status", None) != "paid"
+            ]
+            return min(unpaid) if unpaid else 10 ** 9
+
+        try:
+            chosen = sorted(booking_ids, key=lambda b: (_earliest_unpaid_no(b), b))[0]
+            return [r for r in rows if getattr(r, "booking_id", None) == chosen]
+        except Exception as e:
+            logger.warning("milestone_rows_for_installment_pick_failed error=%s", e)
+            return rows
+
     # ---- instalment payment validation ---------------------------------
-    def validate_installment(self, customer_id: str, installment_no, amount, due_date=None) -> tuple:
+    def validate_installment(self, customer_id: str, installment_no, amount, due_date=None,
+                             inventory_id=None) -> tuple:
         """Returns (milestone_record | None, error_code | None). error_code is one of
         the spec's guard-rail strings. Never raises - a lookup fault returns
-        (None, 'no_booking')."""
+        (None, 'no_booking').
+
+        ``inventory_id`` (the plot the instalment payment is for) disambiguates which
+        booking's milestone #N is meant when the customer holds more than one plot.
+        Optional and back-compatible: a single-booking customer, or an older client
+        that omits it, resolves against its only / most-behind booking exactly as
+        before."""
         try:
             no = int(installment_no)
         except (TypeError, ValueError):
             return None, "installment_not_found"
         try:
-            records = self.ensure_for_customer(customer_id)
+            # backfill_all: an instalment payment is money - a multi-plot customer
+            # whose target plot predates the milestone feature must still resolve.
+            records = self.ensure_for_customer(customer_id, backfill_all=True)
         except Exception:
             return None, "no_booking"
+        if not records:
+            return None, "no_booking"
+
+        records = self._rows_for_installment(records, inventory_id)
         if not records:
             return None, "no_booking"
 
@@ -351,6 +495,9 @@ class serviceMilestones:
         target = next((r for r in records if getattr(r, "paid_payment_id", None) == payment_id), None)
         if target is None:
             return None
+        # Receipt running totals must reflect only the plot this payment belongs to,
+        # not every plot the customer holds.
+        records = self._scope_to_booking(records, getattr(target, "booking_id", None)) or records
         running = 0
         total = 0
         for r in records:
@@ -365,13 +512,17 @@ class serviceMilestones:
             pass
         return target
 
-    def amount_received_rupees(self, customer_id: str):
-        """Sum of paid milestone amounts for the customer - keeps the profile's
-        amount_received consistent with the per-row status. None when unknown."""
+    def amount_received_rupees(self, customer_id: str, booking_id: str = None, rows: list = None):
+        """Sum of paid milestone amounts - keeps the profile's amount_received
+        consistent with the per-row status. ``booking_id`` scopes it to a single
+        plot (a multi-plot customer must pass one); omitted, it sums every booking.
+        ``rows`` reuses an already-fetched milestone list instead of hitting the DB
+        again. None when unknown."""
         try:
-            records = self.ensure_for_customer(customer_id)
+            records = rows if rows is not None else self.ensure_for_customer(customer_id)
         except Exception:
             return None
+        records = self._scope_to_booking(records, booking_id)
         if not records:
             return None
         total = 0

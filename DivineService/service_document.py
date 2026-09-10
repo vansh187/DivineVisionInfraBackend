@@ -606,9 +606,15 @@ class serviceDocument:
             logger.warning("booking_confirmation_notify_failed owner_id=%s error=%s", owner_id, e)
 
     def get(self, document_id: str, requester_id: str, requester_role: str = None):
+        """Fetch one document and mint a FRESH signed URL for it, whatever its type -
+        identity photos (aadhaar_front / aadhaar_back / pan_card / applicant_photo /
+        co_applicant_photo), generated PDFs and booking applications alike. The app
+        calls this to refresh an expired signed URL. Authorisation is by ownership
+        (owner_id, cross-checked with owner_role); raises ValueError('document_not_found')
+        when the id is unknown and PermissionError('forbidden') for someone else's doc."""
         doc = self._persistence.get_by_id(document_id)
         if not doc:
-            raise ValueError("not_found")
+            raise ValueError("document_not_found")
         # owner_id alone currently can't collide across roles (customer/broker IDs use
         # distinct prefixes), so this check only "works" by accident of that ID scheme -
         # comparing owner_role too makes the authorization boundary explicit rather than

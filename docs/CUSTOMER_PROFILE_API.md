@@ -165,7 +165,8 @@ is absent, fall back to your local 10 / 15 / 25 / 25 / 25 split of
 | `age` | integer? | Server-computed. Prefer over recomputing from `date_of_birth`. Can be present when `date_of_birth` is not (year-only DOB). |
 | `address` | object? | Absent if no address parts are known. See below. |
 | `address_text` | string? | Pre-formatted single line. Use verbatim when present. |
-| `booking` | object | **Always present.** See below. |
+| `booking` | object | **Always present.** The single most-recent / active booking. See below. |
+| `bookings` | array? | **Additive, optional.** Present (non-null) only when the customer holds at least one plot; then it lists **every** booking, newest first, each entry the same shape as `booking`. `booking` is identical to `bookings[0]`. Old clients that read only `booking` are unaffected. Each entry's `amount_received` / `payment_schedule` / `next_due` are scoped to that plot alone — two plots never share a figure. |
 
 ### `address`
 
@@ -190,7 +191,7 @@ is absent, fall back to your local 10 / 15 / 25 / 25 / 25 split of
 | `unit_type` | string? | e.g. `"Residential Plot"`. |
 | `booking_date` | string? | ISO `YYYY-MM-DD`. Falls back to the booking document's creation date. |
 | `total_consideration` | integer? | Whole rupees (server parses `₹` / commas / `lakh` / `crore` from the source form). |
-| `amount_received` | integer? | Whole rupees. Confirmed payments to date. For a customer with a single booking this is their full paid balance; with multiple bookings it is scoped to the payments linked to this project. |
+| `amount_received` | integer? | Whole rupees. Confirmed payments to date. For a customer with a single booking this is their full paid balance; with multiple bookings it is scoped to **this booking's own** payment + paid milestones, never another plot's. |
 | `payment_schedule` | array? | Absent unless present on the booking form — then fall back to the local split. |
 
 ### `payment_schedule[]` row

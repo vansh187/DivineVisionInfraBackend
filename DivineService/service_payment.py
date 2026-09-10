@@ -152,15 +152,19 @@ class servicePayment:
         "installment_out_of_order", "installment_not_payable", "installment_amount_mismatch",
     )
 
-    def _guard_installment(self, owner_id: str, installment_no, amount, due_date) -> None:
+    def _guard_installment(self, owner_id: str, installment_no, amount, due_date,
+                           inventory_id: str = None) -> None:
         """Pre-check at order time. Raises ValueError(<guard code>) so the API returns
         400 {"detail": "<code>"}. A milestone service failure surfaces as 'no_booking'
-        rather than a 500."""
+        rather than a 500. ``inventory_id`` (optional) says which plot's instalment
+        #N is meant when the customer holds more than one booking."""
         svc = self._milestones()
         if svc is None:
             raise ValueError("no_booking")
         try:
-            _, code = svc.validate_installment(owner_id, installment_no, amount, due_date)
+            _, code = svc.validate_installment(
+                owner_id, installment_no, amount, due_date, inventory_id=inventory_id,
+            )
         except Exception as e:  # pragma: no cover - validate_installment already guards
             logger.warning("payment.installment.guard_failed owner_id=%s error=%s", owner_id, e)
             raise ValueError("no_booking")
@@ -183,13 +187,16 @@ class servicePayment:
             installment_no = getattr(record, "installment_no", None)
             amount = getattr(record, "amount", None)
             due_date = getattr(record, "due_date", None)
+            inventory_id = getattr(record, "inventory_id", None)
             svc = self._milestones()
             if svc is None:
                 record.installment_status = "rejected"
                 self._flag_review(getattr(record, "id", None), "no_booking")
                 return record
 
-            milestone, code = svc.validate_installment(owner_id, installment_no, amount, due_date)
+            milestone, code = svc.validate_installment(
+                owner_id, installment_no, amount, due_date, inventory_id=inventory_id,
+            )
             if code and code != "installment_already_paid":
                 record.installment_status = "rejected"
                 self._flag_review(getattr(record, "id", None), code)
@@ -265,7 +272,7 @@ class servicePayment:
         if purpose == BOOKING_PURPOSE and inventory_id:
             self._guard_unit_bookable(inventory_id)
         if purpose == INSTALLMENT_PURPOSE:
-            self._guard_installment(owner_id, installment_no, amount, due_date)
+            self._guard_installment(owner_id, installment_no, amount, due_date, inventory_id)
 
         client = self._client()
         amount_paise = int(round(amount * 100))
@@ -315,7 +322,7 @@ class servicePayment:
         installment_no = self._clean_installment_no(installment_no)
         due_date = self._clean_due_date(due_date)
         if purpose == INSTALLMENT_PURPOSE:
-            self._guard_installment(owner_id, installment_no, amount, due_date)
+            self._guard_installment(owner_id, installment_no, amount, due_date, inventory_id)
 
         note = (note or "").strip()
         record = self._persist_new_payment(
