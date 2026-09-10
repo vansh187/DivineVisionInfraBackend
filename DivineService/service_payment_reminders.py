@@ -1,9 +1,10 @@
 """Daily payment-due reminder job.
 
 Run by a token-gated endpoint (POST /jobs/payment-reminders) that cron-job.org
-calls once a day. For every customer with a booked plot and an unpaid next
-milestone it sends at most one email per run - the most urgent kind not already
-sent (OVERDUE > DUE_TODAY > T_MINUS_5 > T_MINUS_20) - and records a dedupe row.
+calls once a day. For every (customer, booking) with an unpaid next milestone it
+sends at most one email per run - the most urgent kind not already sent
+(OVERDUE > DUE_TODAY > T_MINUS_5 > T_MINUS_20) - and records a dedupe row. A
+customer who holds more than one plot gets an independent cadence per plot.
 
 Fully wrapped: one bad customer is counted and skipped, never aborts the run,
 and nothing here raises into the endpoint.
@@ -77,25 +78,39 @@ class serviceReminders:
             logger.warning("reminder_run_list_failed error=%s", e)
             return {**summary, "errors": 1, "fatal": "list_unpaid_failed"}
 
-        seen = set()
-        customer_ids = []
+        # One (customer, booking) pair per iteration - a multi-plot customer gets a
+        # reminder cadence per plot, not just for whichever single milestone is most
+        # urgent across all of them. Booking ids are grouped under their customer so
+        # that customer's milestone rows are fetched once, not once per plot.
+        booking_ids_by_customer = {}
         for m in unpaid:
             cid = getattr(m, "customer_id", None)
-            if cid and cid not in seen:
-                seen.add(cid)
-                customer_ids.append(cid)
+            if not cid:
+                continue
+            bid = getattr(m, "booking_id", None)
+            bucket = booking_ids_by_customer.setdefault(cid, [])
+            if bid not in bucket:
+                bucket.append(bid)
 
-        for cid in customer_ids:
+        for cid, booking_ids in booking_ids_by_customer.items():
             summary["scanned_customers"] += 1
             try:
-                self._process_customer(cid, today, summary)
+                all_rows = self._milestone_service.ensure_for_customer(cid)
             except Exception as e:
-                summary["errors"] += 1
-                logger.warning("reminder_customer_failed customer_id=%s error=%s", cid, e)
+                all_rows = None
+                logger.warning("reminder_rows_fetch_failed customer_id=%s error=%s", cid, e)
+            for bid in booking_ids:
+                try:
+                    self._process_customer(cid, today, summary, booking_id=bid, all_rows=all_rows)
+                except Exception as e:
+                    summary["errors"] += 1
+                    logger.warning("reminder_customer_failed customer_id=%s booking_id=%s error=%s",
+                                   cid, bid, e)
         return summary
 
-    def _process_customer(self, customer_id: str, today: date, summary: dict) -> None:
-        enriched = self._milestone_service.enriched_schedule(customer_id)
+    def _process_customer(self, customer_id: str, today: date, summary: dict,
+                          booking_id: str = None, all_rows: list = None) -> None:
+        enriched = self._milestone_service.enriched_schedule(customer_id, booking_id, rows=all_rows)
         nd = (enriched or {}).get("next_due")
         if not nd or not nd.get("milestone_id"):
             summary["skipped"] += 1
@@ -126,7 +141,7 @@ class serviceReminders:
             summary["no_email"] += 1
             return
 
-        project_name, unit_number = self._booking_labels(customer_id)
+        project_name, unit_number = self._booking_labels(customer_id, booking_id)
         outstanding = self._outstanding_after(enriched, milestone_id)
 
         ok = dispatch_payment_reminder_email(
@@ -142,10 +157,12 @@ class serviceReminders:
             kind=kind,
         )
 
-        booking_id = milestone_id.rsplit("-m", 1)[0] if "-m" in milestone_id else None
+        record_booking_id = booking_id or (
+            milestone_id.rsplit("-m", 1)[0] if "-m" in milestone_id else None
+        )
         try:
             self._milestones.record_reminder(
-                id=str(uuid.uuid4()), customer_id=customer_id, booking_id=booking_id,
+                id=str(uuid.uuid4()), customer_id=customer_id, booking_id=record_booking_id,
                 milestone_id=milestone_id, kind=kind, week_key=week_key or "",
                 amount=nd.get("amount"), due_date=_to_date(nd.get("due_date")),
                 email_to=email, delivery_status="sent" if ok else "failed",
@@ -158,11 +175,24 @@ class serviceReminders:
         else:
             summary["errors"] += 1
 
-    def _booking_labels(self, customer_id: str):
+    def _booking_labels(self, customer_id: str, booking_id: str = None):
+        """Project + unit label for the reminder email. ``booking_id`` picks the
+        matching booking for a multi-plot customer; without it (or on any failure)
+        it falls back to the most-recent booking application."""
+        record = None
         try:
-            record = self._profile.get_booking_application(customer_id)
+            if booking_id:
+                for r in (self._profile.list_booking_applications(customer_id) or []):
+                    if isinstance(r, dict) and r.get("id") == booking_id:
+                        record = r
+                        break
         except Exception:
             record = None
+        if record is None:
+            try:
+                record = self._profile.get_booking_application(customer_id)
+            except Exception:
+                record = None
         if not record:
             return None, None
         form = record.get("form_data") if isinstance(record, dict) else getattr(record, "form_data", None)

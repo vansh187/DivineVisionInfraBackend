@@ -42,7 +42,14 @@ Auth: customer bearer token.
   "amount": 443576,               // must equal the milestone amount (±1 for rounding)
   "purpose": "installment",       // NEW enum value
   "installment_no": 3,            // NEW — 1-based milestone position
-  "due_date": "2025-04-10"        // NEW — that milestone's ISO due date (optional echo)
+  "due_date": "2025-04-10",       // NEW — that milestone's ISO due date (optional echo)
+  "inventory_id": "b0e1f2a3-..."  // OPTIONAL — which plot this instalment is for.
+                                  // Only needed when the customer holds more than
+                                  // one plot; it disambiguates "milestone #N of
+                                  // WHICH booking". Omitted, the server resolves
+                                  // against the customer's only / most-behind plan
+                                  // (unchanged single-booking behaviour). Accepted
+                                  // on both /payments/create-order and /payments/cash.
 }
 ```
 
@@ -105,6 +112,11 @@ A "duplicate settle" (webhook arriving after `/verify`) is tolerated and returns
 ---
 
 ## 4. `GET /customer/profile` → `booking.payment_schedule[]` + `booking.next_due`
+
+> **Multi-plot:** a customer with more than one plot now also gets `bookings[]`
+> (additive, newest first) — each entry a full booking object with its **own**
+> `payment_schedule` / `next_due` / `amount_received`, scoped to that plot. `booking`
+> stays the single most-recent one (`= bookings[0]`). See `CUSTOMER_PROFILE_API.md`.
 
 Each schedule row now carries:
 ```jsonc

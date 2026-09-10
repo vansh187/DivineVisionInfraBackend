@@ -225,6 +225,11 @@ def upload_project_booking_application(
 
 @router.get("/latest/{document_type}", response_model=DocumentOutDTO)
 def get_latest_document(document_type: str, current_user: dict = Depends(get_current_user)):
+    """The caller's most-recent document of a given type, with a fresh signed_url.
+    Works for every type the app uploads - the identity photos (aadhaar_front,
+    aadhaar_back, pan_card, applicant_photo, co_applicant_photo) included - so the
+    app can fall back to it when it doesn't hold a document id. Owner-scoped:
+    404 {"detail": "not_found"} when the caller has no such document."""
     try:
         doc, signed_url, expires_in = _doc_service.get_latest(
             document_type, requester_id=current_user["sub"], requester_role=current_user["role"]
@@ -273,6 +278,14 @@ def get_demand_letter(document_id: str, current_user: dict = Depends(get_current
 
 @router.get("/{document_id}", response_model=DocumentOutDTO)
 def get_document(document_id: str, current_user: dict = Depends(get_current_user)):
+    """Re-sign any document the caller owns - identity photos (aadhaar_front,
+    aadhaar_back, pan_card, applicant_photo, co_applicant_photo), generated PDFs,
+    and booking applications alike. Authorisation is by ownership only. Response
+    shape is unchanged; the point is a fresh signed_url + signed_url_expires_in on
+    every call so an expired URL can be refreshed.
+
+    404 {"detail": "document_not_found"} when the id is unknown;
+    403 {"detail": "forbidden"} for another user's document."""
     try:
         doc, signed_url, expires_in = _doc_service.get(
             document_id, requester_id=current_user["sub"], requester_role=current_user["role"]
@@ -288,7 +301,7 @@ def get_document(document_id: str, current_user: dict = Depends(get_current_user
             signed_url_expires_in=expires_in,
         )
     except ValueError:
-        raise HTTPException(status_code=404, detail="not_found")
+        raise HTTPException(status_code=404, detail="document_not_found")
     except PermissionError:
         raise HTTPException(status_code=403, detail="forbidden")
     except RuntimeError as e:

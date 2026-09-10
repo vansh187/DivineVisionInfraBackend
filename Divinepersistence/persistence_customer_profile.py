@@ -37,6 +37,22 @@ class persistenceCustomerProfile:
             "AND document_type IN ('booking_application', 'project_booking_application') "
             "ORDER BY created_date DESC LIMIT 1;"
         ),
+        # Every booking application the customer holds, newest first - drives the
+        # additive `bookings[]` array in GET /customer/profile (multi-plot support).
+        "profile_list_booking_applications": (
+            "SELECT id, project_id, payment_id, form_data, created_date FROM divine_documents "
+            "WHERE owner_id = :customer_id AND owner_role = 'customer' "
+            "AND document_type IN ('booking_application', 'project_booking_application') "
+            "ORDER BY created_date DESC;"
+        ),
+        # Paid total (whole rupees) for one specific payment id owned by the customer -
+        # used to scope a single booking's amount_received to its own booking payment
+        # rather than the customer's whole paid balance.
+        "profile_get_amount_received_for_payment": (
+            "SELECT COALESCE(SUM(amount), 0) AS amount_received FROM divine_payments "
+            "WHERE owner_id = :customer_id AND owner_role = 'customer' AND status = 'paid' "
+            "AND id = :payment_id;"
+        ),
         "profile_get_amount_received": (
             "SELECT COALESCE(SUM(amount), 0) AS amount_received FROM divine_payments "
             "WHERE owner_id = :customer_id AND owner_role = 'customer' "
@@ -142,13 +158,7 @@ class persistenceCustomerProfile:
                 ).mappings().first()
                 if not row:
                     return None
-                return {
-                    "id": row.get("id"),
-                    "project_id": row.get("project_id"),
-                    "payment_id": row.get("payment_id"),
-                    "form_data": self._as_dict(row.get("form_data")),
-                    "created_date": row.get("created_date"),
-                }
+                return self._booking_row_to_dict(row)
         except Exception:
             self._logger.warning(
                 "profile_get_booking_application_failed customer_id=%s",
@@ -156,6 +166,46 @@ class persistenceCustomerProfile:
                 exc_info=True,
             )
             return None
+
+    def list_booking_applications(self, customer_id):
+        """Return every booking-application document for the customer as plain dicts,
+        newest first. Empty list on absence or any failure - the profile's
+        ``bookings[]`` section degrades to whatever it can build."""
+        try:
+            with self._session_factory() as db:
+                rows = db.execute(
+                    text(self._query("profile_list_booking_applications")),
+                    {"customer_id": customer_id},
+                ).mappings().all()
+                return [self._booking_row_to_dict(r) for r in rows]
+        except Exception:
+            self._logger.warning(
+                "profile_list_booking_applications_failed customer_id=%s",
+                customer_id,
+                exc_info=True,
+            )
+            return []
+
+    def _booking_row_to_dict(self, row):
+        return {
+            "id": row.get("id"),
+            "project_id": row.get("project_id"),
+            "payment_id": row.get("payment_id"),
+            "form_data": self._as_dict(row.get("form_data")),
+            "created_date": row.get("created_date"),
+        }
+
+    def get_amount_received_for_payment(self, customer_id, payment_id):
+        """Paid total (whole rupees) for one payment id the customer owns (``0`` on
+        failure / no match). Scopes a single booking's received amount to its own
+        booking payment."""
+        if not payment_id:
+            return 0
+        return self._sum_amount(
+            "profile_get_amount_received_for_payment",
+            {"customer_id": customer_id, "payment_id": payment_id},
+            customer_id,
+        )
 
     def get_amount_received(self, customer_id):
         """Return the sum of the customer's paid payments in whole rupees (``0`` on failure)."""

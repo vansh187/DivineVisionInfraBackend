@@ -27,6 +27,17 @@ class serviceCustomerProfile:
       whole response. Only two conditions propagate: a non-customer caller
       (``PermissionError`` -> 403) and a genuinely missing customer
       (``LookupError`` -> 404). Everything else is caught.
+
+    Multi-plot bookings (contract):
+
+    * ``booking`` - unchanged: the single most-recent / active booking, always
+      present, same shape as before. Old clients read only this and keep working.
+    * ``bookings`` - additive, optional (null when the customer has no booking).
+      Every booking the customer holds, newest first; each entry is a full
+      CustomerBookingDTO with its own ``unit_number`` / ``total_consideration`` /
+      ``amount_received`` / ``booking_date`` / ``payment_schedule`` / ``next_due``.
+      ``booking`` mirrors ``bookings[0]``. Per-booking amounts are scoped to that
+      booking's own payment + milestones, so two plots never share a figure.
     """
 
     _DATE_INPUT_FORMATS = (
@@ -116,7 +127,7 @@ class serviceCustomerProfile:
             self._apply_contact(dto, customer)
             self._apply_identity_fields(dto, identity)
             self._apply_address(dto, identity)
-            dto.booking = self._build_booking(customer_id)
+            self._apply_bookings(dto, customer_id)
             return dto
         except (PermissionError, LookupError):
             raise
@@ -205,9 +216,90 @@ class serviceCustomerProfile:
         except Exception:
             self._logger.warning("profile_address_section_failed", exc_info=True)
 
-    def _build_booking(self, customer_id):
-        booking = CustomerBookingDTO(has_booking=False)
+    def _apply_bookings(self, dto, customer_id):
+        """Populate ``dto.booking`` (single, most-recent - unchanged contract) and the
+        additive ``dto.bookings`` list (every plot the customer holds, newest first).
+        Each is a fully-built CustomerBookingDTO. Never raises - on ANY failure the
+        response degrades to the single-booking path (``booking`` populated,
+        ``bookings`` left as None)."""
+        try:
+            records = self._safe_list_booking_applications(customer_id)
 
+            if not records:
+                dto.booking = self._build_booking(customer_id)
+                dto.bookings = None
+                return
+
+            # Fetch the customer's milestone rows ONCE for the whole profile build
+            # and scope them in memory per booking, instead of ensure_for_customer
+            # firing twice per booking (N plots -> 2N milestone + booking-doc reads).
+            all_rows = self._all_milestone_rows(customer_id)
+
+            multi = len(records) > 1
+            entries = []
+            for record in records:
+                try:
+                    entries.append(
+                        self._booking_from_record(record, customer_id, multi, all_rows)
+                    )
+                except Exception:
+                    self._logger.warning(
+                        "profile_booking_entry_failed customer_id=%s booking_id=%s",
+                        customer_id, record.get("id"), exc_info=True,
+                    )
+            if not entries:
+                dto.booking = self._build_booking(customer_id)
+                dto.bookings = None
+                return
+
+            dto.bookings = entries
+            dto.booking = entries[0]
+        except Exception:
+            self._logger.warning(
+                "profile_bookings_section_failed customer_id=%s", customer_id, exc_info=True
+            )
+            try:
+                dto.booking = self._build_booking(customer_id)
+            except Exception:
+                dto.booking = CustomerBookingDTO(has_booking=False)
+            dto.bookings = None
+
+    def _safe_list_booking_applications(self, customer_id):
+        """List booking-application records as a list of dicts, newest first. Never
+        raises and never returns a non-list - an unexpected persistence return (e.g.
+        a mock) degrades to an empty list."""
+        try:
+            records = self._persistence.list_booking_applications(customer_id)
+        except Exception:
+            self._logger.warning(
+                "profile_bookings_fetch_failed customer_id=%s", customer_id, exc_info=True
+            )
+            return []
+        if not isinstance(records, (list, tuple)):
+            return []
+        return [r for r in records if isinstance(r, dict)]
+
+    def _all_milestone_rows(self, customer_id):
+        """Every milestone row for the customer, fetched once and shared across the
+        per-booking sections. ``None`` (not ``[]``) when the milestone service is
+        unavailable, so callers can tell "no milestone backing" from "no rows".
+        Never raises."""
+        try:
+            svc = self._milestones()
+            if svc is None:
+                return None
+            rows = svc.ensure_for_customer(customer_id, backfill_all=True)
+            return rows if isinstance(rows, list) else []
+        except Exception:
+            self._logger.warning(
+                "profile_milestone_rows_fetch_failed customer_id=%s", customer_id, exc_info=True
+            )
+            return None
+
+    def _build_booking(self, customer_id):
+        """The single most-recent booking as a CustomerBookingDTO. Retained for the
+        no-booking / degraded path and any direct caller; ``_apply_bookings`` is the
+        normal entry point."""
         try:
             record = self._persistence.get_booking_application(customer_id)
         except Exception:
@@ -217,12 +309,24 @@ class serviceCustomerProfile:
             record = None
 
         if not record:
+            booking = CustomerBookingDTO(has_booking=False)
             total = self._resolve_amount_received(customer_id, None)
             if total:
                 booking.amount_received = total
             return booking
+        return self._booking_from_record(record, customer_id, multi_booking=False)
 
-        form = record.get("form_data") if isinstance(record, dict) else None
+    def _booking_from_record(self, record, customer_id, multi_booking: bool, all_rows=None):
+        """Build one CustomerBookingDTO from a single booking-application document,
+        including its own milestone-backed payment schedule. ``multi_booking`` tells
+        the amount-received resolver to scope strictly to this booking's own payment
+        rather than the customer's whole paid balance. ``all_rows`` (when given) is
+        the customer's full milestone list, scoped in memory here so the milestone
+        service is not re-queried per booking."""
+        booking = CustomerBookingDTO(has_booking=False)
+        record = record if isinstance(record, dict) else {}
+        booking_id = self._text(record.get("id"))
+        form = record.get("form_data")
         form = form if isinstance(form, dict) else {}
 
         try:
@@ -240,7 +344,10 @@ class serviceCustomerProfile:
             booking.total_consideration = self._to_int_rupees(
                 self._first_present(form, self._TOTAL_CONSIDERATION_KEYS)
             )
-            amount_received = self._resolve_amount_received(customer_id, booking.project_id)
+            amount_received = self._resolve_amount_received(
+                customer_id, booking.project_id,
+                payment_id=self._text(record.get("payment_id")) if multi_booking else None,
+            )
             form_amount = self._to_int_rupees(
                 self._first_present(form, self._AMOUNT_RECEIVED_KEYS)
             )
@@ -254,21 +361,23 @@ class serviceCustomerProfile:
                 )
         except Exception:
             self._logger.warning(
-                "profile_booking_build_failed customer_id=%s", customer_id, exc_info=True
+                "profile_booking_build_failed customer_id=%s booking_id=%s",
+                customer_id, booking_id, exc_info=True,
             )
 
         # Milestone-backed enrichment: per-row status / pay_enabled_from / paid_on,
-        # a next_due summary, and amount_received re-derived from paid milestones.
-        # Falls back silently to the form-data schedule built above on any failure.
-        self._apply_milestone_schedule(booking, customer_id)
+        # a next_due summary, and amount_received re-derived from paid milestones -
+        # all scoped to THIS booking. Falls back silently to the form-data schedule
+        # built above on any failure.
+        self._apply_milestone_schedule(booking, customer_id, booking_id, all_rows)
         return booking
 
-    def _apply_milestone_schedule(self, booking, customer_id):
+    def _apply_milestone_schedule(self, booking, customer_id, booking_id=None, all_rows=None):
         try:
             svc = self._milestones()
             if svc is None:
                 return
-            enriched = svc.enriched_schedule(customer_id)
+            enriched = svc.enriched_schedule(customer_id, booking_id, rows=all_rows)
             rows = (enriched or {}).get("rows") or []
             if rows:
                 booking.payment_schedule = [
@@ -298,24 +407,40 @@ class serviceCustomerProfile:
                     last_reminder_kind=self._text(nd.get("last_reminder_kind")),
                     last_reminder_at=self._text(nd.get("last_reminder_at")),
                 )
-            paid_total = svc.amount_received_rupees(customer_id)
+            paid_total = svc.amount_received_rupees(customer_id, booking_id, rows=all_rows)
             if paid_total is not None:
                 booking.amount_received = paid_total
         except Exception:
             self._logger.warning(
-                "profile_milestone_schedule_failed customer_id=%s", customer_id, exc_info=True
+                "profile_milestone_schedule_failed customer_id=%s booking_id=%s",
+                customer_id, booking_id, exc_info=True,
             )
 
-    def _resolve_amount_received(self, customer_id, project_id):
-        """Paid total (whole rupees) attributable to this booking.
+    def _resolve_amount_received(self, customer_id, project_id, payment_id=None):
+        """Paid total (whole rupees) attributable to one booking.
 
-        A customer with at most one booking project has no ambiguity, so the
-        whole paid balance is theirs. Once a customer has more than one booking
-        project, only the payments linked - through the booking-application
-        document - to *this* project are counted, so one unit's figure never
-        absorbs another's.
+        With ``payment_id`` set (multi-plot customer) this is a HARD scope: only
+        that booking's own booking payment is counted, and the result is returned
+        as-is - even ``0`` - never widening to the project or whole-customer total.
+        Otherwise one plot whose booking payment is unlinked / still unsettled /
+        paid in cash with no id would silently absorb the other plot's balance
+        (and the milestone override can't always undo it). Without ``payment_id``,
+        the legacy behaviour: the whole paid balance for a single-booking customer,
+        or the per-project sum once the customer has bookings in more than one
+        project.
         """
         try:
+            if payment_id:
+                try:
+                    return self._persistence.get_amount_received_for_payment(
+                        customer_id, payment_id
+                    ) or 0
+                except Exception:
+                    self._logger.warning(
+                        "profile_amount_payment_scope_failed customer_id=%s",
+                        customer_id, exc_info=True,
+                    )
+                    return 0
             if project_id:
                 try:
                     if self._persistence.count_booking_projects(customer_id) > 1:

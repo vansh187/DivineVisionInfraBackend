@@ -42,6 +42,11 @@ class DocumentGenerateRequestDTO(BaseModel):
 
 
 class DocumentOutDTO(BaseModel):
+    # Returned by every document endpoint, including GET /documents/{id} and
+    # GET /documents/latest/{document_type} which re-sign an existing document of
+    # ANY type (identity photos, generated PDFs, booking applications) so an
+    # expired signed_url can be refreshed. Shape is stable across all of them;
+    # payment_plan / inventory_* are only populated on a booking-application upload.
     id: str
     owner_id: str
     owner_role: str
@@ -86,7 +91,9 @@ class PaymentOrderRequestDTO(BaseModel):
     amount: float = Field(..., gt=0, description="Amount in INR (rupees), e.g. 50000.00")
     # "plot_booking" + inventory_id locks that unit to 'booked' when the payment
     # settles. "installment" + installment_no pays a specific payment_schedule
-    # milestone. Omit for any other payment.
+    # milestone; inventory_id is optional there too - it says WHICH plot's
+    # milestone #N when the customer holds more than one booking (ignored for a
+    # single-booking customer). Omit purpose for any other payment.
     purpose: Literal["plot_booking", "installment", "other"] = "other"
     inventory_id: Optional[str] = Field(None, max_length=36)
     installment_no: Optional[int] = Field(None, ge=1, description="1-based milestone position")
@@ -113,6 +120,8 @@ class PaymentCashRequestDTO(BaseModel):
     amount: float = Field(..., gt=0, description="Amount in INR (rupees) the customer handed over in cash")
     note: Optional[str] = Field(None, max_length=500)
     purpose: Literal["plot_booking", "installment", "other"] = "other"
+    # For "plot_booking": the unit to lock. For "installment" (optional): which
+    # plot's milestone #N, when the customer holds more than one booking.
     inventory_id: Optional[str] = Field(None, max_length=36)
     installment_no: Optional[int] = Field(None, ge=1)
     due_date: Optional[str] = Field(None, max_length=10)
@@ -589,4 +598,11 @@ class CustomerProfileDTO(BaseModel):
     age: Optional[int] = None
     address: Optional[CustomerAddressDTO] = None
     address_text: Optional[str] = None
+    # `booking` is the single most-recent / active booking - always present, unchanged
+    # shape, kept for existing clients. A customer may now hold more than one plot;
+    # `bookings` is the additive, optional full list (newest first), each entry a
+    # complete CustomerBookingDTO with its own unit_number / total_consideration /
+    # amount_received / booking_date / payment_schedule. `booking` mirrors bookings[0]
+    # when the list is present. Old clients that only read `booking` keep working.
     booking: CustomerBookingDTO = Field(default_factory=CustomerBookingDTO)
+    bookings: Optional[List[CustomerBookingDTO]] = None

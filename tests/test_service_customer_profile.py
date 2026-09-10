@@ -21,8 +21,19 @@ def _persistence(**overrides):
         ),
     )
     p.get_identity_extract.return_value = overrides.get("identity", {})
-    p.get_booking_application.return_value = overrides.get("booking", None)
+    booking = overrides.get("booking", None)
+    p.get_booking_application.return_value = booking
+    # Multi-plot: the profile assembler now lists every booking. Default to whatever
+    # the single `booking` override supplies (so existing single-booking tests keep
+    # exercising the real code path); an explicit `bookings` override wins.
+    if "bookings" in overrides:
+        p.list_booking_applications.return_value = overrides.get("bookings")
+    else:
+        p.list_booking_applications.return_value = [booking] if isinstance(booking, dict) else []
     p.get_amount_received.return_value = overrides.get("amount_received", 0)
+    p.get_amount_received_for_payment.return_value = overrides.get(
+        "amount_received_for_payment", 0
+    )
     p.count_booking_projects.return_value = overrides.get("project_count", 1)
     p.get_amount_received_for_project.return_value = overrides.get(
         "amount_received_for_project", 0
