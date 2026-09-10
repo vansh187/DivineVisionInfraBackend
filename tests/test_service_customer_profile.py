@@ -127,6 +127,14 @@ def test_booking_derived_from_document_form_data_and_payments():
     svc, _ = _service(
         booking={
             "id": "doc-1", "project_id": "ops-divine-greens",
+            "document_id": "doc-1",
+            "inventory_id": "inv-204",
+            "payment_id": "pay-204",
+            "booking_payment_amount": 177431,
+            "payment_method": "razorpay",
+            "razorpay_order_id": "order_204",
+            "razorpay_payment_id": "rzp_204",
+            "payment_created_date": datetime(2025, 1, 10, 12, 30, tzinfo=timezone.utc),
             "form_data": form, "created_date": datetime(2025, 1, 10, tzinfo=timezone.utc),
         },
         amount_received=700000,
@@ -134,6 +142,9 @@ def test_booking_derived_from_document_form_data_and_payments():
     dto = svc.get_profile("C00001", "customer")
     b = dto.booking
     assert b.has_booking is True
+    assert b.id == "doc-1"
+    assert b.document_id == "doc-1"
+    assert b.inventory_id == "inv-204"
     assert b.project_id == "ops-divine-greens"
     assert b.project_name == "OPS Divine Greens"
     assert b.unit_number == "204"
@@ -142,6 +153,12 @@ def test_booking_derived_from_document_form_data_and_payments():
     assert b.booking_date == "2025-01-10"
     assert b.total_consideration == 1774305
     assert b.amount_received == 700000
+    assert b.payment_id == "pay-204"
+    assert b.booking_payment_amount == 177431
+    assert b.payment_method == "razorpay"
+    assert b.razorpay_order_id == "order_204"
+    assert b.razorpay_payment_id == "rzp_204"
+    assert b.payment_created_date == "2025-01-10"
     assert b.payment_schedule[0].label == "On Booking"
     assert b.payment_schedule[0].amount == 177431
 
@@ -160,6 +177,7 @@ def test_amount_received_without_booking_document():
     dto = svc.get_profile("C00001", "customer")
     assert dto.booking.has_booking is False
     assert dto.booking.amount_received == 250000
+    assert dto.bookings == []
 
 
 def test_malformed_identity_blob_does_not_break_profile():
