@@ -72,6 +72,8 @@ def create_order(dto: PaymentOrderRequestDTO, current_user: dict = Depends(get_c
     except IntegrityError:
         raise HTTPException(status_code=409, detail="conflict")
     except RuntimeError as e:
+        if str(e).startswith("payment_order_failed:BadRequestError"):
+            raise HTTPException(status_code=400, detail=str(e))
         raise HTTPException(status_code=502, detail=str(e))
     except Exception:
         raise HTTPException(status_code=500, detail="internal_error")
