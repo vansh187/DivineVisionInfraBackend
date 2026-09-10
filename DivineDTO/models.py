@@ -573,6 +573,9 @@ class CustomerNextDueDTO(BaseModel):
 
 class CustomerBookingDTO(BaseModel):
     has_booking: bool = False
+    id: Optional[str] = None
+    document_id: Optional[str] = None
+    inventory_id: Optional[str] = None
     project_id: Optional[str] = None
     project_name: Optional[str] = None
     township_label: Optional[str] = None
@@ -582,6 +585,12 @@ class CustomerBookingDTO(BaseModel):
     booking_date: Optional[str] = None
     total_consideration: Optional[int] = None
     amount_received: Optional[int] = None
+    payment_id: Optional[str] = None
+    booking_payment_amount: Optional[int] = None
+    payment_method: Optional[str] = None
+    razorpay_order_id: Optional[str] = None
+    razorpay_payment_id: Optional[str] = None
+    payment_created_date: Optional[str] = None
     payment_schedule: Optional[List[PaymentScheduleRowDTO]] = None
     next_due: Optional[CustomerNextDueDTO] = None
 
@@ -600,9 +609,9 @@ class CustomerProfileDTO(BaseModel):
     address_text: Optional[str] = None
     # `booking` is the single most-recent / active booking - always present, unchanged
     # shape, kept for existing clients. A customer may now hold more than one plot;
-    # `bookings` is the additive, optional full list (newest first), each entry a
+    # `bookings` is the additive full list (newest first), each entry a
     # complete CustomerBookingDTO with its own unit_number / total_consideration /
     # amount_received / booking_date / payment_schedule. `booking` mirrors bookings[0]
-    # when the list is present. Old clients that only read `booking` keep working.
+    # when the list is non-empty. Old clients that only read `booking` keep working.
     booking: CustomerBookingDTO = Field(default_factory=CustomerBookingDTO)
-    bookings: Optional[List[CustomerBookingDTO]] = None
+    bookings: List[CustomerBookingDTO] = Field(default_factory=list)

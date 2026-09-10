@@ -116,10 +116,13 @@ def _seed_plot(cid, *, unit, total, inventory_id, days_ago=120, created_offset_m
     with engine.begin() as c:
         c.execute(text(
             "INSERT INTO divine_payments(id, owner_id, owner_role, amount, currency, status, "
-            "method, purpose, inventory_id, created_date, last_updated_date) VALUES "
-            "(:id, :o, 'customer', :amt, 'INR', :st, 'razorpay', 'plot_booking', :inv, :n, :n)"),
+            "method, purpose, inventory_id, razorpay_order_id, razorpay_payment_id, "
+            "created_date, last_updated_date) VALUES "
+            "(:id, :o, 'customer', :amt, 'INR', :st, 'razorpay', 'plot_booking', :inv, "
+            ":order_id, :rzp_id, :n, :n)"),
             {"id": payment_id, "o": cid, "amt": booking_amount, "inv": inventory_id,
-             "st": payment_status, "n": created})
+             "st": payment_status, "order_id": f"order-{payment_id}",
+             "rzp_id": f"rzp-{payment_id}", "n": created})
         c.execute(text(
             "INSERT INTO divine_documents(id, owner_id, owner_role, document_type, form_data, "
             "storage_path, status, storage_bucket, project_id, payment_id, created_date, "
@@ -182,6 +185,15 @@ def test_profile_lists_every_plot_and_scopes_amounts_per_plot():
     assert dto.booking.has_booking is True
 
     by_unit = {e.unit_number: e for e in dto.bookings}
+    assert by_unit["A-1"].id == a.booking_id
+    assert by_unit["A-1"].document_id == a.booking_id
+    assert by_unit["A-1"].inventory_id == "INV-A"
+    assert by_unit["A-1"].payment_id == a.payment_id
+    assert by_unit["A-1"].booking_payment_amount == 500_000
+    assert by_unit["A-1"].payment_method == "razorpay"
+    assert by_unit["A-1"].razorpay_order_id == f"order-{a.payment_id}"
+    assert by_unit["A-1"].razorpay_payment_id == f"rzp-{a.payment_id}"
+    assert by_unit["A-1"].payment_created_date is not None
     assert by_unit["A-1"].total_consideration == 5_000_000
     assert by_unit["B-2"].total_consideration == 8_000_000
     # amount_received is the paid (on-booking) milestone for THAT plot only - the
@@ -215,7 +227,7 @@ def test_single_plot_profile_shape_is_unchanged():
     assert dto.bookings[0].amount_received == dto.booking.amount_received
 
 
-def test_no_plot_profile_has_null_bookings_and_empty_booking():
+def test_no_plot_profile_has_empty_bookings_and_empty_booking():
     _reset_db()
     cid = "C81003"
     _ensure_customer(cid)
@@ -223,7 +235,7 @@ def test_no_plot_profile_has_null_bookings_and_empty_booking():
     dto = serviceCustomerProfile().get_profile(cid, "customer")
 
     assert dto.booking.has_booking is False
-    assert dto.bookings is None
+    assert dto.bookings == []
 
 
 def test_amount_received_never_leaks_across_plots_in_the_same_project():

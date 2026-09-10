@@ -32,18 +32,28 @@ class persistenceCustomerProfile:
             "AND verified = :verified ORDER BY created_date DESC LIMIT 1;"
         ),
         "profile_get_booking_application": (
-            "SELECT id, project_id, payment_id, form_data, created_date FROM divine_documents "
-            "WHERE owner_id = :customer_id AND owner_role = 'customer' "
-            "AND document_type IN ('booking_application', 'project_booking_application') "
-            "ORDER BY created_date DESC LIMIT 1;"
+            "SELECT d.id, d.project_id, d.payment_id, d.form_data, d.created_date, "
+            "p.inventory_id, p.amount AS booking_payment_amount, p.method AS payment_method, "
+            "p.razorpay_order_id, p.razorpay_payment_id, p.created_date AS payment_created_date "
+            "FROM divine_documents d "
+            "LEFT JOIN divine_payments p ON p.id = d.payment_id "
+            "AND p.owner_id = d.owner_id AND p.owner_role = d.owner_role "
+            "WHERE d.owner_id = :customer_id AND d.owner_role = 'customer' "
+            "AND d.document_type IN ('booking_application', 'project_booking_application') "
+            "ORDER BY d.created_date DESC LIMIT 1;"
         ),
         # Every booking application the customer holds, newest first - drives the
         # additive `bookings[]` array in GET /customer/profile (multi-plot support).
         "profile_list_booking_applications": (
-            "SELECT id, project_id, payment_id, form_data, created_date FROM divine_documents "
-            "WHERE owner_id = :customer_id AND owner_role = 'customer' "
-            "AND document_type IN ('booking_application', 'project_booking_application') "
-            "ORDER BY created_date DESC;"
+            "SELECT d.id, d.project_id, d.payment_id, d.form_data, d.created_date, "
+            "p.inventory_id, p.amount AS booking_payment_amount, p.method AS payment_method, "
+            "p.razorpay_order_id, p.razorpay_payment_id, p.created_date AS payment_created_date "
+            "FROM divine_documents d "
+            "LEFT JOIN divine_payments p ON p.id = d.payment_id "
+            "AND p.owner_id = d.owner_id AND p.owner_role = d.owner_role "
+            "WHERE d.owner_id = :customer_id AND d.owner_role = 'customer' "
+            "AND d.document_type IN ('booking_application', 'project_booking_application') "
+            "ORDER BY d.created_date DESC;"
         ),
         # Paid total (whole rupees) for one specific payment id owned by the customer -
         # used to scope a single booking's amount_received to its own booking payment
@@ -189,8 +199,15 @@ class persistenceCustomerProfile:
     def _booking_row_to_dict(self, row):
         return {
             "id": row.get("id"),
+            "document_id": row.get("id"),
+            "inventory_id": row.get("inventory_id"),
             "project_id": row.get("project_id"),
             "payment_id": row.get("payment_id"),
+            "booking_payment_amount": row.get("booking_payment_amount"),
+            "payment_method": row.get("payment_method"),
+            "razorpay_order_id": row.get("razorpay_order_id"),
+            "razorpay_payment_id": row.get("razorpay_payment_id"),
+            "payment_created_date": row.get("payment_created_date"),
             "form_data": self._as_dict(row.get("form_data")),
             "created_date": row.get("created_date"),
         }

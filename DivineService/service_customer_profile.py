@@ -32,7 +32,7 @@ class serviceCustomerProfile:
 
     * ``booking`` - unchanged: the single most-recent / active booking, always
       present, same shape as before. Old clients read only this and keep working.
-    * ``bookings`` - additive, optional (null when the customer has no booking).
+    * ``bookings`` - additive array ([] when the customer has no booking).
       Every booking the customer holds, newest first; each entry is a full
       CustomerBookingDTO with its own ``unit_number`` / ``total_consideration`` /
       ``amount_received`` / ``booking_date`` / ``payment_schedule`` / ``next_due``.
@@ -221,13 +221,13 @@ class serviceCustomerProfile:
         additive ``dto.bookings`` list (every plot the customer holds, newest first).
         Each is a fully-built CustomerBookingDTO. Never raises - on ANY failure the
         response degrades to the single-booking path (``booking`` populated,
-        ``bookings`` left as None)."""
+        ``bookings`` left empty)."""
         try:
             records = self._safe_list_booking_applications(customer_id)
 
             if not records:
                 dto.booking = self._build_booking(customer_id)
-                dto.bookings = None
+                dto.bookings = []
                 return
 
             # Fetch the customer's milestone rows ONCE for the whole profile build
@@ -249,7 +249,7 @@ class serviceCustomerProfile:
                     )
             if not entries:
                 dto.booking = self._build_booking(customer_id)
-                dto.bookings = None
+                dto.bookings = [dto.booking] if getattr(dto.booking, "has_booking", False) else []
                 return
 
             dto.bookings = entries
@@ -262,7 +262,7 @@ class serviceCustomerProfile:
                 dto.booking = self._build_booking(customer_id)
             except Exception:
                 dto.booking = CustomerBookingDTO(has_booking=False)
-            dto.bookings = None
+            dto.bookings = [dto.booking] if getattr(dto.booking, "has_booking", False) else []
 
     def _safe_list_booking_applications(self, customer_id):
         """List booking-application records as a list of dicts, newest first. Never
@@ -331,6 +331,9 @@ class serviceCustomerProfile:
 
         try:
             booking.has_booking = True
+            booking.id = booking_id
+            booking.document_id = self._text(record.get("document_id")) or booking_id
+            booking.inventory_id = self._text(record.get("inventory_id"))
             booking.project_id = (
                 self._text(record.get("project_id"))
                 or self._first_present(form, self._PROJECT_ID_KEYS)
@@ -352,6 +355,14 @@ class serviceCustomerProfile:
                 self._first_present(form, self._AMOUNT_RECEIVED_KEYS)
             )
             booking.amount_received = amount_received or form_amount
+            booking.payment_id = self._text(record.get("payment_id"))
+            booking.booking_payment_amount = self._to_int_rupees(
+                record.get("booking_payment_amount")
+            )
+            booking.payment_method = self._text(record.get("payment_method"))
+            booking.razorpay_order_id = self._text(record.get("razorpay_order_id"))
+            booking.razorpay_payment_id = self._text(record.get("razorpay_payment_id"))
+            booking.payment_created_date = self._date_only(record.get("payment_created_date"))
             booking.payment_schedule = self._build_payment_schedule(form)
             if not booking.payment_schedule and booking.total_consideration:
                 # Booking stored before schedules were derived server-side - compute
