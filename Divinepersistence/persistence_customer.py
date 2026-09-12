@@ -32,6 +32,10 @@ class persistenceCustomer:
         queries.setdefault("get_by_username", 'SELECT * FROM divine_customer_users WHERE username = :username LIMIT 1;')
         queries.setdefault("get_by_email", 'SELECT * FROM divine_customer_users WHERE lower(email) = lower(:email) LIMIT 1;')
         queries.setdefault("get_by_id", 'SELECT * FROM divine_customer_users WHERE id = :id LIMIT 1;')
+        queries.setdefault("update_password", (
+            'UPDATE divine_customer_users SET password_hash = :password_hash, last_updated_date = :last_updated_date '
+            'WHERE id = :id RETURNING *;'
+        ))
         self._queries = queries
         self._engine = engine
 
@@ -98,3 +102,18 @@ class persistenceCustomer:
             if not row:
                 return None
             return RowWrapper(row)
+
+    def update_password(self, id: str, password_hash: str):
+        with self._session_factory() as db:
+            try:
+                query = self._queries.get("update_password")
+                result = db.execute(text(query), {
+                    "id": id, "password_hash": password_hash,
+                    "last_updated_date": datetime.now(timezone.utc),
+                })
+                row = result.mappings().first()
+                db.commit()
+                return RowWrapper(row) if row else None
+            except Exception:
+                db.rollback()
+                raise

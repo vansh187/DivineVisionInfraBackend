@@ -399,6 +399,9 @@ class serviceZoho:
     def push_broker_signup_async(self, **kwargs) -> None:
         self._run_async(self.push_broker_signup, **kwargs)
 
+    def push_booking_contact_async(self, **kwargs) -> None:
+        self._run_async(self.push_booking_contact, **kwargs)
+
     # ---- Public sync methods ------------------------------------------------
     def push_lead(self, lead_id: str, visitor_name: str = None, visitor_phone: str = None,
                   visitor_email: str = None, lead_temperature: str = None) -> bool:
@@ -473,4 +476,42 @@ class serviceZoho:
             return self._upsert("Leads", record, dup_fields)
         except Exception as e:
             logger.warning("zoho_push_signup_exception role=%s id=%s error=%s", role, record_id, e)
+            return False
+
+    def push_booking_contact(self, customer_id: str, first_name: str = None, last_name: str = None,
+                              email: str = None, phone: str = None, inventory_id: str = None,
+                              payment_id: str = None, purpose: str = None) -> bool:
+        """Syncs a customer into the Zoho CRM Contacts module the moment their FIRST
+        plot booking is confirmed (payment settled AND the unit actually flipped to
+        'booked' - Razorpay or a trusted cash/RTGS/cheque booking alike). Per the
+        client, only the booking itself lands in Contacts - later instalments on that
+        same plot do not push again (signups and chatbot activity still land in Leads,
+        untouched - see push_lead / push_customer_signup / push_broker_signup). Upserts
+        on Email and/or Phone so a retry (e.g. the webhook re-confirming a booking
+        /verify already settled) updates the same Contact instead of duplicating it;
+        with neither identifier there's nothing safe to dedupe on, so the sync is
+        skipped."""
+        try:
+            dup_fields = []
+            if email:
+                dup_fields.append("Email")
+            if phone:
+                dup_fields.append("Phone")
+            if not dup_fields:
+                logger.info("zoho_push_booking_contact_skipped customer_id=%s reason=no_email_or_phone", customer_id)
+                return False
+            record = {
+                "Last_Name": last_name or customer_id,
+                "First_Name": first_name,
+                "Email": email,
+                "Phone": phone,
+                "Lead_Source": "Website Plot Booking",
+                "Description": f"Divine plot booking confirmed, customer_id={customer_id}"
+                                + (f", purpose={purpose}" if purpose else "")
+                                + (f", inventory_id={inventory_id}" if inventory_id else "")
+                                + (f", payment_id={payment_id}" if payment_id else ""),
+            }
+            return self._upsert("Contacts", record, dup_fields)
+        except Exception as e:
+            logger.warning("zoho_push_booking_contact_exception customer_id=%s error=%s", customer_id, e)
             return False

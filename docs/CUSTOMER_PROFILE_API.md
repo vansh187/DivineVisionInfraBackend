@@ -166,7 +166,7 @@ is absent, fall back to your local 10 / 15 / 25 / 25 / 25 split of
 | `address` | object? | Absent if no address parts are known. See below. |
 | `address_text` | string? | Pre-formatted single line. Use verbatim when present. |
 | `booking` | object | **Always present.** The single most-recent / active booking. See below. |
-| `bookings` | array? | **Additive, optional.** Present (non-null) only when the customer holds at least one plot; then it lists **every** booking, newest first, each entry the same shape as `booking`. `booking` is identical to `bookings[0]`. Old clients that read only `booking` are unaffected. Each entry's `amount_received` / `payment_schedule` / `next_due` are scoped to that plot alone — two plots never share a figure. |
+| `bookings` | array | **Additive.** `[]` when the customer holds no plot; otherwise lists **every** booking, newest first, each entry the same shape as `booking`. `booking` is identical to `bookings[0]`. Old clients that read only `booking` are unaffected. Each entry's `amount_received` / `payment_schedule` / `next_due` are scoped to that plot alone — two plots never share a figure. |
 
 ### `address`
 
@@ -183,6 +183,9 @@ is absent, fall back to your local 10 / 15 / 25 / 25 / 25 split of
 | Field | Type | Notes |
 |---|---|---|
 | `has_booking` | boolean | **Always present.** `false` → all other fields except possibly `amount_received` are absent. |
+| `id` | string? | Stable booking selection id. Currently the booking application document id. |
+| `document_id` | string? | Booking application document id; use for allotment / demand / booking PDF endpoints. |
+| `inventory_id` | string? | Plot inventory row id; use to scope instalment payment actions to the selected plot. |
 | `project_id` | string? | Machine id, e.g. `ops-divine-greens`. |
 | `project_name` | string? | Display name. |
 | `township_label` | string? | e.g. `"OPS Divine Greens · Karnal"`. |
@@ -192,6 +195,12 @@ is absent, fall back to your local 10 / 15 / 25 / 25 / 25 split of
 | `booking_date` | string? | ISO `YYYY-MM-DD`. Falls back to the booking document's creation date. |
 | `total_consideration` | integer? | Whole rupees (server parses `₹` / commas / `lakh` / `crore` from the source form). |
 | `amount_received` | integer? | Whole rupees. Confirmed payments to date. For a customer with a single booking this is their full paid balance; with multiple bookings it is scoped to **this booking's own** payment + paid milestones, never another plot's. |
+| `payment_id` | string? | Original plot-booking payment id linked to the booking document. |
+| `booking_payment_amount` | integer? | Original plot-booking payment amount in whole rupees. |
+| `payment_method` | string? | e.g. `razorpay` / `cash`. |
+| `razorpay_order_id` | string? | Present for Razorpay-backed booking payments. |
+| `razorpay_payment_id` | string? | Present after Razorpay settlement. |
+| `payment_created_date` | string? | ISO `YYYY-MM-DD` date of the linked booking payment. |
 | `payment_schedule` | array? | Absent unless present on the booking form — then fall back to the local split. |
 
 ### `payment_schedule[]` row

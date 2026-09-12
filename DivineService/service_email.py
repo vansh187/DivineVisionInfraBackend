@@ -114,6 +114,27 @@ class serviceEmail:
             logger.warning("booking_confirmation_failed email=%s error=%s", email, e)
             return False
 
+    # ---- password reset OTP ---------------------------------------------
+    def send_otp_email(self, email: str, otp: str, first_name: str = None, expires_minutes: int = 10) -> bool:
+        """Synchronous (not fire-and-forget, unlike the other sends here): the
+        /forgot-password endpoint's own success/failure response depends on whether
+        this actually went out, so the caller needs the real result instead of a
+        thread it can't observe. Still never raises - a malformed template or
+        unexpected error is treated the same as a send failure."""
+        try:
+            to = (email or "").strip()
+            if not to or "@" not in to:
+                logger.info("otp_email_skipped: no valid email")
+                return False
+            name = (first_name or "").strip() or "there"
+            safe_otp = (otp or "").strip()
+            html = _otp_email_html(name, safe_otp, int(expires_minutes), has_logo=bool(self._logo_b64))
+            text = _otp_email_text(name, safe_otp, int(expires_minutes))
+            return self._send(to=to, subject="Your Password Reset Code — Divine Vision Infra", html=html, text=text)
+        except Exception as e:
+            logger.warning("otp_email_failed email=%s error=%s", email, e)
+            return False
+
     # ---- instalment reminders + receipts --------------------------------
     def send_payment_reminder_async(self, email: str, **kwargs) -> None:
         self._run_async(self.send_payment_reminder, email, **kwargs)
@@ -893,6 +914,148 @@ def _luxury_email_html(headline: str, preheader: str, greeting_name: str, body_p
   </table>
 </body>
 </html>"""
+
+
+_OTP_GOLD = "#c9a648"
+_OTP_GOLD_DIM = "#8a712f"
+_OTP_INK = "#0e1116"
+_OTP_CHARCOAL = "#171b21"
+_FONT_DISPLAY = "'Playfair Display','Georgia',serif"
+
+
+def _otp_email_html(name: str, otp: str, expires_minutes: int, has_logo: bool) -> str:
+    """Bespoke, higher-end treatment reserved for the OTP moment specifically -
+    black/charcoal ground, a hairline gold frame and wide-tracked serif display type,
+    with the code itself as the one deliberate focal point on the page."""
+    safe_name = _escape(name)
+    spaced_otp = " ".join(list(otp)) if otp else ""
+
+    if has_logo:
+        brand_mark = (
+            f'<img src="cid:{_LOGO_CID}" width="160" alt="Divine Vision Infra" '
+            f'style="display:block;border:0;outline:none;width:160px;max-width:55%;height:auto;margin:0 auto;">'
+        )
+    else:
+        brand_mark = (
+            f'<div style="font-family:{_FONT_DISPLAY};font-size:20px;letter-spacing:7px;'
+            f'text-transform:uppercase;color:{_OTP_GOLD};font-weight:700;">Divine Vision Infra</div>'
+        )
+
+    return f"""\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="x-apple-disable-message-reformatting">
+<title>Your Password Reset Code</title>
+</head>
+<body style="margin:0;padding:0;background-color:{_OTP_INK};">
+  <div style="display:none;max-height:0;overflow:hidden;opacity:0;">Your one-time code is {_escape(otp)}. Valid for {expires_minutes} minutes.</div>
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:{_OTP_INK};">
+    <tr>
+      <td align="center" style="padding:48px 16px;">
+        <table role="presentation" width="560" cellpadding="0" cellspacing="0" border="0"
+               style="width:560px;max-width:560px;background-color:{_OTP_CHARCOAL};border:1px solid {_OTP_GOLD_DIM};">
+
+          <tr><td style="height:2px;background:linear-gradient(90deg,{_OTP_INK},{_OTP_GOLD},{_OTP_INK});font-size:0;line-height:0;">&nbsp;</td></tr>
+
+          <!-- Crest / brand -->
+          <tr>
+            <td align="center" style="padding:48px 40px 28px 40px;">
+              {brand_mark}
+              <div style="height:22px;line-height:22px;font-size:0;">&nbsp;</div>
+              <div style="width:40px;height:1px;background-color:{_OTP_GOLD_DIM};margin:0 auto;font-size:0;line-height:0;">&nbsp;</div>
+              <div style="height:22px;line-height:22px;font-size:0;">&nbsp;</div>
+              <div style="font-family:{_FONT_DISPLAY};font-size:26px;letter-spacing:1px;color:#f4efe4;font-weight:700;line-height:1.3;">
+                Private Access Code
+              </div>
+            </td>
+          </tr>
+
+          <!-- Greeting / copy -->
+          <tr>
+            <td style="padding:0 48px 8px 48px;font-family:{_FONT_BODY};">
+              <p style="margin:0 0 18px 0;font-size:16px;line-height:1.7;color:#c7ccd3;">
+                Dear {safe_name},
+              </p>
+              <p style="margin:0 0 8px 0;font-size:15px;line-height:1.7;color:#8f97a3;">
+                A request was made to reset the password on your Divine Vision Infra account.
+                Present the code below to complete it.
+              </p>
+            </td>
+          </tr>
+
+          <!-- The code itself -->
+          <tr>
+            <td align="center" style="padding:20px 40px 8px 40px;">
+              <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border:1px solid {_OTP_GOLD};background-color:{_OTP_INK};">
+                <tr>
+                  <td style="padding:26px 38px;">
+                    <div style="font-family:{_FONT_HEAD};font-size:38px;letter-spacing:14px;color:{_OTP_GOLD};font-weight:700;text-align:center;">
+                      {_escape(spaced_otp)}
+                    </div>
+                  </td>
+                </tr>
+              </table>
+              <div style="height:16px;line-height:16px;font-size:0;">&nbsp;</div>
+              <div style="font-family:{_FONT_BODY};font-size:12.5px;letter-spacing:2px;text-transform:uppercase;color:{_OTP_GOLD_DIM};">
+                Valid for {expires_minutes} minutes
+              </div>
+            </td>
+          </tr>
+
+          <!-- Security note -->
+          <tr>
+            <td style="padding:28px 48px 8px 48px;font-family:{_FONT_BODY};">
+              <p style="margin:0;font-size:14px;line-height:1.7;color:#6d7480;">
+                For your security, this code is single-use and known only to you. Divine Vision Infra
+                will never call or write to ask for it. If you did not request this, no action is
+                needed - your password remains unchanged.
+              </p>
+            </td>
+          </tr>
+
+          <tr>
+            <td style="padding:26px 48px 44px 48px;font-family:{_FONT_BODY};border-top:1px solid #2a303a;margin-top:10px;">
+              <p style="margin:22px 0 0 0;font-size:14px;line-height:1.7;color:#5b6270;">
+                For assistance, contact {_SUPPORT_LINE}.
+              </p>
+              <p style="margin:18px 0 0 0;font-size:15px;line-height:1.6;color:#c7ccd3;">
+                With distinction,<br>
+                <strong style="color:{_OTP_GOLD};">The Divine Vision Infra Team</strong>
+              </p>
+            </td>
+          </tr>
+
+          <tr>
+            <td align="center" style="padding:22px 40px;background-color:{_OTP_INK};">
+              <div style="font-family:{_FONT_HEAD};font-size:11px;letter-spacing:5px;text-transform:uppercase;color:{_OTP_GOLD_DIM};font-weight:700;">
+                Divine Vision Infra
+              </div>
+            </td>
+          </tr>
+          <tr><td style="height:2px;background:linear-gradient(90deg,{_OTP_INK},{_OTP_GOLD},{_OTP_INK});font-size:0;line-height:0;">&nbsp;</td></tr>
+
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>"""
+
+
+def _otp_email_text(name: str, otp: str, expires_minutes: int) -> str:
+    return (
+        f"Dear {name},\n\n"
+        "A request was made to reset the password on your Divine Vision Infra account.\n\n"
+        f"Your one-time access code:\n\n    {otp}\n\n"
+        f"This code is valid for {expires_minutes} minutes and can be used once.\n\n"
+        "Divine Vision Infra will never call or write to ask for this code. If you did not "
+        "request this, no action is needed - your password remains unchanged.\n\n"
+        f"For assistance, contact {_SUPPORT_LINE}.\n\n"
+        "With distinction,\nThe Divine Vision Infra Team"
+    )
 
 
 def _luxury_email_text(headline: str, name: str, body_paragraphs: list, detail_rows: list,
