@@ -12,5 +12,6 @@ from .service_chatbot import serviceChatbot
 from .service_zoho import serviceZoho
 from .service_inventory import serviceInventory
 from .service_email import serviceEmail
+from .service_password_reset import servicePasswordReset, PasswordResetError
 
-__all__ = ["serviceCustomer", "serviceCustomerProfile", "serviceBroker", "serviceDocument", "serviceKyc", "serviceHealth", "servicePayment", "serviceVisit", "serviceMarketTrend", "serviceBrokerCommission", "serviceChatbot", "serviceZoho", "serviceInventory", "serviceEmail"]
+__all__ = ["serviceCustomer", "serviceCustomerProfile", "serviceBroker", "serviceDocument", "serviceKyc", "serviceHealth", "servicePayment", "serviceVisit", "serviceMarketTrend", "serviceBrokerCommission", "serviceChatbot", "serviceZoho", "serviceInventory", "serviceEmail", "servicePasswordReset", "PasswordResetError"]

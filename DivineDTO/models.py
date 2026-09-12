@@ -1,6 +1,20 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, EmailStr
 from typing import Optional, Dict, Any, List, Literal
 from datetime import datetime
+
+
+class ForgotPasswordDTO(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordDTO(BaseModel):
+    email: EmailStr
+    otp: str = Field(..., min_length=6, max_length=6, pattern=r"^\d{6}$")
+    new_password: str = Field(..., min_length=8)
+
+
+class MessageDTO(BaseModel):
+    message: str
 
 
 class UserCreateDTO(BaseModel):
