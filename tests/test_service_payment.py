@@ -69,7 +69,7 @@ def test_create_order_rejects_amount_too_large():
 @patch("DivineService.service_payment.razorpay.Client")
 def test_create_order_wraps_razorpay_failure(mock_client_cls):
     mock_client = MagicMock()
-    mock_client.order.create.side_effect = Exception("boom")
+    mock_client.order.create.side_effect = Exception("Amount exceeds maximum allowed")
     mock_client_cls.return_value = mock_client
     svc, _ = _service()
     try:
@@ -77,6 +77,7 @@ def test_create_order_wraps_razorpay_failure(mock_client_cls):
         assert False, "expected RuntimeError"
     except RuntimeError as e:
         assert str(e).startswith("payment_order_failed:")
+        assert str(e) == "payment_order_failed:Exception:amount_exceeds_maximum_allowed"
 
 
 @patch("DivineService.service_payment.razorpay.Client")

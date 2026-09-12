@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 import uuid
 import razorpay
 from razorpay.errors import SignatureVerificationError
@@ -120,10 +121,38 @@ class servicePayment:
                 return record
 
             record.inventory_status = "booked"
+            self._push_booking_contact_to_zoho(record)
             return record
         except Exception as e:  # pragma: no cover - defensive catch-all
             logger.warning("payment.booking.apply_failed error=%s", e)
             return record
+
+    def _push_booking_contact_to_zoho(self, record) -> None:
+        """Fire-and-forget: only on the FIRST successful plot booking (the unit
+        actually flips to 'booked', on any payment method - Razorpay or manually
+        recorded cash/RTGS/cheque) mirror the customer into Zoho CRM Contacts. Later
+        instalments on that same plot do NOT push again - per the client, only the
+        booking itself should land in Contacts. Never raises and never blocks the
+        payment - a Zoho outage must not affect the real payment that already
+        happened."""
+        try:
+            from DivineService.service_zoho import serviceZoho
+            owner_id = getattr(record, "owner_id", None)
+            customer = self._load_customer(owner_id)
+            if not customer:
+                return
+            serviceZoho().push_booking_contact_async(
+                customer_id=owner_id,
+                first_name=getattr(customer, "first_name", None),
+                last_name=getattr(customer, "last_name", None),
+                email=getattr(customer, "email", None),
+                phone=getattr(customer, "phone", None),
+                inventory_id=getattr(record, "inventory_id", None),
+                payment_id=getattr(record, "id", None),
+                purpose=getattr(record, "purpose", None),
+            )
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning("payment.zoho_contact_push_failed error=%s", e)
 
     def _flag_review(self, payment_id: str, reason: str):
         try:
@@ -283,7 +312,14 @@ class servicePayment:
                 "payment_capture": 1,
             })
         except Exception as e:
-            raise RuntimeError(f"payment_order_failed:{type(e).__name__}")
+            detail = self._gateway_error_detail(e)
+            logger.warning(
+                "payment.order.create_failed owner_id=%s purpose=%s amount=%s amount_paise=%s "
+                "inventory_id=%s gateway_error=%s",
+                owner_id, purpose, amount, amount_paise, inventory_id, e,
+                exc_info=True,
+            )
+            raise RuntimeError(f"payment_order_failed:{detail}")
 
         record = self._persist_new_payment(
             owner_id=owner_id, owner_role=owner_role, amount=amount,
@@ -305,6 +341,17 @@ class servicePayment:
     def _clean_due_date(self, value):
         text = str(value or "").strip()
         return text[:10] or None
+
+    def _gateway_error_detail(self, exc: Exception) -> str:
+        """Short, client-safe gateway failure detail for troubleshooting."""
+        kind = type(exc).__name__
+        raw = str(exc or "").strip()
+        if not raw:
+            return kind
+        safe = re.sub(r"[^a-zA-Z0-9_.:-]+", "_", raw).strip("_").lower()
+        if not safe:
+            return kind
+        return f"{kind}:{safe[:120]}"
 
     def record_cash_payment(self, amount: float, owner_id: str, owner_role: str, note: str = None,
                             purpose: str = "other", inventory_id: str = None,
@@ -331,10 +378,11 @@ class servicePayment:
             purpose=purpose, inventory_id=inventory_id,
             installment_no=installment_no, due_date=due_date,
         )
-        # Cash settles immediately -> lock the plot / mark the milestone now.
-        if purpose == INSTALLMENT_PURPOSE:
-            return self._apply_installment_settlement(record)
-        return self._apply_booking_to_inventory(record)
+        # Cash / RTGS / cheque - any manually-recorded method - settles immediately ->
+        # lock the plot / mark the milestone now (a first booking also mirrors the
+        # customer into Zoho Contacts; instalments don't - see
+        # _push_booking_contact_to_zoho).
+        return self._settle_by_purpose(record)
 
     def verify_payment(self, razorpay_order_id: str, razorpay_payment_id: str, razorpay_signature: str, owner_id: str):
         """Verifies the payment signature Razorpay's checkout hands back to the client -
@@ -379,10 +427,7 @@ class servicePayment:
             updated.due_date = getattr(record, "due_date", None)
 
         if verified:
-            if (getattr(updated, "purpose", None) or "other") == INSTALLMENT_PURPOSE:
-                self._apply_installment_settlement(updated)
-            else:
-                self._apply_booking_to_inventory(updated)
+            self._settle_by_purpose(updated)
         return updated, verified
 
     def handle_webhook(self, raw_body: bytes, signature: str) -> str:

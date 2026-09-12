@@ -8,8 +8,12 @@ production at the real Zoho CRM account instead.
 
 ## What syncs where
 
-Per the client, **everything lands in the Leads module** - nothing is written to
-Contacts.
+Per the client, signups and chatbot activity land in **Leads**. The one exception is
+a customer's FIRST confirmed plot booking - the payment settles paid AND the unit
+actually flips to 'booked' - made either via Razorpay or recorded manually as
+cash/RTGS/cheque. That lands in **Contacts** instead. See
+[`service_payment.py`](../DivineService/service_payment.py)
+`_push_booking_contact_to_zoho` (called from `_apply_booking_to_inventory`).
 
 | Event | Zoho module | Trigger |
 |---|---|---|
@@ -17,6 +21,10 @@ Contacts.
 | Broker signup (with email or phone) | **Leads** | `POST /broker/signup` |
 | Chatbot callback request | **Leads** | Visitor completes "call me back" (name + phone) |
 | Chatbot email capture | **Leads** | Visitor gives an email in chat |
+| Plot booking confirmed (payment settled + unit flipped to `booked`) - Razorpay or cash/RTGS/cheque | **Contacts** | `POST /payments/verify`, the Razorpay webhook, or `POST /payments/cash` |
+
+A later instalment payment on that same already-booked plot does **not** push again -
+only the original booking event lands in Contacts.
 
 A signup/lead with no email and no phone is skipped - there's no reliable field to
 dedupe on. A Zoho outage or bad config never fails or slows down the underlying

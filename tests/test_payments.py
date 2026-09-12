@@ -113,6 +113,17 @@ def test_create_order_returns_502_when_not_configured(mock_create):
     assert r.json()["detail"] == "payment_not_configured"
 
 
+@patch.object(
+    servicePayment,
+    "create_order",
+    side_effect=RuntimeError("payment_order_failed:BadRequestError:amount_exceeds_maximum_allowed"),
+)
+def test_create_order_returns_400_for_gateway_bad_request(mock_create):
+    r = client.post("/payments/create-order", json={"amount": 600000}, headers=_auth_headers())
+    assert r.status_code == 400
+    assert r.json()["detail"] == "payment_order_failed:BadRequestError:amount_exceeds_maximum_allowed"
+
+
 # ---------- POST /payments/verify ----------
 
 def test_verify_requires_auth():
