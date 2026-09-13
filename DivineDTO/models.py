@@ -5,6 +5,17 @@ from datetime import datetime
 BROKER_PROJECTS = ("suraksha-enclave", "ops-divine-greens")
 
 
+def _require_non_blank(v: str, min_length: int = 1) -> str:
+    """Shared body for every "strip, then must be non-empty (or at least
+    min_length chars)" field validator below - Field(min_length=...) alone only
+    checks length BEFORE stripping, so e.g. "  a " would pass a bare
+    min_length=2 while being just one real character."""
+    v = (v or "").strip()
+    if len(v) < max(min_length, 1):
+        raise ValueError("field required" if min_length <= 1 else f"must be at least {min_length} characters")
+    return v
+
+
 class ForgotPasswordDTO(BaseModel):
     email: EmailStr
 
@@ -31,10 +42,7 @@ class UserCreateDTO(BaseModel):
     @field_validator("phone")
     @classmethod
     def phone_must_not_be_blank(cls, v: str) -> str:
-        v = v.strip()
-        if not v:
-            raise ValueError("field required")
-        return v
+        return _require_non_blank(v)
 
 
 class BrokerCreateDTO(UserCreateDTO):
@@ -83,10 +91,7 @@ class AdminCreateDTO(BaseModel):
     @field_validator("full_name")
     @classmethod
     def full_name_must_not_be_blank(cls, v: str) -> str:
-        v = v.strip()
-        if not v:
-            raise ValueError("field required")
-        return v
+        return _require_non_blank(v, min_length=2)
 
 
 class AdminLoginDTO(BaseModel):
@@ -120,6 +125,50 @@ class AdminAccessTokenDTO(BaseModel):
 
 class AdminRefreshDTO(BaseModel):
     refresh_token: str = Field(..., min_length=1)
+
+
+class CustomerListItemDTO(BaseModel):
+    id: str
+    full_name: str
+    email: Optional[str]
+    phone: Optional[str]
+    # source is always WEBSITE for now - divine_chatbot_leads (broker-channel
+    # attribution) is out of scope until visitor/lead capture is wired in (next
+    # phase). No "INACTIVE"/"LEAD" here either: nothing in the CASE expression
+    # backing this column (DivineDatabasequeries/admin_customers_queries.yaml)
+    # ever produces them - phase 1 only lists real divine_customer_users rows.
+    source: Literal["WEBSITE", "BROKER_CHANNEL"]
+    status: Literal["ACTIVE", "BOOKED"]
+    created_at: Optional[datetime]
+    last_activity_at: Optional[datetime]
+
+
+class PaginationDTO(BaseModel):
+    page: int
+    page_size: int
+    total_items: int
+    total_pages: int
+
+
+class CustomerListResponseDTO(BaseModel):
+    items: List[CustomerListItemDTO]
+    pagination: PaginationDTO
+
+
+class CustomerCreateDTO(BaseModel):
+    full_name: str = Field(..., min_length=2, max_length=200)
+    email: EmailStr
+    phone: str = Field(..., min_length=1, max_length=20)
+
+    @field_validator("full_name")
+    @classmethod
+    def full_name_must_not_be_blank(cls, v: str) -> str:
+        return _require_non_blank(v, min_length=2)
+
+    @field_validator("phone")
+    @classmethod
+    def phone_must_not_be_blank(cls, v: str) -> str:
+        return _require_non_blank(v)
 
 
 class DocumentGenerateRequestDTO(BaseModel):

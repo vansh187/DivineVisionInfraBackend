@@ -1,0 +1,69 @@
+# SQL for the admin panel's Customers list (GET /admin/customers).
+#
+# Phase 1: divine_customer_users only - accounts that actually signed up (or were
+# added here by an admin). Chatbot-captured visitors/leads (divine_chatbot_leads)
+# are deliberately out of scope for now (next phase); "source" is therefore always
+# WEBSITE today, and "status" is ACTIVE or BOOKED (booked <=> divine_project_inventory
+# has a unit with booked_by = this customer's id) - never LEAD.
+#
+# {order_by} is substituted in Python from a fixed allow-list (never from raw
+# request input) - see persistence_admin_customers.py.
+#
+# The search filter escapes '%' and '_' in :search before it's wrapped in
+# wildcards (ESCAPE '\') so a literal underscore/percent in a name/phone/email
+# is matched literally instead of acting as a LIKE wildcard.
+
+list_customers: |
+  WITH combined AS (
+    SELECT
+      cu.id AS id,
+      TRIM(COALESCE(cu.first_name,'') || ' ' || COALESCE(cu.last_name,'')) AS full_name,
+      cu.email AS email,
+      cu.phone AS phone,
+      'WEBSITE' AS source,
+      CASE WHEN EXISTS (
+        SELECT 1 FROM divine_project_inventory pi WHERE pi.booked_by = cu.id
+      ) THEN 'BOOKED' ELSE 'ACTIVE' END AS status,
+      cu.created_date AS created_at,
+      cu.last_updated_date AS last_activity_at
+    FROM divine_customer_users cu
+  ),
+  filtered AS (
+    SELECT * FROM combined
+    WHERE (:search IS NULL
+           OR lower(full_name) LIKE '%' || replace(replace(lower(:search), '%', '\%'), '_', '\_') || '%' ESCAPE '\'
+           OR lower(email) LIKE '%' || replace(replace(lower(:search), '%', '\%'), '_', '\_') || '%' ESCAPE '\'
+           OR lower(phone) LIKE '%' || replace(replace(lower(:search), '%', '\%'), '_', '\_') || '%' ESCAPE '\')
+      AND (:source IS NULL OR source = :source)
+      AND (:status IS NULL OR status = :status)
+  )
+  SELECT *, count(*) OVER() AS total_count FROM filtered
+  ORDER BY {order_by}
+  LIMIT :limit OFFSET :offset;
+
+# Fallback only - used when list_customers returns zero rows (a genuinely empty
+# result, or a page past the last one), since a window-function total isn't
+# available on an empty row set. Never run on every request; see
+# persistence_admin_customers.list_customers/count_customers.
+count_customers: |
+  WITH combined AS (
+    SELECT
+      cu.id AS id,
+      TRIM(COALESCE(cu.first_name,'') || ' ' || COALESCE(cu.last_name,'')) AS full_name,
+      cu.email AS email,
+      cu.phone AS phone,
+      'WEBSITE' AS source,
+      CASE WHEN EXISTS (
+        SELECT 1 FROM divine_project_inventory pi WHERE pi.booked_by = cu.id
+      ) THEN 'BOOKED' ELSE 'ACTIVE' END AS status,
+      cu.created_date AS created_at,
+      cu.last_updated_date AS last_activity_at
+    FROM divine_customer_users cu
+  )
+  SELECT count(*) AS total FROM combined
+  WHERE (:search IS NULL
+         OR lower(full_name) LIKE '%' || replace(replace(lower(:search), '%', '\%'), '_', '\_') || '%' ESCAPE '\'
+         OR lower(email) LIKE '%' || replace(replace(lower(:search), '%', '\%'), '_', '\_') || '%' ESCAPE '\'
+         OR lower(phone) LIKE '%' || replace(replace(lower(:search), '%', '\%'), '_', '\_') || '%' ESCAPE '\')
+    AND (:source IS NULL OR source = :source)
+    AND (:status IS NULL OR status = :status);
