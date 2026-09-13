@@ -332,9 +332,9 @@ def setup_module(module):
     # API cases hit the real service, so restore a working persistence here.
     _api_inventory_service._persistence = persistenceInventory()
 
-    client.post("/broker/signup", json={"username": "bookbroker", "password": "strongpassword"})
+    client.post("/broker/signup", json={"username": "bookbroker", "password": "strongpassword", "phone": "9876500016", "project": "suraksha-enclave"})
     _BROKER_TOKEN = client.post("/broker/login", json={"username": "bookbroker", "password": "strongpassword"}).json()["access_token"]
-    client.post("/customer/signup", json={"username": "bookcust", "password": "strongpassword"})
+    client.post("/customer/signup", json={"username": "bookcust", "password": "strongpassword", "phone": "9876500017"})
     _CUSTOMER_TOKEN = client.post("/customer/login", json={"username": "bookcust", "password": "strongpassword"}).json()["access_token"]
 
 

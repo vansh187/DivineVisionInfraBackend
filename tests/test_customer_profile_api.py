@@ -24,12 +24,12 @@ def setup_module(module):
         pass
     PersistenceDB().create_tables()
 
-    client.post("/customer/signup", json={"username": "profile_cust", "password": "strongpassword"})
+    client.post("/customer/signup", json={"username": "profile_cust", "password": "strongpassword", "phone": "9876500014"})
     lr = client.post("/customer/login", json={"username": "profile_cust", "password": "strongpassword"})
     assert lr.status_code == 200, lr.text
     _CUSTOMER_TOKEN = lr.json()["access_token"]
 
-    client.post("/broker/signup", json={"username": "profile_broker", "password": "strongpassword"})
+    client.post("/broker/signup", json={"username": "profile_broker", "password": "strongpassword", "phone": "9876500015", "project": "suraksha-enclave"})
     br = client.post("/broker/login", json={"username": "profile_broker", "password": "strongpassword"})
     assert br.status_code == 200, br.text
     _BROKER_TOKEN = br.json()["access_token"]

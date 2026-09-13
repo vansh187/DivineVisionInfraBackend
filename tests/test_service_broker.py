@@ -7,7 +7,7 @@ os.environ["JWT_SECRET_KEY"] = "testsecret"
 import jwt
 import pytest
 from DivineService.service_broker import serviceBroker
-from DivineDTO.models import UserCreateDTO, UserLoginDTO
+from DivineDTO.models import BrokerCreateDTO, UserLoginDTO
 
 
 def _service():
@@ -34,7 +34,7 @@ def test_constructor_defaults_persistence_when_none_given():
 def test_signup_rejects_duplicate_username():
     svc, persistence = _service()
     persistence.get_by_username.return_value = MagicMock()
-    dto = UserCreateDTO(username="taken", password="strongpassword")
+    dto = BrokerCreateDTO(username="taken", password="strongpassword", phone="9876500000", project="suraksha-enclave")
     with pytest.raises(ValueError):
         svc.signup(dto)
     persistence.create_user.assert_not_called()

@@ -6,7 +6,7 @@ from passlib.context import CryptContext
 import jwt
 from dotenv import load_dotenv
 from Divinepersistence import persistenceBroker
-from DivineDTO.models import UserCreateDTO, UserLoginDTO
+from DivineDTO.models import BrokerCreateDTO, UserLoginDTO
 from DivineService.service_zoho import serviceZoho
 from DivineService.service_email import serviceEmail, dispatch_welcome_email, CHANNEL_PARTNER
 
@@ -41,7 +41,7 @@ class serviceBroker:
     def _verify_password(self, plain: str, hashed: str) -> bool:
         return pwd_context.verify(plain, hashed)
 
-    def signup(self, dto: UserCreateDTO, created_by: str = None):
+    def signup(self, dto: BrokerCreateDTO, created_by: str = None):
         existing = self._persistence.get_by_username(dto.username)
         if existing:
             raise ValueError("username_taken")
@@ -54,6 +54,7 @@ class serviceBroker:
             phone=dto.phone,
             first_name=getattr(dto, 'first_name', None),
             last_name=getattr(dto, 'last_name', None),
+            project=dto.project,
         )
         try:
             if self._zoho:

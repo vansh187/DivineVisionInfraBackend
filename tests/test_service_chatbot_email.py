@@ -304,7 +304,7 @@ def test_post_signup_missing_email_returns_fallback_without_throwing():
     assert persistence.session.auth_state is None
 
 
-def test_broker_signup_flow_accepts_skipped_optional_fields():
+def test_broker_signup_flow_accepts_skipped_optional_fields_but_requires_phone_and_project():
     persistence = FakeChatbotPersistence()
     broker_auth = FakeAuthService("broker")
     service = serviceChatbot(
@@ -315,7 +315,20 @@ def test_broker_signup_flow_accepts_skipped_optional_fields():
     service.handle_message("session-1", text="Ravi")
     service.handle_message("session-1", text="skip")
     service.handle_message("session-1", text="skip")
-    service.handle_message("session-1", text="skip")
+
+    # phone is mandatory now - "skip" must be rejected and re-prompted, not accepted
+    rejected = service.handle_message("session-1", text="skip")
+    assert "required" in rejected["reply"].lower()
+    assert persistence.session.auth_state == "signup_broker_phone"
+
+    service.handle_message("session-1", text="9876543210")
+
+    # project is mandatory for brokers - an invalid slug must be rejected
+    rejected_project = service.handle_message("session-1", text="not-a-real-project")
+    assert "suraksha-enclave" in rejected_project["reply"].lower()
+    assert persistence.session.auth_state == "signup_broker_project"
+
+    service.handle_message("session-1", text="suraksha-enclave")
     service.handle_message("session-1", text="ravi_broker")
     result = service.handle_message("session-1", text="anotherstrongpass")
 
@@ -326,7 +339,8 @@ def test_broker_signup_flow_accepts_skipped_optional_fields():
     assert broker_auth.created[-1].first_name == "Ravi"
     assert broker_auth.created[-1].last_name is None
     assert broker_auth.created[-1].email is None
-    assert broker_auth.created[-1].phone is None
+    assert broker_auth.created[-1].phone == "9876543210"
+    assert broker_auth.created[-1].project == "suraksha-enclave"
 
 
 def test_broker_login_flow_returns_token_and_masks_password():

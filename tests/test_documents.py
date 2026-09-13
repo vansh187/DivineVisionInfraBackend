@@ -35,12 +35,12 @@ def setup_module(module):
     # instead of one per test - the global rate limiter (10 req/60s per client+path)
     # applies across the whole test session, and blowing through it here previously
     # caused unrelated tests in other files to fail with spurious 429s.
-    client.post("/customer/signup", json={"username": "dockust_shared", "password": "strongpassword"})
+    client.post("/customer/signup", json={"username": "dockust_shared", "password": "strongpassword", "phone": "9876500021"})
     lr = client.post("/customer/login", json={"username": "dockust_shared", "password": "strongpassword"})
     assert lr.status_code == 200, lr.text
     _TOKEN = lr.json()["access_token"]
 
-    client.post("/customer/signup", json={"username": "dockust_other", "password": "strongpassword"})
+    client.post("/customer/signup", json={"username": "dockust_other", "password": "strongpassword", "phone": "9876500022"})
     lr2 = client.post("/customer/login", json={"username": "dockust_other", "password": "strongpassword"})
     assert lr2.status_code == 200, lr2.text
     _OTHER_TOKEN = lr2.json()["access_token"]

@@ -83,7 +83,7 @@ def setup_module(module):
     # (10 requests/60s per client+path) applies across the whole test session, and this
     # file doesn't need distinct identities per test (unlike e.g. an ownership check),
     # so one signup+login keeps well within budget instead of exhausting it.
-    client.post("/customer/signup", json={"username": "kyc_test_user", "password": "strongpassword123"})
+    client.post("/customer/signup", json={"username": "kyc_test_user", "password": "strongpassword123", "phone": "9876500010"})
     lr = client.post("/customer/login", json={"username": "kyc_test_user", "password": "strongpassword123"})
     assert lr.status_code == 200, lr.text
     _TOKEN = lr.json()["access_token"]

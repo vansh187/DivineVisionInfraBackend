@@ -1,6 +1,8 @@
-from pydantic import BaseModel, Field, EmailStr
+from pydantic import BaseModel, Field, EmailStr, field_validator
 from typing import Optional, Dict, Any, List, Literal
 from datetime import datetime
+
+BROKER_PROJECTS = ("suraksha-enclave", "ops-divine-greens")
 
 
 class ForgotPasswordDTO(BaseModel):
@@ -21,10 +23,22 @@ class UserCreateDTO(BaseModel):
     username: str = Field(..., min_length=3, max_length=150)
     password: str = Field(..., min_length=8)
     email: Optional[str] = Field(None)
-    phone: Optional[str] = Field(None)
+    phone: str = Field(..., min_length=1)
     first_name: Optional[str] = Field(None)
     last_name: Optional[str] = Field(None)
     created_by: Optional[str] = None
+
+    @field_validator("phone")
+    @classmethod
+    def phone_must_not_be_blank(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("field required")
+        return v
+
+
+class BrokerCreateDTO(UserCreateDTO):
+    project: Literal["suraksha-enclave", "ops-divine-greens"] = Field(...)
 
 
 class UserLoginDTO(BaseModel):
@@ -39,6 +53,7 @@ class UserOutDTO(BaseModel):
     phone: Optional[str]
     first_name: Optional[str]
     last_name: Optional[str]
+    project: Optional[str] = None
     created_by: Optional[str]
     created_date: Optional[datetime]
     last_updated_by: Optional[str]

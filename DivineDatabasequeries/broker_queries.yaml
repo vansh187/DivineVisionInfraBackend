@@ -1,7 +1,7 @@
 # SQL queries for the broker API
 create_broker: |
-  INSERT INTO divine_broker_users(id, username, first_name, last_name, email, phone, password_hash, created_by, created_date, last_updated_by, last_updated_date)
-  VALUES (:id, :username, :first_name, :last_name, :email, :phone, :password_hash, :created_by, :created_date, :last_updated_by, :last_updated_date)
+  INSERT INTO divine_broker_users(id, username, first_name, last_name, email, phone, project, password_hash, created_by, created_date, last_updated_by, last_updated_date)
+  VALUES (:id, :username, :first_name, :last_name, :email, :phone, :project, :password_hash, :created_by, :created_date, :last_updated_by, :last_updated_date)
   RETURNING *;
 get_by_username: |
   SELECT * FROM divine_broker_users WHERE username = :username LIMIT 1;

@@ -14,6 +14,7 @@ class BrokerModel(Base):
     phone = Column(String(50))
     first_name = Column(String(150))
     last_name = Column(String(150))
+    project = Column(String(32))
     password_hash = Column(String(255), nullable=False)
     created_by = Column(String(255))
     created_date = Column(DateTime)
@@ -26,8 +27,8 @@ class persistenceBroker:
         self._session_factory = session_factory
         queries = load_queries("broker_queries.yaml")
         queries.setdefault("create_broker", (
-            'INSERT INTO divine_broker_users(id, username, first_name, last_name, email, phone, password_hash, created_by, created_date, last_updated_by, last_updated_date) '
-            'VALUES (:id, :username, :first_name, :last_name, :email, :phone, :password_hash, :created_by, :created_date, :last_updated_by, :last_updated_date) RETURNING *;'
+            'INSERT INTO divine_broker_users(id, username, first_name, last_name, email, phone, project, password_hash, created_by, created_date, last_updated_by, last_updated_date) '
+            'VALUES (:id, :username, :first_name, :last_name, :email, :phone, :project, :password_hash, :created_by, :created_date, :last_updated_by, :last_updated_date) RETURNING *;'
         ))
         queries.setdefault("get_by_username", 'SELECT * FROM divine_broker_users WHERE username = :username LIMIT 1;')
         queries.setdefault("get_by_email", 'SELECT * FROM divine_broker_users WHERE lower(email) = lower(:email) LIMIT 1;')
@@ -46,7 +47,7 @@ class persistenceBroker:
                 return candidate
         raise RuntimeError("Failed to generate unique broker id")
 
-    def create_user(self, username: str, password_hash: str, created_by: str = None, email: str = None, phone: str = None, first_name: str = None, last_name: str = None) -> BrokerModel:
+    def create_user(self, username: str, password_hash: str, created_by: str = None, email: str = None, phone: str = None, first_name: str = None, last_name: str = None, project: str = None) -> BrokerModel:
         with self._session_factory() as db:
             try:
                 new_id = self._generate_unique_id(db)
@@ -59,6 +60,7 @@ class persistenceBroker:
                     "last_name": last_name,
                     "email": email,
                     "phone": phone,
+                    "project": project,
                     "password_hash": password_hash,
                     "created_by": created_by,
                     "created_date": now,
