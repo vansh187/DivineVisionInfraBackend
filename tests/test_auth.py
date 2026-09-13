@@ -57,14 +57,22 @@ def test_broker_signup_and_login():
         "email": "broker1@example.com",
         "phone": "+1987654321",
         "first_name": "Broker",
-        "last_name": "One"
+        "last_name": "One",
+        "project": "suraksha-enclave",
     }
     r = client.post("/broker/signup", json=payload)
     assert r.status_code == 200, r.text
     data = r.json()
     assert data["id"].startswith("B") and len(data["id"]) == 6
+    assert data["project"] == "suraksha-enclave"
 
     lr = client.post("/broker/login", json={"username": payload["username"], "password": payload["password"]})
     assert lr.status_code == 200, lr.text
     token = lr.json().get("access_token")
     assert token and isinstance(token, str)
+
+
+# Field-validation corner cases for signup (missing/blank phone, missing/invalid broker
+# project) are covered at the DTO level in tests/test_dto_validation.py instead of here -
+# every extra call to /customer|broker/signup (rate-limited 10 req/60s, shared across the
+# whole suite) eats into the budget other test files rely on for their own signups.

@@ -3,7 +3,7 @@ from fastapi import APIRouter, HTTPException, Request
 from sqlalchemy.exc import IntegrityError
 
 from DivineDTO.models import (
-    UserCreateDTO, UserLoginDTO, TokenDTO, UserOutDTO, ForgotPasswordDTO, ResetPasswordDTO, MessageDTO,
+    BrokerCreateDTO, UserLoginDTO, TokenDTO, UserOutDTO, ForgotPasswordDTO, ResetPasswordDTO, MessageDTO,
 )
 from Divinepersistence import persistenceBroker
 from DivineService import serviceBroker, servicePasswordReset, PasswordResetError
@@ -14,7 +14,7 @@ _password_reset_service = servicePasswordReset(role="broker", user_persistence=p
 
 
 @router.post("/signup", response_model=UserOutDTO)
-def broker_signup(request: Request, dto: UserCreateDTO):
+def broker_signup(request: Request, dto: BrokerCreateDTO):
     try:
         client_ip = request.client.host if request.client else None
         user = _broker_service.signup(dto, created_by=client_ip)
@@ -25,6 +25,7 @@ def broker_signup(request: Request, dto: UserCreateDTO):
             phone=getattr(user, 'phone', None),
             first_name=getattr(user, 'first_name', None),
             last_name=getattr(user, 'last_name', None),
+            project=getattr(user, 'project', None),
             created_by=user.created_by,
             created_date=user.created_date,
             last_updated_by=user.last_updated_by,

@@ -81,17 +81,17 @@ def setup_module(module):
         pass
     PersistenceDB().create_tables()
 
-    client.post("/broker/signup", json={"username": "invbroker_shared", "password": "strongpassword"})
+    client.post("/broker/signup", json={"username": "invbroker_shared", "password": "strongpassword", "phone": "9876500018", "project": "suraksha-enclave"})
     lr = client.post("/broker/login", json={"username": "invbroker_shared", "password": "strongpassword"})
     assert lr.status_code == 200, lr.text
     _BROKER_TOKEN = lr.json()["access_token"]
 
-    client.post("/broker/signup", json={"username": "invbroker_other", "password": "strongpassword"})
+    client.post("/broker/signup", json={"username": "invbroker_other", "password": "strongpassword", "phone": "9876500019", "project": "ops-divine-greens"})
     lr2 = client.post("/broker/login", json={"username": "invbroker_other", "password": "strongpassword"})
     assert lr2.status_code == 200, lr2.text
     _OTHER_BROKER_TOKEN = lr2.json()["access_token"]
 
-    client.post("/customer/signup", json={"username": "invcust_shared", "password": "strongpassword"})
+    client.post("/customer/signup", json={"username": "invcust_shared", "password": "strongpassword", "phone": "9876500020"})
     lr3 = client.post("/customer/login", json={"username": "invcust_shared", "password": "strongpassword"})
     assert lr3.status_code == 200, lr3.text
     _CUSTOMER_TOKEN = lr3.json()["access_token"]

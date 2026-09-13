@@ -10,7 +10,7 @@ from urllib.parse import quote_plus
 
 from Divinepersistence import persistenceChatbot, persistenceInventory
 from Divinepersistence.persistence_loan import persistenceLoan
-from DivineDTO.models import UserCreateDTO
+from DivineDTO.models import UserCreateDTO, BrokerCreateDTO
 from DivineService.service_broker import serviceBroker
 from DivineService.service_customer import serviceCustomer
 from DivineService.llm_gemini import llmGemini, GeminiError
@@ -1789,7 +1789,7 @@ class serviceChatbot:
     def _advance_signup_flow(self, session, text: str, role: str, field: str, payload: dict):
         session_id = session.id
         value = (text or "").strip()
-        if field in ("first_name", "last_name", "email", "phone") and value.lower() in ("skip", "na", "n/a", "none", "no"):
+        if field in ("first_name", "last_name", "email") and value.lower() in ("skip", "na", "n/a", "none", "no"):
             value = None
 
         if field == "first_name":
@@ -1817,20 +1817,36 @@ class serviceChatbot:
                 return {"session_id": session_id, "reply": reply}
             payload["email"] = value
             self._safe_update_session_auth_state(session_id, f"signup_{role}_phone", payload)
-            reply = "Please enter your phone number. You can type skip if you don't want to add it."
+            reply = "Please enter your phone number - it's required to create your account."
             self._persist_turn(session_id, "assistant", reply)
             return {"session_id": session_id, "reply": reply}
 
         if field == "phone":
-            if value:
-                phone = extract_phone(value)
-                if not phone:
-                    reply = "Please enter a valid phone number, or type skip."
-                    self._persist_turn(session_id, "assistant", reply)
-                    return {"session_id": session_id, "reply": reply}
-                payload["phone"] = phone
-            else:
-                payload["phone"] = None
+            phone = extract_phone(value) if value else None
+            if not phone:
+                reply = "Please enter a valid phone number - it's required to create your account."
+                self._persist_turn(session_id, "assistant", reply)
+                return {"session_id": session_id, "reply": reply}
+            payload["phone"] = phone
+            if role == "broker":
+                self._safe_update_session_auth_state(session_id, f"signup_{role}_project", payload)
+                reply = (
+                    "Which township do you work with - suraksha-enclave or ops-divine-greens?"
+                )
+                self._persist_turn(session_id, "assistant", reply)
+                return {"session_id": session_id, "reply": reply}
+            self._safe_update_session_auth_state(session_id, f"signup_{role}_username", payload)
+            reply = "Please choose a username."
+            self._persist_turn(session_id, "assistant", reply)
+            return {"session_id": session_id, "reply": reply}
+
+        if field == "project":
+            project = value.lower().replace(" ", "-")
+            if project not in ("suraksha-enclave", "ops-divine-greens"):
+                reply = "Please reply with one of: suraksha-enclave or ops-divine-greens."
+                self._persist_turn(session_id, "assistant", reply)
+                return {"session_id": session_id, "reply": reply}
+            payload["project"] = project
             self._safe_update_session_auth_state(session_id, f"signup_{role}_username", payload)
             reply = "Please choose a username."
             self._persist_turn(session_id, "assistant", reply)
@@ -1888,7 +1904,8 @@ class serviceChatbot:
     def _create_auth_account(self, session, role: str, payload: dict):
         session_id = session.id
         try:
-            dto = UserCreateDTO(**payload)
+            dto_cls = BrokerCreateDTO if role == "broker" else UserCreateDTO
+            dto = dto_cls(**payload)
             user = self._auth_service(role).signup(dto)
         except ValueError as e:
             if str(e) == "username_taken":

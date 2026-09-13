@@ -35,7 +35,7 @@ def test_constructor_defaults_persistence_when_none_given():
 def test_signup_rejects_duplicate_username():
     svc, persistence = _service()
     persistence.get_by_username.return_value = MagicMock()  # already exists
-    dto = UserCreateDTO(username="taken", password="strongpassword")
+    dto = UserCreateDTO(username="taken", password="strongpassword", phone="9876500000")
     with pytest.raises(ValueError):
         svc.signup(dto)
     persistence.create_user.assert_not_called()
@@ -45,7 +45,7 @@ def test_signup_hashes_password_before_persisting():
     svc, persistence = _service()
     persistence.get_by_username.return_value = None
     persistence.create_user.return_value = MagicMock(id="C00001")
-    dto = UserCreateDTO(username="new_user", password="strongpassword", email="a@b.com")
+    dto = UserCreateDTO(username="new_user", password="strongpassword", email="a@b.com", phone="9876500001")
     svc.signup(dto, created_by="1.2.3.4")
 
     _, kwargs = persistence.create_user.call_args
