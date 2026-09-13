@@ -65,6 +65,63 @@ class TokenDTO(BaseModel):
     token_type: str = "bearer"
 
 
+class AdminCreateDTO(BaseModel):
+    full_name: str = Field(..., min_length=2, max_length=150)
+    employee_id: str = Field(..., min_length=3, max_length=32)
+    email: EmailStr
+    password: str = Field(..., min_length=8)
+    created_by: Optional[str] = None
+
+    @field_validator("employee_id")
+    @classmethod
+    def employee_id_must_start_with_dv(cls, v: str) -> str:
+        v = v.strip().upper()
+        if not v.startswith("DV"):
+            raise ValueError("employee_id must start with 'DV'")
+        return v
+
+    @field_validator("full_name")
+    @classmethod
+    def full_name_must_not_be_blank(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("field required")
+        return v
+
+
+class AdminLoginDTO(BaseModel):
+    email: EmailStr
+    password: str
+
+
+class AdminOutDTO(BaseModel):
+    id: str
+    full_name: str
+    employee_id: str
+    email: str
+    created_by: Optional[str]
+    created_date: Optional[datetime]
+    last_updated_by: Optional[str]
+    last_updated_date: Optional[datetime]
+
+
+class AdminTokenDTO(BaseModel):
+    access_token: str
+    refresh_token: str
+    token_type: str = "bearer"
+    expires_in: int
+
+
+class AdminAccessTokenDTO(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    expires_in: int
+
+
+class AdminRefreshDTO(BaseModel):
+    refresh_token: str = Field(..., min_length=1)
+
+
 class DocumentGenerateRequestDTO(BaseModel):
     document_type: str = Field(..., min_length=1, max_length=100)
     form_data: Dict[str, Any] = Field(...)
