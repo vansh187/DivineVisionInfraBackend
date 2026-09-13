@@ -14,7 +14,7 @@ from DivineService import serviceAdmin, servicePasswordReset, PasswordResetError
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin", tags=["admin"])
-_admin_service = serviceAdmin(secret_key=os.getenv("JWT_SECRET_KEY"))
+_admin_service = serviceAdmin(secret_key=os.getenv("ADMIN_JWT_SECRET_KEY"))
 _password_reset_service = servicePasswordReset(role="admin", user_persistence=persistenceAdmin())
 
 

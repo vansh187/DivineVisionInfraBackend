@@ -23,13 +23,13 @@ def _dto(**overrides):
 
 def test_constructor_raises_without_secret():
     persistence = MagicMock()
-    old = os.environ.pop("JWT_SECRET_KEY", None)
+    old = os.environ.pop("ADMIN_JWT_SECRET_KEY", None)
     try:
         with pytest.raises(RuntimeError):
             serviceAdmin(persistence, secret_key=None)
     finally:
         if old is not None:
-            os.environ["JWT_SECRET_KEY"] = old
+            os.environ["ADMIN_JWT_SECRET_KEY"] = old
 
 
 def test_constructor_defaults_persistence_when_none_given():

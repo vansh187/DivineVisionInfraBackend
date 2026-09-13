@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 os.environ["DATABASE_URL"] = "sqlite:///./test_db.sqlite"
 os.environ["JWT_SECRET_KEY"] = "testsecret"
+os.environ["ADMIN_JWT_SECRET_KEY"] = "admintestsecret"
 
 from Divinepersistence.persistence_db import PersistenceDB
 import Divinepersistence.persistence_admin  # noqa: F401 - registers AdminModel on Base.metadata

@@ -20,9 +20,11 @@ DEFAULT_REFRESH_TOKEN_EXPIRE_DAYS = 7
 class serviceAdmin:
     def __init__(self, persistence: persistenceAdmin = None, secret_key: str = None):
         self._persistence = persistence or persistenceAdmin()
-        self._secret = secret_key or os.getenv("JWT_SECRET_KEY")
+        # Deliberately its own secret, not the customer/broker JWT_SECRET_KEY - keeps a
+        # leaked admin secret from forging customer/broker tokens, and vice versa.
+        self._secret = secret_key or os.getenv("ADMIN_JWT_SECRET_KEY")
         if not self._secret:
-            raise RuntimeError("JWT_SECRET_KEY environment variable must be set")
+            raise RuntimeError("ADMIN_JWT_SECRET_KEY environment variable must be set")
         try:
             self._access_expire_minutes = int(os.getenv("ADMIN_ACCESS_TOKEN_EXPIRE_MINUTES", DEFAULT_ACCESS_TOKEN_EXPIRE_MINUTES))
         except (TypeError, ValueError):

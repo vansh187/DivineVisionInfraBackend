@@ -13,18 +13,69 @@ def _get_secret() -> str:
     return secret
 
 
+def _get_admin_secret() -> str:
+    # Deliberately separate from JWT_SECRET_KEY - a leaked customer/broker secret
+    # can't forge an admin token, and vice versa.
+    secret = os.getenv("ADMIN_JWT_SECRET_KEY")
+    if not secret:
+        raise RuntimeError("ADMIN_JWT_SECRET_KEY environment variable must be set")
+    return secret
+
+
+def _secrets_for_roles(allowed_roles) -> list:
+    """A dependency's allowed_roles decides which secret(s) a token could legitimately
+    be signed with - admin tokens use ADMIN_JWT_SECRET_KEY, customer/broker use the
+    shared JWT_SECRET_KEY. A dependency that allows both role families (e.g. "admin
+    or broker") must try both secrets in turn, since the token's role isn't known
+    until after it's been decoded."""
+    # Each secret is fetched best-effort: a dependency allowing both "admin" and
+    # "broker" must still authenticate a broker even in a deployment where
+    # ADMIN_JWT_SECRET_KEY hasn't been configured yet (or vice versa) - only raise
+    # if NO usable secret could be found at all.
+    secrets = []
+    if "admin" in allowed_roles:
+        try:
+            secrets.append(_get_admin_secret())
+        except RuntimeError:
+            pass
+    if set(allowed_roles) - {"admin"}:
+        try:
+            secrets.append(_get_secret())
+        except RuntimeError:
+            pass
+    if not secrets:
+        raise RuntimeError("no JWT signing secret configured for the allowed roles")
+    return secrets
+
+
 def _decode_current_user(authorization: str, allowed_roles, reject_refresh: bool = False) -> dict:
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="missing_token")
     token = authorization.split(" ", 1)[1].strip()
     try:
-        payload = jwt.decode(token, _get_secret(), algorithms=["HS256"])
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="token_expired")
-    except jwt.PyJWTError:
-        raise HTTPException(status_code=401, detail="invalid_token")
+        candidate_secrets = _secrets_for_roles(allowed_roles)
     except RuntimeError:
         raise HTTPException(status_code=500, detail="server_misconfigured")
+
+    payload = None
+    expired = False
+    for secret in candidate_secrets:
+        try:
+            payload = jwt.decode(token, secret, algorithms=["HS256"])
+            break
+        except jwt.ExpiredSignatureError:
+            # Signature matched this secret - the token is genuinely expired
+            # regardless of what any other candidate secret would say.
+            expired = True
+            break
+        except jwt.PyJWTError:
+            continue  # wrong secret for this token (or malformed) - try the next one
+
+    if expired:
+        raise HTTPException(status_code=401, detail="token_expired")
+    if payload is None:
+        raise HTTPException(status_code=401, detail="invalid_token")
+
     sub = payload.get("sub")
     role = payload.get("role")
     if not sub or role not in allowed_roles:
