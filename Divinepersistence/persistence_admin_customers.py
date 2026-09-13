@@ -32,6 +32,11 @@ class persistenceAdminCustomers:
 
     def list_customers(self, search: str = None, source: str = None, status: str = None,
                         sort: str = _DEFAULT_SORT, limit: int = 20, offset: int = 0):
+        """Rows carry a `total_count` attribute (a window-function total over the
+        whole filtered set, not just this page) so the common case - a page with
+        results - never needs a second query to know total_items. Only an empty
+        page (genuinely no matches, or past the last page) has nowhere to read
+        that total from; the caller falls back to count_customers() then."""
         params = {
             "search": (search or None), "source": source, "status": status,
             "limit": limit, "offset": offset,
@@ -48,15 +53,23 @@ class persistenceAdminCustomers:
             row = result.mappings().first()
             return int(row["total"]) if row else 0
 
-    def email_in_use(self, email: str) -> bool:
-        with self._session_factory() as db:
-            result = db.execute(text(self._q("email_in_use")), {"email": email})
-            row = result.mappings().first()
-            return bool(row and int(row["total"]) > 0)
-
     def create_manual_lead(self, full_name: str, email: str, phone: str):
+        """Returns the created row, or None if the email is already in use.
+        The email check and the insert run in the same transaction, and on
+        Postgres a transaction-scoped advisory lock keyed by the email
+        serializes any two concurrent calls for the same address - without it,
+        two requests could both pass the check before either had committed
+        (divine_chatbot_leads.visitor_email has no unique constraint to catch
+        that at the database level, since existing production rows already
+        have duplicate emails from before this endpoint existed)."""
         with self._session_factory() as db:
             try:
+                if self._engine.dialect.name == "postgresql":
+                    db.execute(text("SELECT pg_advisory_xact_lock(hashtext(lower(:email)));"), {"email": email})
+                existing = db.execute(text(self._q("email_in_use")), {"email": email}).mappings().first()
+                if existing and int(existing["total"]) > 0:
+                    db.rollback()
+                    return None
                 now = datetime.now(timezone.utc)
                 params = {
                     "id": str(uuid.uuid4()),

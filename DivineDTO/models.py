@@ -5,6 +5,17 @@ from datetime import datetime
 BROKER_PROJECTS = ("suraksha-enclave", "ops-divine-greens")
 
 
+def _require_non_blank(v: str, min_length: int = 1) -> str:
+    """Shared body for every "strip, then must be non-empty (or at least
+    min_length chars)" field validator below - Field(min_length=...) alone only
+    checks length BEFORE stripping, so e.g. "  a " would pass a bare
+    min_length=2 while being just one real character."""
+    v = (v or "").strip()
+    if len(v) < max(min_length, 1):
+        raise ValueError("field required" if min_length <= 1 else f"must be at least {min_length} characters")
+    return v
+
+
 class ForgotPasswordDTO(BaseModel):
     email: EmailStr
 
@@ -31,10 +42,7 @@ class UserCreateDTO(BaseModel):
     @field_validator("phone")
     @classmethod
     def phone_must_not_be_blank(cls, v: str) -> str:
-        v = v.strip()
-        if not v:
-            raise ValueError("field required")
-        return v
+        return _require_non_blank(v)
 
 
 class BrokerCreateDTO(UserCreateDTO):
@@ -83,10 +91,7 @@ class AdminCreateDTO(BaseModel):
     @field_validator("full_name")
     @classmethod
     def full_name_must_not_be_blank(cls, v: str) -> str:
-        v = v.strip()
-        if not v:
-            raise ValueError("field required")
-        return v
+        return _require_non_blank(v, min_length=2)
 
 
 class AdminLoginDTO(BaseModel):
@@ -128,7 +133,10 @@ class CustomerListItemDTO(BaseModel):
     email: Optional[str]
     phone: Optional[str]
     source: Literal["WEBSITE", "BROKER_CHANNEL"]
-    status: Literal["LEAD", "ACTIVE", "BOOKED", "INACTIVE"]
+    # No "INACTIVE" here - nothing in the CASE expression backing this column
+    # (DivineDatabasequeries/admin_customers_queries.yaml) ever produces it, since
+    # there's no last-activity staleness tracking to derive it from yet.
+    status: Literal["LEAD", "ACTIVE", "BOOKED"]
     created_at: Optional[datetime]
     last_activity_at: Optional[datetime]
 
@@ -153,18 +161,12 @@ class CustomerCreateDTO(BaseModel):
     @field_validator("full_name")
     @classmethod
     def full_name_must_not_be_blank(cls, v: str) -> str:
-        v = v.strip()
-        if len(v) < 2:
-            raise ValueError("full_name must be at least 2 characters")
-        return v
+        return _require_non_blank(v, min_length=2)
 
     @field_validator("phone")
     @classmethod
     def phone_must_not_be_blank(cls, v: str) -> str:
-        v = v.strip()
-        if not v:
-            raise ValueError("field required")
-        return v
+        return _require_non_blank(v)
 
 
 class DocumentGenerateRequestDTO(BaseModel):

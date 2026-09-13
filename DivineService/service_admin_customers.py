@@ -29,7 +29,15 @@ class serviceAdminCustomers:
         rows = self._persistence.list_customers(
             search=search, source=source, status=status, sort=sort, limit=page_size, offset=offset,
         )
-        total_items = self._persistence.count_customers(search=search, source=source, status=status)
+        if rows:
+            # One indexed query already carries the filtered total via a window
+            # function (see list_customers in admin_customers_queries.yaml) - no
+            # second round-trip needed on the common, non-empty path.
+            total_items = int(rows[0].total_count)
+        else:
+            # Nothing to read a window-function total from an empty row set -
+            # only reached for a genuinely empty result or a page past the last one.
+            total_items = self._persistence.count_customers(search=search, source=source, status=status)
         total_pages = (total_items + page_size - 1) // page_size
         return {
             "items": [_as_item(r) for r in rows],
@@ -43,13 +51,15 @@ class serviceAdminCustomers:
         """Adds a manually-entered lead (source=WEBSITE, status=LEAD always - see
         DivineDatabasequeries/admin_customers_queries.yaml for why). Raises
         ValueError("email_already_exists") if the email is already used by an
-        existing customer account or an unconverted lead."""
+        existing customer account or an unconverted lead - checked and inserted
+        atomically (persistence_admin_customers.create_manual_lead) so two
+        concurrent requests for the same email can't both slip past the check."""
         email = dto.email.strip().lower()
-        if self._persistence.email_in_use(email):
-            raise ValueError("email_already_exists")
         row = self._persistence.create_manual_lead(
             full_name=dto.full_name.strip(), email=email, phone=dto.phone.strip(),
         )
+        if row is None:
+            raise ValueError("email_already_exists")
         return {
             "id": row.id,
             "full_name": row.full_name,
