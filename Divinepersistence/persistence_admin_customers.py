@@ -1,5 +1,3 @@
-import uuid
-from datetime import datetime, timezone
 from sqlalchemy import text
 from .persistence_db import SessionLocal, engine, RowWrapper, load_queries
 
@@ -16,6 +14,10 @@ _DEFAULT_SORT = "-created_at"
 
 
 class persistenceAdminCustomers:
+    """Read-only: lists divine_customer_users for the admin panel's Customers
+    page. Creating a customer (POST /admin/customers) goes through the existing
+    persistenceCustomer instead - see DivineService/service_admin_customers.py."""
+
     def __init__(self, session_factory=SessionLocal):
         self._session_factory = session_factory
         self._queries = load_queries("admin_customers_queries.yaml")
@@ -52,37 +54,3 @@ class persistenceAdminCustomers:
             result = db.execute(text(self._q("count_customers")), params)
             row = result.mappings().first()
             return int(row["total"]) if row else 0
-
-    def create_manual_lead(self, full_name: str, email: str, phone: str):
-        """Returns the created row, or None if the email is already in use.
-        The email check and the insert run in the same transaction, and on
-        Postgres a transaction-scoped advisory lock keyed by the email
-        serializes any two concurrent calls for the same address - without it,
-        two requests could both pass the check before either had committed
-        (divine_chatbot_leads.visitor_email has no unique constraint to catch
-        that at the database level, since existing production rows already
-        have duplicate emails from before this endpoint existed)."""
-        with self._session_factory() as db:
-            try:
-                if self._engine.dialect.name == "postgresql":
-                    db.execute(text("SELECT pg_advisory_xact_lock(hashtext(lower(:email)));"), {"email": email})
-                existing = db.execute(text(self._q("email_in_use")), {"email": email}).mappings().first()
-                if existing and int(existing["total"]) > 0:
-                    db.rollback()
-                    return None
-                now = datetime.now(timezone.utc)
-                params = {
-                    "id": str(uuid.uuid4()),
-                    "visitor_name": full_name,
-                    "visitor_email": email,
-                    "visitor_phone": phone,
-                    "created_date": now,
-                    "last_updated_date": now,
-                }
-                result = db.execute(text(self._q("create_manual_lead")), params)
-                row = result.mappings().first()
-                db.commit()
-                return RowWrapper(row)
-            except Exception:
-                db.rollback()
-                raise

@@ -1,8 +1,13 @@
+import secrets
 import logging
-from Divinepersistence import persistenceAdminCustomers
+from passlib.context import CryptContext
+from sqlalchemy.exc import IntegrityError
+from Divinepersistence import persistenceAdminCustomers, persistenceCustomer
 from DivineDTO.models import CustomerCreateDTO
 
 logger = logging.getLogger(__name__)
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 def _as_item(row) -> dict:
@@ -18,9 +23,18 @@ def _as_item(row) -> dict:
     }
 
 
+def _split_full_name(full_name: str):
+    parts = full_name.split(maxsplit=1)
+    first_name = parts[0]
+    last_name = parts[1] if len(parts) > 1 else None
+    return first_name, last_name
+
+
 class serviceAdminCustomers:
-    def __init__(self, persistence: persistenceAdminCustomers = None):
+    def __init__(self, persistence: persistenceAdminCustomers = None,
+                 customer_persistence: persistenceCustomer = None):
         self._persistence = persistence or persistenceAdminCustomers()
+        self._customer_persistence = customer_persistence or persistenceCustomer()
 
     def list_customers(self, search: str = None, source: str = None, status: str = None,
                         sort: str = "-created_at", page: int = 1, page_size: int = 20) -> dict:
@@ -47,26 +61,40 @@ class serviceAdminCustomers:
             },
         }
 
-    def create_customer(self, dto: CustomerCreateDTO) -> dict:
-        """Adds a manually-entered lead (source=WEBSITE, status=LEAD always - see
-        DivineDatabasequeries/admin_customers_queries.yaml for why). Raises
-        ValueError("email_already_exists") if the email is already used by an
-        existing customer account or an unconverted lead - checked and inserted
-        atomically (persistence_admin_customers.create_manual_lead) so two
-        concurrent requests for the same email can't both slip past the check."""
+    def create_customer(self, dto: CustomerCreateDTO, created_by: str = None) -> dict:
+        """Creates a real divine_customer_users account (not a chatbot lead -
+        visitor/lead capture is a later phase). username is set to the email
+        since the admin form collects no separate username, and the account gets
+        a random password the admin never sees: the customer sets their own via
+        the existing forgot-password flow the first time they want to log in.
+        Raises ValueError("email_already_exists") on a duplicate email/username."""
         email = dto.email.strip().lower()
-        row = self._persistence.create_manual_lead(
-            full_name=dto.full_name.strip(), email=email, phone=dto.phone.strip(),
-        )
-        if row is None:
+        if (self._customer_persistence.get_by_username(email)
+                or self._customer_persistence.get_by_email(email)):
             raise ValueError("email_already_exists")
+
+        full_name = dto.full_name.strip()
+        first_name, last_name = _split_full_name(full_name)
+        password_hash = pwd_context.hash(secrets.token_urlsafe(32))
+
+        try:
+            user = self._customer_persistence.create_user(
+                email, password_hash, created_by=created_by,
+                email=email, phone=dto.phone.strip(), first_name=first_name, last_name=last_name,
+            )
+        except IntegrityError:
+            # Race: two concurrent requests for the same email both passed the
+            # check above - the DB's own unique constraint on username (=email
+            # here) is the backstop that actually prevents the duplicate.
+            raise ValueError("email_already_exists")
+
         return {
-            "id": row.id,
-            "full_name": row.full_name,
-            "email": row.email,
-            "phone": row.phone,
+            "id": user.id,
+            "full_name": full_name,
+            "email": user.email,
+            "phone": user.phone,
             "source": "WEBSITE",
-            "status": "LEAD",
-            "created_at": row.created_at,
-            "last_activity_at": row.last_activity_at,
+            "status": "ACTIVE",
+            "created_at": user.created_date,
+            "last_activity_at": user.last_updated_date,
         }

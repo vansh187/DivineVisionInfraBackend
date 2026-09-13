@@ -126,7 +126,7 @@ def list_customers(
     page_size: int = Query(20, ge=1, le=100),
     search: Optional[str] = Query(None, max_length=200),
     source: Optional[Literal["WEBSITE", "BROKER_CHANNEL"]] = Query(None),
-    status: Optional[Literal["LEAD", "ACTIVE", "BOOKED"]] = Query(None),
+    status: Optional[Literal["ACTIVE", "BOOKED"]] = Query(None),
     sort: Literal["created_at", "-created_at", "full_name", "-full_name"] = Query("-created_at"),
     current_admin: dict = Depends(get_current_admin),
 ):
@@ -146,7 +146,7 @@ def list_customers(
 def create_customer(dto: CustomerCreateDTO, current_admin: dict = Depends(get_current_admin)):
     start = time.monotonic()
     try:
-        return _admin_customers_service.create_customer(dto)
+        return _admin_customers_service.create_customer(dto, created_by=f"admin:{current_admin.get('sub')}")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except IntegrityError:

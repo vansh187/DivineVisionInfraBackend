@@ -7,7 +7,6 @@ os.environ["ADMIN_JWT_SECRET_KEY"] = "admintestsecret"
 
 from Divinepersistence.persistence_db import PersistenceDB
 import Divinepersistence.persistence_admin  # noqa: F401 - registers AdminModel on Base.metadata
-import Divinepersistence.persistence_chatbot  # noqa: F401 - registers ChatbotLeadModel on Base.metadata
 from DivineAPI.main import app
 
 client = TestClient(app)
@@ -58,16 +57,25 @@ def test_list_customers_empty_result_shape():
     assert data["pagination"] == {"page": 1, "page_size": 20, "total_items": 0, "total_pages": 0}
 
 
-def test_create_customer_defaults_to_website_lead():
+def test_create_customer_creates_a_real_active_customer_account():
     payload = {"full_name": "Arjun Mehta", "email": "arjun.mehta@example.com", "phone": "9876543210"}
     r = client.post("/admin/customers", json=payload, headers=_auth_headers())
     assert r.status_code == 201, r.text
     data = r.json()
     assert data["source"] == "WEBSITE"
-    assert data["status"] == "LEAD"
+    assert data["status"] == "ACTIVE"
     assert data["full_name"] == "Arjun Mehta"
     assert data["email"] == "arjun.mehta@example.com"
     assert data["id"]
+
+    # Confirm it's a real divine_customer_users row (checked directly, not via
+    # another rate-limited HTTP endpoint) - not a placeholder/lead record.
+    from Divinepersistence import persistenceCustomer
+    stored = persistenceCustomer().get_by_email("arjun.mehta@example.com")
+    assert stored is not None
+    assert stored.id == data["id"]
+    assert stored.username == "arjun.mehta@example.com"
+    assert stored.password_hash and stored.password_hash != ""
 
 
 def test_create_customer_requires_auth():
@@ -97,14 +105,14 @@ def test_create_customer_rejects_multiple_invalid_fields_at_once():
 
 def test_list_customers_search_and_filters_together():
     r = client.get(
-        "/admin/customers?search=arjun&status=LEAD&source=WEBSITE", headers=_auth_headers(),
+        "/admin/customers?search=arjun&status=ACTIVE&source=WEBSITE", headers=_auth_headers(),
     )
     assert r.status_code == 200, r.text
     data = r.json()
     assert data["pagination"]["total_items"] >= 1
     assert any(item["email"] == "arjun.mehta@example.com" for item in data["items"])
     for item in data["items"]:
-        assert item["status"] == "LEAD"
+        assert item["status"] == "ACTIVE"
         assert item["source"] == "WEBSITE"
 
 

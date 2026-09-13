@@ -132,11 +132,13 @@ class CustomerListItemDTO(BaseModel):
     full_name: str
     email: Optional[str]
     phone: Optional[str]
+    # source is always WEBSITE for now - divine_chatbot_leads (broker-channel
+    # attribution) is out of scope until visitor/lead capture is wired in (next
+    # phase). No "INACTIVE"/"LEAD" here either: nothing in the CASE expression
+    # backing this column (DivineDatabasequeries/admin_customers_queries.yaml)
+    # ever produces them - phase 1 only lists real divine_customer_users rows.
     source: Literal["WEBSITE", "BROKER_CHANNEL"]
-    # No "INACTIVE" here - nothing in the CASE expression backing this column
-    # (DivineDatabasequeries/admin_customers_queries.yaml) ever produces it, since
-    # there's no last-activity staleness tracking to derive it from yet.
-    status: Literal["LEAD", "ACTIVE", "BOOKED"]
+    status: Literal["ACTIVE", "BOOKED"]
     created_at: Optional[datetime]
     last_activity_at: Optional[datetime]
 

@@ -1,14 +1,10 @@
-# SQL for the admin panel's Customers & Leads list (GET/POST /admin/customers).
+# SQL for the admin panel's Customers list (GET /admin/customers).
 #
-# "Customers" here is a merged view of two real tables, not one:
-#   - divine_customer_users: accounts that actually signed up (website form or
-#     converted from a chatbot lead) - these get status ACTIVE/BOOKED.
-#   - divine_chatbot_leads WHERE linked_customer_id IS NULL: visitors captured
-#     by the chatbot (or manually added here) who never created an account yet
-#     - these are always status LEAD.
-# A customer/lead's "source" is derived from whether a broker is attached
-# (assigned_broker_id on the lead) rather than a stored enum, since no such
-# column exists on either table today.
+# Phase 1: divine_customer_users only - accounts that actually signed up (or were
+# added here by an admin). Chatbot-captured visitors/leads (divine_chatbot_leads)
+# are deliberately out of scope for now (next phase); "source" is therefore always
+# WEBSITE today, and "status" is ACTIVE or BOOKED (booked <=> divine_project_inventory
+# has a unit with booked_by = this customer's id) - never LEAD.
 #
 # {order_by} is substituted in Python from a fixed allow-list (never from raw
 # request input) - see persistence_admin_customers.py.
@@ -24,28 +20,13 @@ list_customers: |
       TRIM(COALESCE(cu.first_name,'') || ' ' || COALESCE(cu.last_name,'')) AS full_name,
       cu.email AS email,
       cu.phone AS phone,
-      CASE WHEN EXISTS (
-        SELECT 1 FROM divine_chatbot_leads cl2
-        WHERE cl2.linked_customer_id = cu.id AND cl2.assigned_broker_id IS NOT NULL
-      ) THEN 'BROKER_CHANNEL' ELSE 'WEBSITE' END AS source,
+      'WEBSITE' AS source,
       CASE WHEN EXISTS (
         SELECT 1 FROM divine_project_inventory pi WHERE pi.booked_by = cu.id
       ) THEN 'BOOKED' ELSE 'ACTIVE' END AS status,
       cu.created_date AS created_at,
       cu.last_updated_date AS last_activity_at
     FROM divine_customer_users cu
-    UNION ALL
-    SELECT
-      cl.id AS id,
-      COALESCE(cl.visitor_name, '') AS full_name,
-      cl.visitor_email AS email,
-      cl.visitor_phone AS phone,
-      CASE WHEN cl.assigned_broker_id IS NOT NULL THEN 'BROKER_CHANNEL' ELSE 'WEBSITE' END AS source,
-      'LEAD' AS status,
-      cl.created_date AS created_at,
-      cl.last_updated_date AS last_activity_at
-    FROM divine_chatbot_leads cl
-    WHERE cl.linked_customer_id IS NULL
   ),
   filtered AS (
     SELECT * FROM combined
@@ -71,28 +52,13 @@ count_customers: |
       TRIM(COALESCE(cu.first_name,'') || ' ' || COALESCE(cu.last_name,'')) AS full_name,
       cu.email AS email,
       cu.phone AS phone,
-      CASE WHEN EXISTS (
-        SELECT 1 FROM divine_chatbot_leads cl2
-        WHERE cl2.linked_customer_id = cu.id AND cl2.assigned_broker_id IS NOT NULL
-      ) THEN 'BROKER_CHANNEL' ELSE 'WEBSITE' END AS source,
+      'WEBSITE' AS source,
       CASE WHEN EXISTS (
         SELECT 1 FROM divine_project_inventory pi WHERE pi.booked_by = cu.id
       ) THEN 'BOOKED' ELSE 'ACTIVE' END AS status,
       cu.created_date AS created_at,
       cu.last_updated_date AS last_activity_at
     FROM divine_customer_users cu
-    UNION ALL
-    SELECT
-      cl.id AS id,
-      COALESCE(cl.visitor_name, '') AS full_name,
-      cl.visitor_email AS email,
-      cl.visitor_phone AS phone,
-      CASE WHEN cl.assigned_broker_id IS NOT NULL THEN 'BROKER_CHANNEL' ELSE 'WEBSITE' END AS source,
-      'LEAD' AS status,
-      cl.created_date AS created_at,
-      cl.last_updated_date AS last_activity_at
-    FROM divine_chatbot_leads cl
-    WHERE cl.linked_customer_id IS NULL
   )
   SELECT count(*) AS total FROM combined
   WHERE (:search IS NULL
@@ -101,19 +67,3 @@ count_customers: |
          OR lower(phone) LIKE '%' || replace(replace(lower(:search), '%', '\%'), '_', '\_') || '%' ESCAPE '\')
     AND (:source IS NULL OR source = :source)
     AND (:status IS NULL OR status = :status);
-
-# Read inside the same transaction as create_manual_lead's INSERT, after taking a
-# per-email advisory lock (Postgres only) - see persistence_admin_customers.py for
-# why this closes the check-then-insert race a plain pre-check would leave open.
-email_in_use: |
-  SELECT count(*) AS total FROM (
-    SELECT email FROM divine_customer_users WHERE lower(email) = lower(:email)
-    UNION ALL
-    SELECT visitor_email FROM divine_chatbot_leads
-    WHERE lower(visitor_email) = lower(:email) AND linked_customer_id IS NULL
-  ) t;
-
-create_manual_lead: |
-  INSERT INTO divine_chatbot_leads(id, channel, visitor_name, visitor_phone, visitor_email, lead_temperature, consent_given, created_date, last_updated_date)
-  VALUES (:id, 'web', :visitor_name, :visitor_phone, :visitor_email, 'cold', false, :created_date, :last_updated_date)
-  RETURNING id, visitor_name AS full_name, visitor_email AS email, visitor_phone AS phone, created_date AS created_at, last_updated_date AS last_activity_at;

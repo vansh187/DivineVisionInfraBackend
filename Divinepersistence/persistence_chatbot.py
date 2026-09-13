@@ -1,34 +1,13 @@
 import json
-from sqlalchemy import Column, String, Boolean, DateTime, text
+from sqlalchemy import text
 from datetime import datetime, timezone
-from .persistence_db import Base, SessionLocal, engine, RowWrapper, load_queries
+from .persistence_db import SessionLocal, engine, RowWrapper, load_queries
 
 
 def embedding_to_vector_literal(embedding) -> str:
     # pgvector accepts a text literal like "[0.1,0.2,...]" cast with ::vector - this
     # avoids depending on the separate pgvector-python package just to bind one type.
     return "[" + ",".join(repr(float(x)) for x in embedding) + "]"
-
-
-class ChatbotLeadModel(Base):
-    # ORM declaration exists only so Base.metadata.create_all() (PersistenceDB.create_tables,
-    # run on every app startup and in every test's sqlite db) creates this table - all actual
-    # reads/writes in this module go through the raw text() queries below, same hybrid
-    # pattern as BrokerModel/CustomerModel elsewhere. The live Postgres table (created via
-    # db_init.sql) already has more columns (lead_temperature, consent_*, etc.) that a raw
-    # SQL insert can still populate even though they aren't declared as ORM columns here.
-    __tablename__ = "divine_chatbot_leads"
-    id = Column(String(36), primary_key=True)
-    channel = Column(String(10))
-    visitor_name = Column(String(200))
-    visitor_phone = Column(String(20))
-    visitor_email = Column(String(255))
-    linked_customer_id = Column(String(6))
-    lead_temperature = Column(String(10))
-    assigned_broker_id = Column(String(6))
-    consent_given = Column(Boolean)
-    created_date = Column(DateTime)
-    last_updated_date = Column(DateTime)
 
 
 class persistenceChatbot:

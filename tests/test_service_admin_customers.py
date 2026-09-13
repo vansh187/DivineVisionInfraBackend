@@ -4,25 +4,27 @@ from unittest.mock import MagicMock
 os.environ["DATABASE_URL"] = "sqlite:///./test_db.sqlite"
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 from DivineService.service_admin_customers import serviceAdminCustomers
 from DivineDTO.models import CustomerCreateDTO
 
 
 def _service():
     persistence = MagicMock()
-    return serviceAdminCustomers(persistence), persistence
+    customer_persistence = MagicMock()
+    return serviceAdminCustomers(persistence, customer_persistence), persistence, customer_persistence
 
 
 def _row(total_count, **overrides):
     values = dict(id="X1", full_name="A B", email="a@b.com", phone="123",
-                  source="WEBSITE", status="LEAD", created_at="2026-01-01", last_activity_at="2026-01-01",
+                  source="WEBSITE", status="ACTIVE", created_at="2026-01-01", last_activity_at="2026-01-01",
                   total_count=total_count)
     values.update(overrides)
     return MagicMock(**values)
 
 
 def test_list_customers_reads_total_from_the_page_when_rows_come_back():
-    svc, persistence = _service()
+    svc, persistence, _ = _service()
     persistence.list_customers.return_value = [_row(total_count=45)]
 
     result = svc.list_customers(page=2, page_size=20)
@@ -35,7 +37,7 @@ def test_list_customers_reads_total_from_the_page_when_rows_come_back():
 
 
 def test_list_customers_falls_back_to_count_query_when_page_is_empty():
-    svc, persistence = _service()
+    svc, persistence, _ = _service()
     persistence.list_customers.return_value = []
     persistence.count_customers.return_value = 0
 
@@ -47,7 +49,7 @@ def test_list_customers_falls_back_to_count_query_when_page_is_empty():
 
 
 def test_list_customers_blank_search_is_treated_as_no_filter():
-    svc, persistence = _service()
+    svc, persistence, _ = _service()
     persistence.list_customers.return_value = []
     persistence.count_customers.return_value = 0
 
@@ -57,38 +59,73 @@ def test_list_customers_blank_search_is_treated_as_no_filter():
 
 
 def test_list_customers_formats_rows_into_plain_dicts_without_total_count():
-    svc, persistence = _service()
+    svc, persistence, _ = _service()
     persistence.list_customers.return_value = [_row(total_count=1)]
 
     result = svc.list_customers()
     assert result["items"] == [{
         "id": "X1", "full_name": "A B", "email": "a@b.com", "phone": "123",
-        "source": "WEBSITE", "status": "LEAD", "created_at": "2026-01-01", "last_activity_at": "2026-01-01",
+        "source": "WEBSITE", "status": "ACTIVE", "created_at": "2026-01-01", "last_activity_at": "2026-01-01",
     }]
 
 
-def test_create_customer_rejects_duplicate_email():
-    svc, persistence = _service()
-    persistence.create_manual_lead.return_value = None  # atomic check-and-insert found it taken
+def test_create_customer_rejects_email_already_used_as_username():
+    svc, _, customer_persistence = _service()
+    customer_persistence.get_by_username.return_value = MagicMock()
+    customer_persistence.get_by_email.return_value = None
 
     dto = CustomerCreateDTO(full_name="Someone", email="taken@example.com", phone="123")
     with pytest.raises(ValueError) as exc_info:
         svc.create_customer(dto)
     assert str(exc_info.value) == "email_already_exists"
+    customer_persistence.create_user.assert_not_called()
 
 
-def test_create_customer_lowercases_email_before_inserting():
-    svc, persistence = _service()
-    persistence.create_manual_lead.return_value = MagicMock(
-        id="X2", full_name="Someone", email="someone@example.com", phone="123",
-        created_at="2026-01-01", last_activity_at="2026-01-01",
+def test_create_customer_rejects_email_already_used_by_a_different_username():
+    svc, _, customer_persistence = _service()
+    customer_persistence.get_by_username.return_value = None
+    customer_persistence.get_by_email.return_value = MagicMock()
+
+    dto = CustomerCreateDTO(full_name="Someone", email="taken@example.com", phone="123")
+    with pytest.raises(ValueError) as exc_info:
+        svc.create_customer(dto)
+    assert str(exc_info.value) == "email_already_exists"
+    customer_persistence.create_user.assert_not_called()
+
+
+def test_create_customer_converts_integrity_error_race_into_email_already_exists():
+    svc, _, customer_persistence = _service()
+    customer_persistence.get_by_username.return_value = None
+    customer_persistence.get_by_email.return_value = None
+    customer_persistence.create_user.side_effect = IntegrityError("stmt", {}, Exception("dup"))
+
+    dto = CustomerCreateDTO(full_name="Someone", email="race@example.com", phone="123")
+    with pytest.raises(ValueError) as exc_info:
+        svc.create_customer(dto)
+    assert str(exc_info.value) == "email_already_exists"
+
+
+def test_create_customer_uses_email_as_username_with_a_random_password():
+    svc, _, customer_persistence = _service()
+    customer_persistence.get_by_username.return_value = None
+    customer_persistence.get_by_email.return_value = None
+    customer_persistence.create_user.return_value = MagicMock(
+        id="C00001", email="someone@example.com", phone="123",
+        created_date="2026-01-01", last_updated_date="2026-01-01",
     )
 
-    dto = CustomerCreateDTO(full_name="Someone", email="Someone@Example.com", phone="123")
-    result = svc.create_customer(dto)
+    dto = CustomerCreateDTO(full_name="Someone Else", email="Someone@Example.com", phone="123")
+    result = svc.create_customer(dto, created_by="admin:A00001")
 
-    persistence.create_manual_lead.assert_called_once_with(
-        full_name="Someone", email="someone@example.com", phone="123",
-    )
+    args, kwargs = customer_persistence.create_user.call_args
+    assert args[0] == "someone@example.com"  # username = lowercased email
+    assert kwargs["email"] == "someone@example.com"
+    assert kwargs["created_by"] == "admin:A00001"
+    assert kwargs["first_name"] == "Someone"
+    assert kwargs["last_name"] == "Else"
+    # a real random password was hashed and passed - never a fixed/guessable value
+    assert args[1] and args[1].startswith("$2b$")
+
     assert result["source"] == "WEBSITE"
-    assert result["status"] == "LEAD"
+    assert result["status"] == "ACTIVE"
+    assert result["full_name"] == "Someone Else"
