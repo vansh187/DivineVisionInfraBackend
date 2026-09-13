@@ -118,11 +118,11 @@ class servicePasswordReset:
             if last_sent and (now - last_sent).total_seconds() < RESEND_COOLDOWN_SECONDS:
                 raise PasswordResetError("too_many_requests", 429)
 
-        otp = self._generate_otp()
         try:
+            otp = self._generate_otp()
             otp_hash = self._hash_otp(otp)
         except Exception as e:
-            logger.warning("password_reset.otp_hash_failed role=%s error=%s", self._role, e)
+            logger.warning("password_reset.otp_generate_failed role=%s error=%s", self._role, e)
             raise PasswordResetError("internal_error", 500) from e
 
         expires_at = now + timedelta(minutes=OTP_EXPIRY_MINUTES)
