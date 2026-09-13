@@ -171,6 +171,21 @@ class CustomerCreateDTO(BaseModel):
         return _require_non_blank(v)
 
 
+class BrokerListItemDTO(BaseModel):
+    id: str
+    full_name: str
+    email: Optional[str]
+    phone: Optional[str]
+    project: Optional[str]
+    created_at: Optional[datetime]
+    last_activity_at: Optional[datetime]
+
+
+class BrokerListResponseDTO(BaseModel):
+    items: List[BrokerListItemDTO]
+    pagination: PaginationDTO
+
+
 class DocumentGenerateRequestDTO(BaseModel):
     document_type: str = Field(..., min_length=1, max_length=100)
     form_data: Dict[str, Any] = Field(...)

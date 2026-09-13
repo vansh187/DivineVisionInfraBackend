@@ -7,11 +7,11 @@ from sqlalchemy.exc import IntegrityError
 
 from DivineDTO.models import (
     AdminCreateDTO, AdminLoginDTO, AdminOutDTO, AdminTokenDTO, AdminAccessTokenDTO, AdminRefreshDTO,
-    CustomerListResponseDTO, CustomerListItemDTO, CustomerCreateDTO,
+    CustomerListResponseDTO, CustomerListItemDTO, CustomerCreateDTO, BrokerListResponseDTO,
     ForgotPasswordDTO, ResetPasswordDTO, MessageDTO,
 )
 from Divinepersistence import persistenceAdmin
-from DivineService import serviceAdmin, serviceAdminCustomers, servicePasswordReset, PasswordResetError
+from DivineService import serviceAdmin, serviceAdminCustomers, serviceAdminBrokers, servicePasswordReset, PasswordResetError
 from DivineService.auth import get_current_admin
 
 logger = logging.getLogger(__name__)
@@ -20,6 +20,7 @@ router = APIRouter(prefix="/admin", tags=["admin"])
 _admin_service = serviceAdmin(secret_key=os.getenv("ADMIN_JWT_SECRET_KEY"))
 _password_reset_service = servicePasswordReset(role="admin", user_persistence=persistenceAdmin())
 _admin_customers_service = serviceAdminCustomers()
+_admin_brokers_service = serviceAdminBrokers()
 
 
 @router.post("/signup", response_model=AdminOutDTO)
@@ -156,3 +157,24 @@ def create_customer(dto: CustomerCreateDTO, current_admin: dict = Depends(get_cu
         raise HTTPException(status_code=500, detail="internal_error")
     finally:
         logger.debug("admin_create_customer_latency_ms=%.2f", (time.monotonic() - start) * 1000)
+
+
+@router.get("/brokers", response_model=BrokerListResponseDTO)
+def list_brokers(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    search: Optional[str] = Query(None, max_length=200),
+    project: Optional[Literal["suraksha-enclave", "ops-divine-greens"]] = Query(None),
+    sort: Literal["created_at", "-created_at", "full_name", "-full_name"] = Query("-created_at"),
+    current_admin: dict = Depends(get_current_admin),
+):
+    start = time.monotonic()
+    try:
+        return _admin_brokers_service.list_brokers(
+            search=search, project=project, sort=sort, page=page, page_size=page_size,
+        )
+    except Exception:
+        logger.exception("admin_list_brokers_failed")
+        raise HTTPException(status_code=500, detail="internal_error")
+    finally:
+        logger.debug("admin_list_brokers_latency_ms=%.2f", (time.monotonic() - start) * 1000)
