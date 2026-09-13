@@ -41,6 +41,8 @@ def _client_ip(request: Request) -> str:
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
+    RATE_LIMIT_EXEMPT_PATHS = {"/admin/customers", "/admin/brokers"}
+
     # Caps how many distinct client:path buckets are retained at once - without a bound,
     # a client that hits an endpoint once and never returns leaves its bucket in memory
     # for the life of the process. OrderedDict + evicting the oldest entry once the cap is
@@ -54,6 +56,9 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         self.storage = OrderedDict()
 
     async def dispatch(self, request: Request, call_next):
+        if request.method == "GET" and request.url.path in self.RATE_LIMIT_EXEMPT_PATHS:
+            return await call_next(request)
+
         client = _client_ip(request)
         key = f"{client}:{request.url.path}"
         now = time()

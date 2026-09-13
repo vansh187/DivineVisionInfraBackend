@@ -3,6 +3,7 @@ from unittest.mock import patch
 
 os.environ["DATABASE_URL"] = "sqlite:///./test_db.sqlite"
 os.environ["JWT_SECRET_KEY"] = "testsecret"
+os.environ["ADMIN_JWT_SECRET_KEY"] = "admintestsecret"
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -22,6 +23,14 @@ def _rate_limited_app(calls=3, per_seconds=60):
 
     @app.get("/other")
     def other():
+        return {"ok": True}
+
+    @app.get("/admin/customers")
+    def admin_customers():
+        return {"ok": True}
+
+    @app.get("/admin/brokers")
+    def admin_brokers():
         return {"ok": True}
 
     return app
@@ -47,6 +56,17 @@ def test_limit_is_tracked_independently_per_path():
     assert client.get("/ping").status_code == 200
     assert client.get("/ping").status_code == 429
     assert client.get("/other").status_code == 200  # different path - separate bucket
+
+
+def test_admin_customer_and_broker_lists_are_not_rate_limited():
+    client = TestClient(_rate_limited_app(calls=1))
+
+    for _ in range(5):
+        assert client.get("/admin/customers").status_code == 200
+        assert client.get("/admin/brokers").status_code == 200
+
+    assert client.get("/ping").status_code == 200
+    assert client.get("/ping").status_code == 429
 
 
 def test_limit_resets_after_the_time_window_elapses():
