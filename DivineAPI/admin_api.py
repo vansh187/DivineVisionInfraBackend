@@ -1,21 +1,25 @@
 import os
 import time
 import logging
-from fastapi import APIRouter, HTTPException, Request
+from typing import Optional, Literal
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.exc import IntegrityError
 
 from DivineDTO.models import (
     AdminCreateDTO, AdminLoginDTO, AdminOutDTO, AdminTokenDTO, AdminAccessTokenDTO, AdminRefreshDTO,
+    CustomerListResponseDTO, CustomerListItemDTO, CustomerCreateDTO,
     ForgotPasswordDTO, ResetPasswordDTO, MessageDTO,
 )
 from Divinepersistence import persistenceAdmin
-from DivineService import serviceAdmin, servicePasswordReset, PasswordResetError
+from DivineService import serviceAdmin, serviceAdminCustomers, servicePasswordReset, PasswordResetError
+from DivineService.auth import get_current_admin
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 _admin_service = serviceAdmin(secret_key=os.getenv("ADMIN_JWT_SECRET_KEY"))
 _password_reset_service = servicePasswordReset(role="admin", user_persistence=persistenceAdmin())
+_admin_customers_service = serviceAdminCustomers()
 
 
 @router.post("/signup", response_model=AdminOutDTO)
@@ -114,3 +118,41 @@ def admin_reset_password(dto: ResetPasswordDTO):
         raise HTTPException(status_code=500, detail="internal_error")
     finally:
         logger.debug("admin_reset_password_latency_ms=%.2f", (time.monotonic() - start) * 1000)
+
+
+@router.get("/customers", response_model=CustomerListResponseDTO)
+def list_customers(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    search: Optional[str] = Query(None, max_length=200),
+    source: Optional[Literal["WEBSITE", "BROKER_CHANNEL"]] = Query(None),
+    status: Optional[Literal["LEAD", "ACTIVE", "BOOKED", "INACTIVE"]] = Query(None),
+    sort: Literal["created_at", "-created_at", "full_name", "-full_name"] = Query("-created_at"),
+    current_admin: dict = Depends(get_current_admin),
+):
+    start = time.monotonic()
+    try:
+        return _admin_customers_service.list_customers(
+            search=search, source=source, status=status, sort=sort, page=page, page_size=page_size,
+        )
+    except Exception:
+        logger.exception("admin_list_customers_failed")
+        raise HTTPException(status_code=500, detail="internal_error")
+    finally:
+        logger.debug("admin_list_customers_latency_ms=%.2f", (time.monotonic() - start) * 1000)
+
+
+@router.post("/customers", response_model=CustomerListItemDTO, status_code=201)
+def create_customer(dto: CustomerCreateDTO, current_admin: dict = Depends(get_current_admin)):
+    start = time.monotonic()
+    try:
+        return _admin_customers_service.create_customer(dto)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except IntegrityError:
+        raise HTTPException(status_code=409, detail="conflict")
+    except Exception:
+        logger.exception("admin_create_customer_failed")
+        raise HTTPException(status_code=500, detail="internal_error")
+    finally:
+        logger.debug("admin_create_customer_latency_ms=%.2f", (time.monotonic() - start) * 1000)

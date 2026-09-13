@@ -122,6 +122,51 @@ class AdminRefreshDTO(BaseModel):
     refresh_token: str = Field(..., min_length=1)
 
 
+class CustomerListItemDTO(BaseModel):
+    id: str
+    full_name: str
+    email: Optional[str]
+    phone: Optional[str]
+    source: Literal["WEBSITE", "BROKER_CHANNEL"]
+    status: Literal["LEAD", "ACTIVE", "BOOKED", "INACTIVE"]
+    created_at: Optional[datetime]
+    last_activity_at: Optional[datetime]
+
+
+class PaginationDTO(BaseModel):
+    page: int
+    page_size: int
+    total_items: int
+    total_pages: int
+
+
+class CustomerListResponseDTO(BaseModel):
+    items: List[CustomerListItemDTO]
+    pagination: PaginationDTO
+
+
+class CustomerCreateDTO(BaseModel):
+    full_name: str = Field(..., min_length=2, max_length=200)
+    email: EmailStr
+    phone: str = Field(..., min_length=1, max_length=20)
+
+    @field_validator("full_name")
+    @classmethod
+    def full_name_must_not_be_blank(cls, v: str) -> str:
+        v = v.strip()
+        if len(v) < 2:
+            raise ValueError("full_name must be at least 2 characters")
+        return v
+
+    @field_validator("phone")
+    @classmethod
+    def phone_must_not_be_blank(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("field required")
+        return v
+
+
 class DocumentGenerateRequestDTO(BaseModel):
     document_type: str = Field(..., min_length=1, max_length=100)
     form_data: Dict[str, Any] = Field(...)
