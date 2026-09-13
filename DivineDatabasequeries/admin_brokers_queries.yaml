@@ -1,0 +1,59 @@
+# SQL for the admin panel's Brokers list (GET /admin/brokers) - lets an admin see
+# every registered channel partner and which township each is assigned to.
+#
+# Single table, no derived/CASE columns needed - unlike customers, a broker's
+# "project" is already a real stored column (divine_broker_users.project).
+#
+# {order_by} is substituted in Python from a fixed allow-list (never from raw
+# request input) - see persistence_admin_brokers.py.
+#
+# The search filter escapes '%' and '_' in :search before it's wrapped in
+# wildcards (ESCAPE '\') so a literal underscore/percent in a name/phone/email
+# is matched literally instead of acting as a LIKE wildcard.
+
+list_brokers: |
+  WITH combined AS (
+    SELECT
+      b.id AS id,
+      TRIM(COALESCE(b.first_name,'') || ' ' || COALESCE(b.last_name,'')) AS full_name,
+      b.email AS email,
+      b.phone AS phone,
+      b.project AS project,
+      b.created_date AS created_at,
+      b.last_updated_date AS last_activity_at
+    FROM divine_broker_users b
+  ),
+  filtered AS (
+    SELECT * FROM combined
+    WHERE (:search IS NULL
+           OR lower(full_name) LIKE '%' || replace(replace(lower(:search), '%', '\%'), '_', '\_') || '%' ESCAPE '\'
+           OR lower(email) LIKE '%' || replace(replace(lower(:search), '%', '\%'), '_', '\_') || '%' ESCAPE '\'
+           OR lower(phone) LIKE '%' || replace(replace(lower(:search), '%', '\%'), '_', '\_') || '%' ESCAPE '\')
+      AND (:project IS NULL OR project = :project)
+  )
+  SELECT *, count(*) OVER() AS total_count FROM filtered
+  ORDER BY {order_by}
+  LIMIT :limit OFFSET :offset;
+
+# Fallback only - used when list_brokers returns zero rows (a genuinely empty
+# result, or a page past the last one), since a window-function total isn't
+# available on an empty row set. Never run on every request; see
+# persistence_admin_brokers.list_brokers/count_brokers.
+count_brokers: |
+  WITH combined AS (
+    SELECT
+      b.id AS id,
+      TRIM(COALESCE(b.first_name,'') || ' ' || COALESCE(b.last_name,'')) AS full_name,
+      b.email AS email,
+      b.phone AS phone,
+      b.project AS project,
+      b.created_date AS created_at,
+      b.last_updated_date AS last_activity_at
+    FROM divine_broker_users b
+  )
+  SELECT count(*) AS total FROM combined
+  WHERE (:search IS NULL
+         OR lower(full_name) LIKE '%' || replace(replace(lower(:search), '%', '\%'), '_', '\_') || '%' ESCAPE '\'
+         OR lower(email) LIKE '%' || replace(replace(lower(:search), '%', '\%'), '_', '\_') || '%' ESCAPE '\'
+         OR lower(phone) LIKE '%' || replace(replace(lower(:search), '%', '\%'), '_', '\_') || '%' ESCAPE '\')
+    AND (:project IS NULL OR project = :project);

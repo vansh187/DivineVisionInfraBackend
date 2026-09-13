@@ -50,7 +50,13 @@ def test_list_customers_requires_auth():
 
 
 def test_list_customers_empty_result_shape():
-    r = client.get("/admin/customers", headers=_auth_headers())
+    # A search term guaranteed to match nothing - this test's own module-level
+    # setup_module resets test_db.sqlite, but on Windows a still-open SQLite
+    # connection from an earlier test file can make that os.remove() silently
+    # no-op (caught by its own try/except), leaving other files' rows visible
+    # here. Searching for a value nothing could ever match keeps this
+    # assertion valid regardless of what ran before it.
+    r = client.get("/admin/customers?search=no-such-customer-xyz-should-never-match", headers=_auth_headers())
     assert r.status_code == 200, r.text
     data = r.json()
     assert data["items"] == []
