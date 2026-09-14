@@ -66,6 +66,7 @@ class serviceZoho:
                     return serviceZoho._cached_token
                 try:
                     url = _TOKEN_URL_TMPL.format(domain=self._accounts_domain)
+                    logger.info("zoho_token_request_start domain=%s", self._accounts_domain)
                     resp = requests.post(
                         url,
                         params={
@@ -76,6 +77,7 @@ class serviceZoho:
                         },
                         timeout=_REQUEST_TIMEOUT_SECONDS,
                     )
+                    logger.info("zoho_token_request_done domain=%s status=%s", self._accounts_domain, resp.status_code)
                 except requests.RequestException as e:
                     logger.warning("zoho_token_request_failed: %s", e)
                     return None
@@ -158,6 +160,7 @@ class serviceZoho:
 
             try:
                 url = _TOKEN_URL_TMPL.format(domain=domain)
+                logger.info("zoho_oauth_setup_request_start domain=%s", domain)
                 resp = requests.post(
                     url,
                     params={
@@ -169,6 +172,7 @@ class serviceZoho:
                     },
                     timeout=_REQUEST_TIMEOUT_SECONDS,
                 )
+                logger.info("zoho_oauth_setup_request_done domain=%s status=%s", domain, resp.status_code)
             except requests.RequestException as e:
                 logger.warning("zoho_oauth_setup_request_failed: %s", e)
                 return {"success": False, "error": "request_failed"}
@@ -236,6 +240,7 @@ class serviceZoho:
                 return False
 
             try:
+                logger.info("zoho_render_persist_request_start service_id=%s", service_id)
                 resp = requests.put(
                     f"https://api.render.com/v1/services/{service_id}/env-vars/ZOHO_REFRESH_TOKEN",
                     headers={
@@ -246,6 +251,7 @@ class serviceZoho:
                     json={"value": refresh_token},
                     timeout=_REQUEST_TIMEOUT_SECONDS,
                 )
+                logger.info("zoho_render_persist_request_done service_id=%s status=%s", service_id, resp.status_code)
             except requests.RequestException as e:
                 logger.warning("zoho_render_persist_request_failed: %s", e)
                 return False
@@ -277,6 +283,10 @@ class serviceZoho:
             body = {"data": [clean_record], "duplicate_check_fields": duplicate_check_fields}
             url = _UPSERT_URL_TMPL.format(api_base=self._get_api_base(), module=module)
             try:
+                logger.info(
+                    "zoho_upsert_request_start module=%s duplicate_fields=%s record_keys=%s",
+                    module, duplicate_check_fields, sorted(clean_record.keys()),
+                )
                 resp = requests.post(
                     url,
                     headers={
@@ -286,6 +296,7 @@ class serviceZoho:
                     json=body,
                     timeout=_REQUEST_TIMEOUT_SECONDS,
                 )
+                logger.info("zoho_upsert_request_done module=%s status=%s", module, resp.status_code)
             except requests.RequestException as e:
                 logger.warning("zoho_upsert_request_failed module=%s error=%s", module, e)
                 return False
@@ -338,12 +349,14 @@ class serviceZoho:
 
             url = f"{self._get_api_base()}/crm/v3/{module}/search"
             try:
+                logger.info("zoho_find_by_email_request_start module=%s", module)
                 resp = requests.get(
                     url,
                     headers={"Authorization": f"Zoho-oauthtoken {token}"},
                     params={"email": email},
                     timeout=_REQUEST_TIMEOUT_SECONDS,
                 )
+                logger.info("zoho_find_by_email_request_done module=%s status=%s", module, resp.status_code)
             except requests.RequestException as e:
                 logger.warning("zoho_find_by_email_request_failed module=%s error=%s", module, e)
                 return {"found": False, "error": "request_failed"}

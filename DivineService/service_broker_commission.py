@@ -2,6 +2,7 @@ import math
 import os
 import uuid
 import razorpay
+import logging
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from sqlalchemy.exc import IntegrityError
@@ -11,6 +12,7 @@ from Divinepersistence import persistenceBrokerCommission
 ALLOWED_COMMISSION_STATUSES = ("pending", "paid", "rejected")
 ALLOWED_TRANSACTION_MODES = ("cash", "booking")
 MAX_MONEY_VALUE = Decimal("999999999999.99")
+logger = logging.getLogger(__name__)
 
 
 class serviceBrokerCommission:
@@ -194,6 +196,10 @@ class serviceBrokerCommission:
 
             amount_paise = int(round(float(amount) * 100))
             try:
+                logger.info(
+                    "broker_commission.razorpay.order_create_request_start broker_id=%s amount_paise=%s",
+                    brokerId, amount_paise,
+                )
                 order = self._client().order.create({
                     "amount": amount_paise,
                     "currency": "INR",
@@ -204,9 +210,19 @@ class serviceBrokerCommission:
                         "purpose": "broker_commission",
                     },
                 })
+                logger.info(
+                    "broker_commission.razorpay.order_create_request_done broker_id=%s razorpay_order_id=%s status=%s",
+                    brokerId,
+                    order.get("id") if isinstance(order, dict) else None,
+                    order.get("status") if isinstance(order, dict) else None,
+                )
             except RuntimeError:
                 raise
             except Exception as e:
+                logger.warning(
+                    "broker_commission.razorpay.order_create_request_failed broker_id=%s amount_paise=%s error=%s",
+                    brokerId, amount_paise, e, exc_info=True,
+                )
                 raise RuntimeError(f"payment_order_failed:{type(e).__name__}") from e
 
             commission = self.create_commission(
