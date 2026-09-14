@@ -8,10 +8,14 @@ from sqlalchemy.exc import IntegrityError
 from DivineDTO.models import (
     AdminCreateDTO, AdminLoginDTO, AdminOutDTO, AdminTokenDTO, AdminAccessTokenDTO, AdminRefreshDTO,
     CustomerListResponseDTO, CustomerListItemDTO, CustomerCreateDTO, BrokerListResponseDTO,
+    AdminVisitListResponseDTO, AdminVisitListItemDTO,
     ForgotPasswordDTO, ResetPasswordDTO, MessageDTO,
 )
 from Divinepersistence import persistenceAdmin
-from DivineService import serviceAdmin, serviceAdminCustomers, serviceAdminBrokers, servicePasswordReset, PasswordResetError
+from DivineService import (
+    serviceAdmin, serviceAdminCustomers, serviceAdminBrokers, serviceAdminVisits,
+    servicePasswordReset, PasswordResetError,
+)
 from DivineService.auth import get_current_admin
 
 logger = logging.getLogger(__name__)
@@ -21,6 +25,7 @@ _admin_service = serviceAdmin(secret_key=os.getenv("ADMIN_JWT_SECRET_KEY"))
 _password_reset_service = servicePasswordReset(role="admin", user_persistence=persistenceAdmin())
 _admin_customers_service = serviceAdminCustomers()
 _admin_brokers_service = serviceAdminBrokers()
+_admin_visits_service = serviceAdminVisits()
 
 
 @router.post("/signup", response_model=AdminOutDTO)
@@ -178,3 +183,50 @@ def list_brokers(
         raise HTTPException(status_code=500, detail="internal_error")
     finally:
         logger.debug("admin_list_brokers_latency_ms=%.2f", (time.monotonic() - start) * 1000)
+
+
+@router.get("/visits", response_model=AdminVisitListResponseDTO)
+def list_visits(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    search: Optional[str] = Query(None, max_length=200, description="Matches customer name or project name"),
+    origin_type: Optional[Literal["CUSTOMER", "CHANNEL_PARTNER"]] = Query(None),
+    status: Optional[Literal["requested", "scheduled", "confirmed", "completed", "follow_up", "no_show", "converted", "cancelled"]] = Query(None),
+    sort: Literal["visit_date", "-visit_date", "created_at", "-created_at", "customer_name", "-customer_name"] = Query("-visit_date"),
+    current_admin: dict = Depends(get_current_admin),
+):
+    """Unified customer + channel-partner site visits for the admin panel's
+    Site Visits page. Read-only display data - see DivineService/service_admin_visits.py."""
+    start = time.monotonic()
+    try:
+        return _admin_visits_service.list_visits(
+            search=search, origin_type=origin_type, status=status, sort=sort, page=page, page_size=page_size,
+        )
+    except RuntimeError:
+        # Controlled failure from the service/persistence layer (db_error,
+        # visit_row_shape_mismatch, ...) - never leak the internal reason to
+        # the client, just log it and answer with a generic 500.
+        logger.exception("admin_list_visits_failed")
+        raise HTTPException(status_code=500, detail="internal_error")
+    except Exception:
+        logger.exception("admin_list_visits_failed")
+        raise HTTPException(status_code=500, detail="internal_error")
+    finally:
+        logger.debug("admin_list_visits_latency_ms=%.2f", (time.monotonic() - start) * 1000)
+
+
+@router.get("/visits/{visit_id}", response_model=AdminVisitListItemDTO)
+def get_visit(visit_id: str, current_admin: dict = Depends(get_current_admin)):
+    start = time.monotonic()
+    try:
+        return _admin_visits_service.get_visit(visit_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="not_found")
+    except RuntimeError:
+        logger.exception("admin_get_visit_failed")
+        raise HTTPException(status_code=500, detail="internal_error")
+    except Exception:
+        logger.exception("admin_get_visit_failed")
+        raise HTTPException(status_code=500, detail="internal_error")
+    finally:
+        logger.debug("admin_get_visit_latency_ms=%.2f", (time.monotonic() - start) * 1000)

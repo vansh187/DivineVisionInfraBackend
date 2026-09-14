@@ -303,9 +303,14 @@ class PaymentOutDTO(BaseModel):
     installment_status: Optional[str] = None
 
 
+# project is a plain str (not a Literal) on every visit DTO below so an
+# unrecognized value can be turned into a 400 "invalid_project" by the service
+# layer instead of an automatic 422 from Pydantic - see service_visit.py's
+# _validate_project. Missing entirely still 422s, since the field is required.
 class VisitScheduleRequestDTO(BaseModel):
     customer_name: str = Field(..., min_length=1, max_length=200)
     customer_contact: Optional[str] = Field(None, max_length=200)
+    project: str = Field(..., min_length=1, max_length=50)
     date: str = Field(..., description="YYYY-MM-DD")
     time: str = Field(..., description="HH:MM, 24-hour")
     notes: Optional[str] = Field(None, max_length=1000)
@@ -319,14 +324,59 @@ class VisitCompleteRequestDTO(BaseModel):
 
 class VisitOutDTO(BaseModel):
     id: str
-    broker_id: str
+    # None for a website-originated request that no broker has picked up yet.
+    broker_id: Optional[str] = None
+    customer_name: str
+    customer_contact: Optional[str] = None
+    project: Optional[str] = None
+    # None on a "requested" visit - no confirmed slot yet.
+    date: Optional[str] = None
+    time: Optional[str] = None
+    notes: Optional[str] = None
+    status: str
+    # "website" | "broker" - derived from origin_type, not a separate stored field.
+    source: Optional[str] = None
+    created_date: Optional[datetime] = None
+
+
+class VisitRequestCallbackDTO(BaseModel):
+    """Public website 'Request a callback' form (POST /visits/request) - no
+    login required. A broker picks the request up later and fills in the
+    exact visit date/time."""
+    customer_name: str = Field(..., min_length=1, max_length=200)
+    customer_contact: str = Field(..., min_length=1, max_length=200)
+    customer_email: Optional[EmailStr] = None
+    project: str = Field(..., min_length=1, max_length=50)
+    preferred_window: Literal["today", "tomorrow", "weekend"]
+    notes: Optional[str] = Field(None, max_length=1000)
+
+
+class AdminVisitListItemDTO(BaseModel):
+    """One row of the admin panel's Site Visits list (GET /admin/visits).
+    Read-only/display-purpose for phase 1 - see DivineService/service_admin_visits.py.
+    No customer_id: a visit may be logged for someone who never created a
+    website account, so customer_name/customer_contact stay free text."""
+    id: str
+    origin_type: Literal["CUSTOMER", "CHANNEL_PARTNER"]
     customer_name: str
     customer_contact: Optional[str]
-    date: str
-    time: str
-    notes: Optional[str]
-    status: str
-    created_date: Optional[datetime]
+    project_name: Optional[str]
+    plot_number: Optional[str]
+    source: Optional[str]
+    assigned_to: Optional[str]
+    customer_email: Optional[str] = None
+    preferred_window: Optional[Literal["today", "tomorrow", "weekend"]] = None
+    visit_date: Optional[str]
+    visit_time: Optional[str]
+    status: Literal["requested", "scheduled", "confirmed", "completed", "follow_up", "no_show", "converted", "cancelled"]
+    notes: Optional[str] = None
+    created_at: Optional[datetime]
+    last_activity_at: Optional[datetime]
+
+
+class AdminVisitListResponseDTO(BaseModel):
+    items: List[AdminVisitListItemDTO]
+    pagination: PaginationDTO
 
 
 class MarketTrendOutDTO(BaseModel):

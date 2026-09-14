@@ -39,6 +39,17 @@ class RowWrapper:
             self.__dict__.update(mapping)
 
 
+def format_date_value(value) -> str:
+    """Shared by anything that returns a raw SQLAlchemy date/datetime column
+    value in a response DTO: isoformat() when the driver already gave us a
+    date/datetime object, str() as a fallback for a dialect that returned it
+    as text, None through unchanged. Used by DivineAPI/visit_api.py and
+    DivineService/service_admin_visits.py so the two don't drift apart."""
+    if value is None:
+        return None
+    return value.isoformat() if hasattr(value, "isoformat") else str(value)
+
+
 def load_queries(filename: str) -> dict:
     """Load a flat query-name -> SQL dict from DivineDatabasequeries/<filename>, safely defaulting to {} on any error."""
     root = os.path.dirname(os.path.dirname(__file__))

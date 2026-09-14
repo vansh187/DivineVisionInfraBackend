@@ -1,0 +1,91 @@
+# SQL for the admin panel's Site Visits list (GET /admin/visits) and detail
+# (GET /admin/visits/{id}). Read-only, display-purpose only for phase 1 - see
+# DivineService/service_admin_visits.py.
+#
+# {order_by} is substituted in Python from a fixed allow-list (never from raw
+# request input) - see persistence_admin_visits.py.
+#
+# The search filter escapes '%' and '_' in :search before it's wrapped in
+# wildcards (ESCAPE '\') so a literal underscore/percent in a customer name or
+# project name is matched literally instead of acting as a LIKE wildcard.
+#
+# source falls back to the owning broker's name when the display column itself
+# is still NULL (pre-migration rows that a backfill run hasn't reached, or a
+# race with the backfill) so the list never shows a blank SOURCE cell.
+
+list_visits: |
+  WITH combined AS (
+    SELECT
+      v.id AS id,
+      COALESCE(v.origin_type, 'CHANNEL_PARTNER') AS origin_type,
+      v.customer_name AS customer_name,
+      v.customer_contact AS customer_contact,
+      COALESCE(v.project_name, '') AS project_name,
+      COALESCE(v.plot_number, '') AS plot_number,
+      COALESCE(v.source, TRIM(COALESCE(b.first_name, '') || ' ' || COALESCE(b.last_name, ''))) AS source,
+      v.assigned_to AS assigned_to,
+      v.customer_email AS customer_email,
+      v.preferred_window AS preferred_window,
+      v.visit_date AS visit_date,
+      v.visit_time AS visit_time,
+      v.status AS status,
+      v.notes AS notes,
+      v.created_date AS created_at,
+      v.last_updated_date AS last_activity_at
+    FROM divine_site_visits v
+    LEFT JOIN divine_broker_users b ON b.id = v.broker_id
+  ),
+  filtered AS (
+    SELECT * FROM combined
+    WHERE (:search IS NULL
+           OR lower(customer_name) LIKE '%' || replace(replace(lower(:search), '%', '\%'), '_', '\_') || '%' ESCAPE '\'
+           OR lower(project_name) LIKE '%' || replace(replace(lower(:search), '%', '\%'), '_', '\_') || '%' ESCAPE '\')
+      AND (:origin_type IS NULL OR origin_type = :origin_type)
+      AND (:status IS NULL OR status = :status)
+  )
+  SELECT *, count(*) OVER() AS total_count FROM filtered
+  ORDER BY {order_by}
+  LIMIT :limit OFFSET :offset;
+
+# Fallback only - used when list_visits returns zero rows (a genuinely empty
+# result, or a page past the last one), since a window-function total isn't
+# available on an empty row set. Never run on every request; see
+# persistence_admin_visits.list_visits/count_visits.
+count_visits: |
+  WITH combined AS (
+    SELECT
+      COALESCE(v.origin_type, 'CHANNEL_PARTNER') AS origin_type,
+      v.customer_name AS customer_name,
+      COALESCE(v.project_name, '') AS project_name,
+      v.status AS status
+    FROM divine_site_visits v
+  )
+  SELECT count(*) AS total FROM combined
+  WHERE (:search IS NULL
+         OR lower(customer_name) LIKE '%' || replace(replace(lower(:search), '%', '\%'), '_', '\_') || '%' ESCAPE '\'
+         OR lower(project_name) LIKE '%' || replace(replace(lower(:search), '%', '\%'), '_', '\_') || '%' ESCAPE '\')
+    AND (:origin_type IS NULL OR origin_type = :origin_type)
+    AND (:status IS NULL OR status = :status);
+
+get_visit_by_id: |
+  SELECT
+    v.id AS id,
+    COALESCE(v.origin_type, 'CHANNEL_PARTNER') AS origin_type,
+    v.customer_name AS customer_name,
+    v.customer_contact AS customer_contact,
+    COALESCE(v.project_name, '') AS project_name,
+    COALESCE(v.plot_number, '') AS plot_number,
+    COALESCE(v.source, TRIM(COALESCE(b.first_name, '') || ' ' || COALESCE(b.last_name, ''))) AS source,
+    v.assigned_to AS assigned_to,
+    v.customer_email AS customer_email,
+    v.preferred_window AS preferred_window,
+    v.visit_date AS visit_date,
+    v.visit_time AS visit_time,
+    v.status AS status,
+    v.notes AS notes,
+    v.created_date AS created_at,
+    v.last_updated_date AS last_activity_at
+  FROM divine_site_visits v
+  LEFT JOIN divine_broker_users b ON b.id = v.broker_id
+  WHERE v.id = :id
+  LIMIT 1;

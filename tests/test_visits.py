@@ -48,6 +48,7 @@ def _sample_payload(**overrides):
     payload = {
         "customer_name": "Jane Doe",
         "customer_contact": "9999999999",
+        "project": "ops-divine-greens",
         "date": "2026-09-15",
         "time": "14:30",
         "notes": "Interested in OPS Divine Greens, 250 sq yd",
