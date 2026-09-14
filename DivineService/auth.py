@@ -1,4 +1,5 @@
 import os
+from typing import Optional
 import jwt
 from fastapi import Header, HTTPException
 from dotenv import load_dotenv
@@ -98,3 +99,26 @@ def get_current_admin_or_broker(authorization: str = Header(None)) -> dict:
 
 def get_current_admin(authorization: str = Header(None)) -> dict:
     return _decode_current_user(authorization, ("admin",), reject_refresh=True)
+
+
+def get_optional_customer(authorization: str = Header(None)) -> Optional[dict]:
+    """For a public endpoint that behaves better for a signed-in customer but
+    must keep working for an anonymous visitor: a missing header, an expired/
+    malformed token, or a token for a different role all just come back as
+    None instead of raising - the caller decides what "no identity" means for
+    it. Never use this where the endpoint's own security depends on the
+    caller actually being a customer; use get_current_user for that.
+
+    A genuine server misconfiguration (no JWT signing secret available at all -
+    _decode_current_user's 500 "server_misconfigured") is NOT swallowed the
+    same way: treating that as "anonymous caller" would silently stop tagging
+    every request with its customer_id and hide the env problem instead of
+    surfacing it."""
+    if not authorization:
+        return None
+    try:
+        return _decode_current_user(authorization, ("customer",), reject_refresh=True)
+    except HTTPException as e:
+        if e.status_code == 500:
+            raise
+        return None

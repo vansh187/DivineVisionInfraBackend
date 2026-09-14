@@ -1,14 +1,18 @@
+import logging
 import uuid
 from datetime import datetime, date, timedelta
-from Divinepersistence import persistenceVisit
+from Divinepersistence import persistenceVisit, persistenceCustomer
+
+logger = logging.getLogger(__name__)
 
 _SATURDAY = 5
 _VALID_PROJECTS = ("ops-divine-greens", "suraksha-enclave")
 
 
 class serviceVisit:
-    def __init__(self, persistence: persistenceVisit = None):
+    def __init__(self, persistence: persistenceVisit = None, customer_persistence: persistenceCustomer = None):
         self._persistence = persistence or persistenceVisit()
+        self._customer_persistence = customer_persistence or persistenceCustomer()
 
     def _parse_date(self, value: str) -> date:
         try:
@@ -35,7 +39,8 @@ class serviceVisit:
         return project
 
     def schedule_visit(self, broker_id: str, customer_name: str, customer_contact: str,
-                        visit_date: str, visit_time: str, notes: str, project: str = None):
+                        visit_date: str, visit_time: str, notes: str, project: str = None,
+                        customer_email: str = None):
         customer_name = (customer_name or "").strip()
         if not customer_name:
             raise ValueError("customer_name_required")
@@ -50,6 +55,7 @@ class serviceVisit:
             broker_id=broker_id,
             customer_name=customer_name,
             customer_contact=(customer_contact or "").strip() or None,
+            customer_email=(customer_email or "").strip() or None,
             visit_date=parsed_date,
             visit_time=normalized_time,
             notes=(notes or "").strip() or None,
@@ -71,10 +77,13 @@ class serviceVisit:
             raise ValueError("invalid_preferred_window")
 
     def request_callback(self, project: str, preferred_window: str, customer_name: str, customer_contact: str,
-                          customer_email: str = None, notes: str = None):
+                          customer_email: str = None, notes: str = None, customer_id: str = None):
         """Public website 'request a callback' form - no broker/exact date-time
-        yet (see persistenceVisit.create_visit_request). Raises ValueError on
-        bad input (caught by the router and turned into a 400); anything
+        yet (see persistenceVisit.create_visit_request). customer_id is set only
+        when the caller sent a valid customer bearer token (optional auth - see
+        DivineService.auth.get_optional_customer); an anonymous submission
+        leaves it None and is matched later purely by email. Raises ValueError
+        on bad input (caught by the router and turned into a 400); anything
         unexpected from the persistence layer is surfaced as a RuntimeError so
         the router never sees a raw, unhandled exception."""
         try:
@@ -96,6 +105,7 @@ class serviceVisit:
                 customer_name=clean_name,
                 customer_contact=clean_contact,
                 customer_email=(customer_email or "").strip() or None,
+                customer_id=customer_id,
                 visit_date=visit_date,
                 notes=(notes or "").strip() or None,
                 project_name=validated_project,
@@ -111,6 +121,26 @@ class serviceVisit:
 
     def list_visits(self, broker_id: str):
         return self._persistence.list_by_broker(broker_id)
+
+    def list_mine(self, customer_id: str):
+        """GET /visits/mine: every visit belonging to the signed-in customer -
+        matched directly by customer_id when a visit was created while they
+        were signed in, and by the email on their account otherwise (an
+        anonymous website request, or a broker-scheduled visit - neither of
+        those ever has customer_id set). Returns [] (never raises) when the
+        account can't be found, has no email on file, or genuinely has no
+        matching visits, per the endpoint's own contract. Anything unexpected
+        from either persistence call is surfaced as a RuntimeError so the
+        router never sees a raw, unhandled exception."""
+        try:
+            customer = self._customer_persistence.get_by_id(customer_id)
+            email = (getattr(customer, "email", None) or "").strip() or None if customer else None
+            return self._persistence.list_mine(customer_id, email)
+        except RuntimeError:
+            raise
+        except Exception:
+            logger.exception("visits_mine_lookup_failed")
+            raise RuntimeError("list_mine_failed")
 
     def get_visit_history(self, broker_id: str):
         now = datetime.now()
