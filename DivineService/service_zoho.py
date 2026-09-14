@@ -480,7 +480,9 @@ class serviceZoho:
 
     def push_booking_contact(self, customer_id: str, first_name: str = None, last_name: str = None,
                               email: str = None, phone: str = None, inventory_id: str = None,
-                              payment_id: str = None, purpose: str = None) -> bool:
+                              payment_id: str = None, purpose: str = None, payment_method: str = None,
+                              booking_id: str = None, project_name: str = None, unit_number: str = None,
+                              booking_amount=None, booking_status: str = None, kyc_status: str = None) -> bool:
         """Syncs a customer into the Zoho CRM Contacts module the moment their FIRST
         plot booking is confirmed (payment settled AND the unit actually flipped to
         'booked' - Razorpay or a trusted cash/RTGS/cheque booking alike). Per the
@@ -500,16 +502,29 @@ class serviceZoho:
             if not dup_fields:
                 logger.info("zoho_push_booking_contact_skipped customer_id=%s reason=no_email_or_phone", customer_id)
                 return False
+            details = [
+                ("customer_id", customer_id),
+                ("booking_id", booking_id),
+                ("project_name", project_name),
+                ("unit_number", unit_number),
+                ("booking_amount", booking_amount),
+                ("booking_status", booking_status),
+                ("kyc_status", kyc_status),
+                ("purpose", purpose),
+                ("payment_method", payment_method),
+                ("inventory_id", inventory_id),
+                ("payment_id", payment_id),
+            ]
+            description = "Divine plot booking confirmed" + "".join(
+                f", {key}={value}" for key, value in details if value is not None and value != ""
+            )
             record = {
                 "Last_Name": last_name or customer_id,
                 "First_Name": first_name,
                 "Email": email,
                 "Phone": phone,
                 "Lead_Source": "Website Plot Booking",
-                "Description": f"Divine plot booking confirmed, customer_id={customer_id}"
-                                + (f", purpose={purpose}" if purpose else "")
-                                + (f", inventory_id={inventory_id}" if inventory_id else "")
-                                + (f", payment_id={payment_id}" if payment_id else ""),
+                "Description": description,
             }
             return self._upsert("Contacts", record, dup_fields)
         except Exception as e:

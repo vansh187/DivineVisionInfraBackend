@@ -1,5 +1,5 @@
 import random
-from sqlalchemy import Column, String, DateTime, text
+from sqlalchemy import Column, String, DateTime, bindparam, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from datetime import datetime, timezone
@@ -32,6 +32,7 @@ class persistenceCustomer:
         queries.setdefault("get_by_username", 'SELECT * FROM divine_customer_users WHERE username = :username LIMIT 1;')
         queries.setdefault("get_by_email", 'SELECT * FROM divine_customer_users WHERE lower(email) = lower(:email) LIMIT 1;')
         queries.setdefault("get_by_id", 'SELECT * FROM divine_customer_users WHERE id = :id LIMIT 1;')
+        queries.setdefault("get_by_ids", 'SELECT * FROM divine_customer_users WHERE id IN :ids;')
         queries.setdefault("update_password", (
             'UPDATE divine_customer_users SET password_hash = :password_hash, last_updated_date = :last_updated_date '
             'WHERE id = :id RETURNING *;'
@@ -102,6 +103,15 @@ class persistenceCustomer:
             if not row:
                 return None
             return RowWrapper(row)
+
+    def get_by_ids(self, ids):
+        ids = list(dict.fromkeys([i for i in (ids or []) if i]))
+        if not ids:
+            return []
+        with self._session_factory() as db:
+            query = text(self._queries.get("get_by_ids")).bindparams(bindparam("ids", expanding=True))
+            result = db.execute(query, {"ids": ids})
+            return [RowWrapper(row) for row in result.mappings().all()]
 
     def update_password(self, id: str, password_hash: str):
         with self._session_factory() as db:

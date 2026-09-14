@@ -141,7 +141,10 @@ class servicePayment:
 
             record.inventory_status = "pending_kyc_review"
             self._create_booking_record(record, unit)
-            self._push_booking_contact_to_zoho(record)
+            # NOT pushed to Zoho here anymore - a held-for-review unit isn't a
+            # confirmed booking yet (KYC review might still Reject it, releasing
+            # the plot). See notify_booking_confirmed(), called by
+            # serviceBookingKyc.approve() only once KYC is actually verified.
             return record
         except Exception as e:  # pragma: no cover - defensive catch-all
             logger.warning("payment.booking.apply_failed error=%s", e)
@@ -168,14 +171,29 @@ class servicePayment:
                            getattr(record, "id", None), e)
             self._flag_review(getattr(record, "id", None), "booking_record_create_failed")
 
-    def _push_booking_contact_to_zoho(self, record) -> None:
-        """Fire-and-forget: only on the FIRST successful plot booking (the unit
-        actually flips to 'booked', on any payment method - Razorpay or manually
-        recorded cash/RTGS/cheque) mirror the customer into Zoho CRM Contacts. Later
-        instalments on that same plot do NOT push again - per the client, only the
-        booking itself should land in Contacts. Never raises and never blocks the
-        payment - a Zoho outage must not affect the real payment that already
-        happened."""
+    def notify_booking_confirmed(self, payment_id: str, booking=None) -> None:
+        """Called by serviceBookingKyc.approve() - and ONLY there - once KYC
+        review has actually verified the booking and the plot is truly
+        'booked', not merely held. Looks the payment back up by id since the
+        booking-review flow only carries payment_id/booking data, not a live
+        payment record. Never raises."""
+        try:
+            record = self._persistence.get_by_id(payment_id)
+            if not record:
+                return
+            self._push_booking_contact_to_zoho(record, booking=booking)
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning("payment.notify_booking_confirmed_failed payment_id=%s error=%s", payment_id, e)
+
+    def _push_booking_contact_to_zoho(self, record, booking=None) -> None:
+        """Fire-and-forget: only on the FIRST successful plot booking (KYC
+        review has Approved it and the unit is truly 'booked', on any payment
+        method - Razorpay or manually recorded cash/RTGS-NEFT) mirror the
+        customer into Zoho CRM Contacts - see notify_booking_confirmed(), the
+        only caller. Later instalments on that same plot do NOT push again -
+        per the client, only the booking itself should land in Contacts. Never
+        raises and never blocks the caller - a Zoho outage must not affect
+        anything else."""
         try:
             from DivineService.service_zoho import serviceZoho
             owner_id = getattr(record, "owner_id", None)
@@ -191,6 +209,13 @@ class servicePayment:
                 inventory_id=getattr(record, "inventory_id", None),
                 payment_id=getattr(record, "id", None),
                 purpose=getattr(record, "purpose", None),
+                payment_method=getattr(record, "method", None),
+                booking_id=getattr(booking, "id", None),
+                project_name=getattr(booking, "project_name", None),
+                unit_number=getattr(booking, "unit_number", None),
+                booking_amount=getattr(booking, "amount", None),
+                booking_status=getattr(booking, "status", None),
+                kyc_status=getattr(booking, "kyc_status", None),
             )
         except Exception as e:  # pragma: no cover - defensive
             logger.warning("payment.zoho_contact_push_failed error=%s", e)

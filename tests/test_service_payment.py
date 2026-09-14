@@ -193,6 +193,82 @@ def test_get_returns_record_for_owner():
     assert record.id == "pay1"
 
 
+def test_apply_booking_to_inventory_holds_without_zoho_push():
+    persistence = MagicMock()
+    inventory = MagicMock()
+    booking_persistence = MagicMock()
+    unit = MagicMock(project_name="Divine Greens", unit_number="A-112")
+    inventory.hold_for_kyc_review.return_value = unit
+    booking_persistence.create_booking.return_value = MagicMock(id="BKG-1")
+    svc = servicePayment(
+        persistence=persistence,
+        inventory_persistence=inventory,
+        booking_persistence=booking_persistence,
+    )
+    svc._push_booking_contact_to_zoho = MagicMock()
+    record = MagicMock(
+        id="pay1", purpose="plot_booking", inventory_id="INV-1",
+        owner_id="C00001", owner_role="customer", method="razorpay", amount=2500000,
+    )
+
+    result = svc._apply_booking_to_inventory(record)
+
+    assert result.inventory_status == "pending_kyc_review"
+    booking_persistence.create_booking.assert_called_once()
+    svc._push_booking_contact_to_zoho.assert_not_called()
+
+
+def test_notify_booking_confirmed_pushes_to_zoho_after_approval():
+    persistence = MagicMock()
+    record = MagicMock(id="pay1")
+    persistence.get_by_id.return_value = record
+    svc = servicePayment(persistence=persistence)
+    svc._push_booking_contact_to_zoho = MagicMock()
+    booking = MagicMock(id="BKG-1")
+
+    svc.notify_booking_confirmed("pay1", booking=booking)
+
+    svc._push_booking_contact_to_zoho.assert_called_once_with(record, booking=booking)
+
+
+@patch("DivineService.service_zoho.serviceZoho")
+def test_push_booking_contact_to_zoho_includes_approved_booking_data(mock_zoho_cls):
+    zoho = MagicMock()
+    mock_zoho_cls.return_value = zoho
+    svc = servicePayment(persistence=MagicMock())
+    svc._load_customer = MagicMock(return_value=MagicMock(
+        first_name="Rehan", last_name="Sharma", email="rehan@example.com", phone="9999999998",
+    ))
+    record = MagicMock(
+        id="pay1", owner_id="C00001", inventory_id="INV-1",
+        purpose="plot_booking", method="razorpay",
+    )
+    booking = MagicMock(
+        id="BKG-1", project_name="Divine Greens", unit_number="A-112",
+        amount=2500000, status="booked", kyc_status="verified",
+    )
+
+    svc._push_booking_contact_to_zoho(record, booking=booking)
+
+    zoho.push_booking_contact_async.assert_called_once_with(
+        customer_id="C00001",
+        first_name="Rehan",
+        last_name="Sharma",
+        email="rehan@example.com",
+        phone="9999999998",
+        inventory_id="INV-1",
+        payment_id="pay1",
+        purpose="plot_booking",
+        payment_method="razorpay",
+        booking_id="BKG-1",
+        project_name="Divine Greens",
+        unit_number="A-112",
+        booking_amount=2500000,
+        booking_status="booked",
+        kyc_status="verified",
+    )
+
+
 # ---------- handle_webhook ----------
 
 def test_handle_webhook_raises_when_not_configured():

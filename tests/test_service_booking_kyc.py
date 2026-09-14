@@ -114,8 +114,33 @@ def test_approve_happy_path():
         id="BKG-1", expected_version=1, status="booked", kyc_status="verified", admin_note="All docs verified")
     persistence.add_decision.assert_called_once_with(
         "BKG-1", actor="DV0001", action="approved", note="All docs verified")
+    payment_service.notify_booking_confirmed.assert_called_once_with("pay1", booking=updated_booking)
     assert detail["status"] == "booked"
     assert detail["kyc_status"] == "verified"
+
+
+def test_list_queue_batches_customer_names():
+    svc, persistence, inventory, payment_service, document_service, customer_persistence = _service()
+    rows = [
+        _booking(id="BKG-1", customer_id="C00001"),
+        _booking(id="BKG-2", customer_id="C00002"),
+        _booking(id="BKG-3", customer_id="C00001"),
+    ]
+    for row in rows:
+        row.total_count = 3
+    persistence.list_queue.return_value = rows
+    customer_persistence.get_by_ids.return_value = [
+        SimpleNamespace(id="C00001", first_name="Rehan", last_name="Sharma"),
+        SimpleNamespace(id="C00002", first_name="Asha", last_name="Mehta"),
+    ]
+
+    result = svc.list_queue(page=1, page_size=100)
+
+    customer_persistence.get_by_ids.assert_called_once_with(["C00001", "C00002"])
+    customer_persistence.get_by_id.assert_not_called()
+    assert [i["customer_name"] for i in result["items"]] == [
+        "Rehan Sharma", "Asha Mehta", "Rehan Sharma",
+    ]
 
 
 # ---------- reject / cancel ----------

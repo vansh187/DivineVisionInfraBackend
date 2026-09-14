@@ -780,3 +780,34 @@ def test_booking_upload_email_failure_does_not_break_booking(mock_upload, mock_s
     )
     assert doc.id == "doc1"
     assert expires_in == 3600
+
+
+def test_confirm_inventory_booked_creates_booking_record_for_safety_net_hold():
+    inventory = MagicMock()
+    booking_persistence = MagicMock()
+    unit = MagicMock(project_name="Divine Greens", unit_number="A-112")
+    inventory.hold_for_kyc_review.return_value = unit
+    payment = MagicMock(
+        id="pay1", purpose="plot_booking", inventory_id="INV-1", amount=2500000,
+    )
+    svc = serviceDocument(
+        MagicMock(),
+        payment_persistence=MagicMock(),
+        inventory_persistence=inventory,
+        booking_persistence=booking_persistence,
+        customer_persistence=MagicMock(),
+        email=MagicMock(),
+    )
+    doc = MagicMock()
+
+    svc._confirm_inventory_booked(doc, payment, client_inventory_id="INV-1", owner_id="C00001")
+
+    assert doc.inventory_status == "pending_kyc_review"
+    booking_persistence.create_booking.assert_called_once_with(
+        payment_id="pay1",
+        inventory_id="INV-1",
+        customer_id="C00001",
+        project_name="Divine Greens",
+        unit_number="A-112",
+        amount=2500000,
+    )

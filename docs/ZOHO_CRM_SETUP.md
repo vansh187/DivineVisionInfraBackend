@@ -10,10 +10,11 @@ production at the real Zoho CRM account instead.
 
 Per the client, signups and chatbot activity land in **Leads**. The one exception is
 a customer's FIRST confirmed plot booking - the payment settles paid AND the unit
-actually flips to 'booked' - made either via Razorpay or recorded manually as
-cash/RTGS/cheque. That lands in **Contacts** instead. See
-[`service_payment.py`](../DivineService/service_payment.py)
-`_push_booking_contact_to_zoho` (called from `_apply_booking_to_inventory`).
+actually flips to 'booked' after admin KYC approval - made either via Razorpay or
+recorded manually as cash/RTGS/cheque. That lands in **Contacts** instead. See
+[`service_booking_kyc.py`](../DivineService/service_booking_kyc.py) `approve()`,
+which calls [`service_payment.py`](../DivineService/service_payment.py)
+`notify_booking_confirmed()`.
 
 | Event | Zoho module | Trigger |
 |---|---|---|
@@ -21,7 +22,7 @@ cash/RTGS/cheque. That lands in **Contacts** instead. See
 | Broker signup (with email or phone) | **Leads** | `POST /broker/signup` |
 | Chatbot callback request | **Leads** | Visitor completes "call me back" (name + phone) |
 | Chatbot email capture | **Leads** | Visitor gives an email in chat |
-| Plot booking confirmed (payment settled + unit flipped to `booked`) - Razorpay or cash/RTGS/cheque | **Contacts** | `POST /payments/verify`, the Razorpay webhook, or `POST /payments/cash` |
+| Plot booking confirmed (payment settled + admin KYC approval flips unit to `booked`) - Razorpay or cash/RTGS/cheque | **Contacts** | `POST /admin/bookings/{booking_id}/approve` |
 
 A later instalment payment on that same already-booked plot does **not** push again -
 only the original booking event lands in Contacts.
