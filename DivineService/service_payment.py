@@ -373,11 +373,21 @@ class servicePayment:
         client = self._client()
         amount_paise = int(round(amount * 100))
         try:
+            logger.info(
+                "payment.razorpay.order_create_request_start owner_id=%s owner_role=%s purpose=%s "
+                "amount_paise=%s inventory_id=%s installment_no=%s",
+                owner_id, owner_role, purpose, amount_paise, inventory_id, installment_no,
+            )
             order = client.order.create({
                 "amount": amount_paise,
                 "currency": DEFAULT_CURRENCY,
                 "payment_capture": 1,
             })
+            logger.info(
+                "payment.razorpay.order_create_request_done owner_id=%s purpose=%s razorpay_order_id=%s status=%s",
+                owner_id, purpose, order.get("id") if isinstance(order, dict) else None,
+                order.get("status") if isinstance(order, dict) else None,
+            )
         except Exception as e:
             detail = self._gateway_error_detail(e)
             logger.warning(
@@ -701,7 +711,18 @@ class servicePayment:
                 client = self._client()
                 amount_paise = int(round(float(amount) * 100)) if amount is not None else None
                 refund_kwargs = {"amount": amount_paise} if amount_paise else {}
+                logger.info(
+                    "payment.razorpay.refund_request_start payment_id=%s razorpay_payment_id=%s amount_paise=%s",
+                    payment_id, razorpay_payment_id, amount_paise,
+                )
                 refund = client.payment.refund(razorpay_payment_id, refund_kwargs)
+                logger.info(
+                    "payment.razorpay.refund_request_done payment_id=%s razorpay_payment_id=%s "
+                    "razorpay_refund_id=%s status=%s",
+                    payment_id, razorpay_payment_id,
+                    refund.get("id") if isinstance(refund, dict) else None,
+                    refund.get("status") if isinstance(refund, dict) else None,
+                )
                 return self._persistence.update_refund_status(
                     id=payment_id, refund_status="completed", refund_amount=amount,
                     razorpay_refund_id=refund.get("id") if isinstance(refund, dict) else None,
