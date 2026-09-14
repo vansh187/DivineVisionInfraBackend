@@ -254,3 +254,70 @@ class persistenceInventory:
             except Exception:
                 db.rollback()
                 raise
+
+    # ---- Booking KYC review -----------------------------------------------
+    def hold_for_kyc_review(self, id: str, payment_id: str, customer_id: str = None):
+        """Race-safe flip to 'pending_kyc_review' - the plot-booking payment's
+        settlement now holds the unit for admin review instead of booking it
+        outright (see DivineService/service_payment.py::_apply_booking_to_inventory).
+        Same guarded-UPDATE shape as book_unit: matches 'available'/'held', or a
+        unit already held by THIS same payment (idempotent re-run safety).
+        Returns None for a business miss (unit missing/locked by someone else);
+        only a genuine DB error raises."""
+        self.expire_stale_reservations()
+        with self._session_factory() as db:
+            try:
+                now = datetime.now(timezone.utc)
+                result = db.execute(text(self._q("hold_for_kyc_review")), {
+                    "id": id, "payment_id": payment_id, "customer_id": customer_id, "now": now,
+                })
+                row = result.mappings().first()
+                if not row:
+                    db.rollback()
+                    return None
+                db.commit()
+                return RowWrapper(row)
+            except Exception:
+                db.rollback()
+                raise
+
+    def confirm_booking_after_kyc(self, id: str, payment_id: str):
+        """Admin-approve path: 'pending_kyc_review' -> 'booked', only for the SAME
+        payment that put it on hold (so an approve can't accidentally confirm a
+        unit some other payment is now holding). Returns None if the unit isn't
+        currently held for that payment."""
+        with self._session_factory() as db:
+            try:
+                now = datetime.now(timezone.utc)
+                result = db.execute(text(self._q("confirm_booking_after_kyc")), {
+                    "id": id, "payment_id": payment_id, "now": now,
+                })
+                row = result.mappings().first()
+                if not row:
+                    db.rollback()
+                    return None
+                db.commit()
+                return RowWrapper(row)
+            except Exception:
+                db.rollback()
+                raise
+
+    def release_from_kyc_review(self, id: str, payment_id: str):
+        """Admin-reject/cancel path: 'pending_kyc_review' -> 'available', clearing
+        the booking columns - only for the SAME payment that put it on hold.
+        Returns None if the unit isn't currently held for that payment."""
+        with self._session_factory() as db:
+            try:
+                now = datetime.now(timezone.utc)
+                result = db.execute(text(self._q("release_from_kyc_review")), {
+                    "id": id, "payment_id": payment_id, "now": now,
+                })
+                row = result.mappings().first()
+                if not row:
+                    db.rollback()
+                    return None
+                db.commit()
+                return RowWrapper(row)
+            except Exception:
+                db.rollback()
+                raise

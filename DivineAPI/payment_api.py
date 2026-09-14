@@ -40,6 +40,7 @@ def _to_payment_out(record, verified: bool = None) -> PaymentOutDTO:
         inventory_id=getattr(record, "inventory_id", None),
         inventory_status=getattr(record, "inventory_status", None),
         inventory_conflict_reason=getattr(record, "inventory_conflict_reason", None),
+        booking_id=getattr(record, "booking_id", None),
         # Instalment linkage. purpose / installment_no are stored columns;
         # installment_status is transient (set only on the settling call).
         purpose=getattr(record, "purpose", None),
@@ -104,6 +105,7 @@ def record_cash_payment(dto: PaymentCashRequestDTO, current_user: dict = Depends
             dto.amount, owner_id=current_user["sub"], owner_role=current_user["role"], note=dto.note,
             purpose=dto.purpose, inventory_id=dto.inventory_id,
             installment_no=dto.installment_no, due_date=dto.due_date,
+            method=dto.method, utr_number=dto.utr_number,
         )
         return _to_payment_out(record)
     except ValueError as e:

@@ -151,7 +151,9 @@ def _seed_document(cid, document_type, storage_path=None):
 
 
 def _pay_service():
-    svc = servicePayment(MagicMock(), MagicMock())
+    booking = MagicMock()
+    booking.create_booking.return_value = SimpleNamespace(id="BKG-2026-000001")
+    svc = servicePayment(MagicMock(), MagicMock(), booking)
     svc._key_id, svc._key_secret = "rzp_test_fake", "fake_secret"
     return svc
 
@@ -307,20 +309,21 @@ def test_enriched_schedule_is_scoped_by_booking_id():
 
 def test_two_plot_booking_payments_lock_their_own_units_independently():
     """A second plot_booking for a different unit must not be blocked by the first.
-    Each call flips its own unit; neither races the other."""
+    Each call holds its own unit for KYC review; neither races the other."""
     for inv in ("INV-A", "INV-B"):
         svc = _pay_service()
         svc._persistence.create_payment.return_value = _pay_row(
             method="cash", owner_role="broker", purpose="plot_booking", inventory_id=inv)
-        svc._inventory_persistence.book_unit.return_value = _pay_row(id=inv, status="booked")
+        svc._inventory_persistence.hold_for_kyc_review.return_value = _pay_row(
+            id=inv, status="pending_kyc_review", project_name="Test Project", unit_number=inv)
 
         record = svc.record_cash_payment(
             500000, owner_id="B90001", owner_role="broker",
             purpose="plot_booking", inventory_id=inv)
 
-        svc._inventory_persistence.book_unit.assert_called_once_with(
+        svc._inventory_persistence.hold_for_kyc_review.assert_called_once_with(
             id=inv, payment_id="pay1", customer_id="C81000")
-        assert record.inventory_status == "booked"
+        assert record.inventory_status == "pending_kyc_review"
         assert record.inventory_conflict_reason is None
 
 

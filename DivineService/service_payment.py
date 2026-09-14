@@ -3,9 +3,10 @@ import logging
 import os
 import re
 import uuid
+from datetime import datetime, timezone
 import razorpay
 from razorpay.errors import SignatureVerificationError
-from Divinepersistence import persistencePayment, persistenceInventory
+from Divinepersistence import persistencePayment, persistenceInventory, persistenceBooking
 
 logger = logging.getLogger(__name__)
 
@@ -24,9 +25,11 @@ _WEBHOOK_EVENT_STATUS = {"payment.captured": "paid", "payment.failed": "failed"}
 class servicePayment:
     def __init__(self, persistence: persistencePayment = None,
                  inventory_persistence: persistenceInventory = None,
+                 booking_persistence: persistenceBooking = None,
                  milestone_service=None):
         self._persistence = persistence or persistencePayment()
         self._inventory_persistence = inventory_persistence or persistenceInventory()
+        self._booking_persistence = booking_persistence or persistenceBooking()
         self._milestone_service_override = milestone_service
         self._key_id = os.getenv("RAZORPAY_KEY_ID")
         self._key_secret = os.getenv("RAZORPAY_KEY_SECRET")
@@ -51,40 +54,56 @@ class servicePayment:
         return purpose
 
     def _booking_flip_trusted(self, record) -> bool:
-        """A plot flip permanently removes a unit from the available pool, so it may
-        only ride on money we actually trust:
+        """Whether a plot-booking payment may put a unit on HOLD for admin KYC
+        review (see _apply_booking_to_inventory - this no longer books outright,
+        so the bar for "trusted enough" is lower than it used to be: the worst
+        case for an untrustworthy flip is a temporary hold an admin later
+        releases on reject, not a permanently lost unit):
 
           * a Razorpay payment - the caller only reaches _apply_booking_to_inventory
             after verify_payment / the webhook has confirmed the signature, so a
             'paid' razorpay row is real; or
           * a cash payment RECORDED BY A BROKER - staff logging cash they physically
-            collected, same trust level as the receipt book.
+            collected, same trust level as the receipt book; or
+          * an rtgs_neft payment - self-reported by the customer with a UTR
+            reference from their own bank transfer, but only ever a HOLD pending
+            admin review (who confirms the actual bank credit before Approve), not
+            a final booking - see the KYC-review gate this money now sits behind.
 
-        A customer's own self-reported cash entry is NOT trusted: it settles
-        'paid' straight from typed input with no verification, so honouring it here
-        would let anyone lock arbitrary plots for a rupee. Those still create a
-        payment row; a broker confirms the plot via POST /inventory/{id}/book."""
+        A customer's own self-reported CASH entry is still NOT trusted (cash
+        leaves no verifiable trail before it's physically handed over) - it
+        settles 'paid' straight from typed input, so honouring it here would let
+        anyone lock arbitrary plots for a rupee. Those still create a payment
+        row; a broker confirms the plot via POST /inventory/{id}/book."""
         method = (getattr(record, "method", None) or "razorpay").lower()
         role = (getattr(record, "owner_role", None) or "").lower()
         if method == "razorpay":
             return True
         if method == "cash" and role == "broker":
             return True
+        if method == "rtgs_neft":
+            return True
         return False
 
     def _apply_booking_to_inventory(self, record):
-        """Called right after a plot-booking payment settles. Flips the linked
-        inventory unit to 'booked' in its own guarded UPDATE. Attaches the outcome
-        to `record` as transient attributes the API echoes back:
+        """Called right after a plot-booking payment settles. HOLDS the linked
+        inventory unit as 'pending_kyc_review' in its own guarded UPDATE - it no
+        longer books the unit outright; an admin must Approve the customer's KYC
+        documents first (see DivineService/service_booking_kyc.py). Also creates
+        the Booking record (divine_bookings) that tracks that review, with its
+        first decision-history entry. Attaches the outcome to `record` as
+        transient attributes the API echoes back:
 
-            record.inventory_status          -> "booked" | "conflict" | None
+            record.inventory_status          -> "pending_kyc_review" | "conflict" | None
             record.inventory_conflict_reason -> str | None
+            record.booking_id                -> str | None
 
         Wrapped end to end - the money is already real, so ANY failure here becomes
         a flag-for-review at worst, never a failed payment or a raised exception."""
         try:
             record.inventory_status = None
             record.inventory_conflict_reason = None
+            record.booking_id = None
         except Exception:  # pragma: no cover - record is always a mutable RowWrapper
             return record
 
@@ -101,7 +120,7 @@ class servicePayment:
                 return record
 
             try:
-                unit = self._inventory_persistence.book_unit(
+                unit = self._inventory_persistence.hold_for_kyc_review(
                     id=inventory_id, payment_id=payment_id, customer_id=owner_id,
                 )
             except Exception as e:
@@ -120,12 +139,34 @@ class servicePayment:
                 self._flag_review(payment_id, "inventory_unavailable")
                 return record
 
-            record.inventory_status = "booked"
+            record.inventory_status = "pending_kyc_review"
+            self._create_booking_record(record, unit)
             self._push_booking_contact_to_zoho(record)
             return record
         except Exception as e:  # pragma: no cover - defensive catch-all
             logger.warning("payment.booking.apply_failed error=%s", e)
             return record
+
+    def _create_booking_record(self, record, unit) -> None:
+        """Creates the divine_bookings row for a newly-held unit. Idempotent for a
+        re-run on the same payment_id (create_booking returns the existing row
+        instead of erroring - see persistenceBooking.create_booking). Never
+        raises - a failure here is logged and flagged for manual review, but must
+        not undo the inventory hold that already succeeded (the money is real)."""
+        try:
+            booking = self._booking_persistence.create_booking(
+                payment_id=getattr(record, "id", None),
+                inventory_id=getattr(record, "inventory_id", None),
+                customer_id=getattr(record, "owner_id", None),
+                project_name=getattr(unit, "project_name", None),
+                unit_number=getattr(unit, "unit_number", None),
+                amount=getattr(record, "amount", None),
+            )
+            record.booking_id = getattr(booking, "id", None) if booking else None
+        except Exception as e:
+            logger.warning("payment.booking.record_create_failed payment_id=%s error=%s",
+                           getattr(record, "id", None), e)
+            self._flag_review(getattr(record, "id", None), "booking_record_create_failed")
 
     def _push_booking_contact_to_zoho(self, record) -> None:
         """Fire-and-forget: only on the FIRST successful plot booking (the unit
@@ -269,7 +310,7 @@ class servicePayment:
     def _persist_new_payment(self, owner_id: str, owner_role: str, amount: float, status: str,
                               razorpay_order_id: str = None, method: str = "razorpay", notes: dict = None,
                               purpose: str = "other", inventory_id: str = None,
-                              installment_no: int = None, due_date=None):
+                              installment_no: int = None, due_date=None, utr_number: str = None):
         payment_id = str(uuid.uuid4())
         return self._persistence.create_payment(
             id=payment_id,
@@ -285,6 +326,7 @@ class servicePayment:
             inventory_id=inventory_id,
             installment_no=installment_no,
             due_date=due_date,
+            utr_number=utr_number,
         )
 
     def create_order(self, amount: float, owner_id: str, owner_role: str,
@@ -353,32 +395,44 @@ class servicePayment:
             return kind
         return f"{kind}:{safe[:120]}"
 
+    _MANUAL_METHODS = ("cash", "rtgs_neft")
+
     def record_cash_payment(self, amount: float, owner_id: str, owner_role: str, note: str = None,
                             purpose: str = "other", inventory_id: str = None,
-                            installment_no: int = None, due_date=None):
-        """Records cash already collected in person - there's no gateway transaction to
-        create or verify (unlike create_order/verify_payment), so this settles the record
-        as "paid" immediately, straight from what was typed in. Available to both customers
-        (self-reporting cash they handed over) and brokers (logging cash collected on a
-        visit) - it's an unverified, self-reported record either way, same trust model as
-        someone writing it in a physical receipt book, not a cryptographically confirmed
-        transaction like the Razorpay flow."""
+                            installment_no: int = None, due_date=None, method: str = "cash",
+                            utr_number: str = None):
+        """Records money already collected/transferred outside the gateway - cash
+        handed over in person, or an RTGS/NEFT bank transfer identified by its UTR
+        reference - there's no gateway transaction to create or verify (unlike
+        create_order/verify_payment), so this settles the record as "paid"
+        immediately, straight from what was typed in. Available to both customers
+        (self-reporting money they've sent/handed over) and brokers (logging cash
+        collected on a visit) - it's an unverified, self-reported record either
+        way, same trust model as someone writing it in a physical receipt book,
+        not a cryptographically confirmed transaction like the Razorpay flow.
+        Raises ValueError("invalid_method") / ValueError("utr_number_required")."""
         self._validate_amount(amount)
         purpose = self._clean_purpose(purpose)
         inventory_id = (inventory_id or "").strip() or None
         installment_no = self._clean_installment_no(installment_no)
         due_date = self._clean_due_date(due_date)
+        clean_method = (method or "cash").strip().lower()
+        if clean_method not in self._MANUAL_METHODS:
+            raise ValueError("invalid_method")
+        clean_utr = (utr_number or "").strip() or None
+        if clean_method == "rtgs_neft" and not clean_utr:
+            raise ValueError("utr_number_required")
         if purpose == INSTALLMENT_PURPOSE:
             self._guard_installment(owner_id, installment_no, amount, due_date, inventory_id)
 
         note = (note or "").strip()
         record = self._persist_new_payment(
             owner_id=owner_id, owner_role=owner_role, amount=amount, status="paid",
-            razorpay_order_id=None, method="cash", notes={"note": note} if note else {},
+            razorpay_order_id=None, method=clean_method, notes={"note": note} if note else {},
             purpose=purpose, inventory_id=inventory_id,
-            installment_no=installment_no, due_date=due_date,
+            installment_no=installment_no, due_date=due_date, utr_number=clean_utr,
         )
-        # Cash / RTGS / cheque - any manually-recorded method - settles immediately ->
+        # Cash / RTGS-NEFT - any manually-recorded method - settles immediately ->
         # lock the plot / mark the milestone now (a first booking also mirrors the
         # customer into Zoho Contacts; instalments don't - see
         # _push_booking_contact_to_zoho).
@@ -575,3 +629,79 @@ class servicePayment:
         if record.owner_id != requester_id:
             raise PermissionError("forbidden")
         return record
+
+    def initiate_refund(self, payment_id: str, reason: str = None):
+        """Starts a refund for a KYC-rejected/cancelled booking payment (called by
+        serviceBookingKyc.reject/cancel, never directly from a router). Branches
+        by HOW the money arrived:
+
+          * razorpay - calls Razorpay's real refund API. A gateway failure here
+            still leaves the payment refund_status='pending' (not 'failed') so an
+            admin can see it needs a retry, rather than silently losing track of
+            an owed refund; only a successful gateway call marks 'completed'
+            (Razorpay refunds settle same-day for online payments, so there's no
+            separate async "processing" webhook this codebase listens for yet).
+          * cash / rtgs_neft - no gateway to call. Settles refund_status='pending'
+            with a human-readable instruction note (collect from office / manual
+            NEFT-RTGS by the business, both within 5-7 days) for the admin/business
+            team to action and later mark 'completed' themselves.
+
+        Raises ValueError('not_found') / ValueError('payment_not_paid') /
+        ValueError('refund_already_initiated'). Never leaves the payment in an
+        ambiguous state - every path ends in a persisted refund_status."""
+        record = self._persistence.get_by_id(payment_id)
+        if not record:
+            raise ValueError("not_found")
+        if (getattr(record, "status", None) or "") != "paid":
+            raise ValueError("payment_not_paid")
+        existing_refund_status = (getattr(record, "refund_status", None) or "none")
+        if existing_refund_status not in ("none", "failed"):
+            raise ValueError("refund_already_initiated")
+
+        method = (getattr(record, "method", None) or "razorpay").lower()
+        amount = getattr(record, "amount", None)
+        now = datetime.now(timezone.utc)
+
+        if method == "razorpay":
+            razorpay_payment_id = getattr(record, "razorpay_payment_id", None)
+            if not razorpay_payment_id:
+                # Never actually charged (e.g. a booking cancelled before the
+                # gateway payment settled) - nothing to refund at the gateway.
+                return self._persistence.update_refund_status(
+                    id=payment_id, refund_status="completed", refund_amount=0,
+                    refund_initiated_date=now, refund_completed_date=now,
+                    refund_note="No gateway charge was captured - nothing to refund.",
+                )
+            try:
+                client = self._client()
+                amount_paise = int(round(float(amount) * 100)) if amount is not None else None
+                refund_kwargs = {"amount": amount_paise} if amount_paise else {}
+                refund = client.payment.refund(razorpay_payment_id, refund_kwargs)
+                return self._persistence.update_refund_status(
+                    id=payment_id, refund_status="completed", refund_amount=amount,
+                    razorpay_refund_id=refund.get("id") if isinstance(refund, dict) else None,
+                    refund_initiated_date=now, refund_completed_date=now,
+                    refund_note=(reason or "").strip() or None,
+                )
+            except Exception as e:
+                detail = self._gateway_error_detail(e)
+                logger.warning("payment.refund.razorpay_failed payment_id=%s gateway_error=%s",
+                               payment_id, e, exc_info=True)
+                return self._persistence.update_refund_status(
+                    id=payment_id, refund_status="pending", refund_amount=amount,
+                    refund_initiated_date=now,
+                    refund_note=f"Automatic refund failed ({detail}) - needs manual retry.",
+                )
+
+        # cash / rtgs_neft - no gateway involved, purely a bookkeeping/notification entry.
+        if method == "cash":
+            note = "Refund approved - please collect the cash refund from our office within 5-7 business days."
+        else:
+            note = ("Refund approved - a manual bank transfer (NEFT/RTGS) will be initiated by our "
+                    "team within 5-7 business days.")
+        if reason:
+            note = f"{note} Reason: {reason.strip()}"
+        return self._persistence.update_refund_status(
+            id=payment_id, refund_status="pending", refund_amount=amount,
+            refund_initiated_date=now, refund_note=note,
+        )

@@ -1,0 +1,72 @@
+# SQL for the Booking KYC review workflow (divine_bookings + divine_booking_decisions).
+# See Divinepersistence/persistence_booking.py.
+#
+# The search filter escapes '%' and '_' in :search before it's wrapped in
+# wildcards (ESCAPE '\') so a literal underscore/percent in a customer id or
+# project name is matched literally instead of acting as a LIKE wildcard.
+# Search matches the booking id, customer id, or project name - there's no
+# customer-name column on this table (deliberately denormalized minimally;
+# the admin API joins the customer's name in at the service layer instead of
+# duplicating it here on every row).
+
+create_booking: |
+  INSERT INTO divine_bookings(
+    id, payment_id, inventory_id, customer_id, project_name, unit_number, amount,
+    status, kyc_status, version, created_date, last_updated_date
+  )
+  VALUES (
+    :id, :payment_id, :inventory_id, :customer_id, :project_name, :unit_number, :amount,
+    :status, :kyc_status, :version, :created_date, :last_updated_date
+  )
+  RETURNING *;
+
+get_by_id: |
+  SELECT * FROM divine_bookings WHERE id = :id LIMIT 1;
+
+get_by_payment_id: |
+  SELECT * FROM divine_bookings WHERE payment_id = :payment_id LIMIT 1;
+
+list_queue: |
+  WITH filtered AS (
+    SELECT * FROM divine_bookings
+    WHERE (:search IS NULL
+           OR lower(id) LIKE '%' || replace(replace(lower(:search), '%', '\%'), '_', '\_') || '%' ESCAPE '\'
+           OR lower(customer_id) LIKE '%' || replace(replace(lower(:search), '%', '\%'), '_', '\_') || '%' ESCAPE '\'
+           OR lower(project_name) LIKE '%' || replace(replace(lower(:search), '%', '\%'), '_', '\_') || '%' ESCAPE '\')
+      AND (:status IS NULL OR status = :status)
+      AND (:kyc_status IS NULL OR kyc_status = :kyc_status)
+  )
+  SELECT *, count(*) OVER() AS total_count FROM filtered
+  ORDER BY created_date DESC
+  LIMIT :limit OFFSET :offset;
+
+count_queue: |
+  SELECT count(*) AS total FROM divine_bookings
+  WHERE (:search IS NULL
+         OR lower(id) LIKE '%' || replace(replace(lower(:search), '%', '\%'), '_', '\_') || '%' ESCAPE '\'
+         OR lower(customer_id) LIKE '%' || replace(replace(lower(:search), '%', '\%'), '_', '\_') || '%' ESCAPE '\'
+         OR lower(project_name) LIKE '%' || replace(replace(lower(:search), '%', '\%'), '_', '\_') || '%' ESCAPE '\')
+    AND (:status IS NULL OR status = :status)
+    AND (:kyc_status IS NULL OR kyc_status = :kyc_status);
+
+list_by_customer: |
+  SELECT * FROM divine_bookings WHERE customer_id = :customer_id ORDER BY created_date DESC;
+
+# Optimistic-locked transition: only matches (and bumps version by 1) when the
+# row's version still equals :expected_version. Zero rows back means either the
+# booking doesn't exist, or someone else already changed it since the caller
+# last read it.
+update_decision: |
+  UPDATE divine_bookings
+  SET status = :status, kyc_status = :kyc_status, admin_note = :admin_note,
+      version = version + 1, last_updated_date = :last_updated_date
+  WHERE id = :id AND version = :expected_version
+  RETURNING *;
+
+insert_decision: |
+  INSERT INTO divine_booking_decisions(id, booking_id, actor, action, note, created_date)
+  VALUES (:id, :booking_id, :actor, :action, :note, :created_date)
+  RETURNING *;
+
+list_decisions: |
+  SELECT * FROM divine_booking_decisions WHERE booking_id = :booking_id ORDER BY created_date ASC;

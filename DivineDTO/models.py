@@ -267,7 +267,11 @@ class PaymentVerifyRequestDTO(BaseModel):
 
 
 class PaymentCashRequestDTO(BaseModel):
-    amount: float = Field(..., gt=0, description="Amount in INR (rupees) the customer handed over in cash")
+    amount: float = Field(..., gt=0, description="Amount in INR (rupees) already collected/transferred")
+    # "cash" (default, backward compatible) or "rtgs_neft" - a bank transfer with no
+    # gateway transaction, identified instead by the customer-entered utr_number.
+    method: Literal["cash", "rtgs_neft"] = "cash"
+    utr_number: Optional[str] = Field(None, max_length=50, description="Required when method='rtgs_neft'")
     note: Optional[str] = Field(None, max_length=500)
     purpose: Literal["plot_booking", "installment", "other"] = "other"
     # For "plot_booking": the unit to lock. For "installment" (optional): which
@@ -289,12 +293,17 @@ class PaymentOutDTO(BaseModel):
     razorpay_order_id: Optional[str]
     razorpay_payment_id: Optional[str]
     created_date: Optional[datetime]
-    # Booking linkage. inventory_status is "booked" when this call locked the plot,
+    # Booking linkage. inventory_status is "pending_kyc_review" when this call put
+    # the plot on hold for admin review (an Approve/Reject decision - see
+    # DivineAPI/admin_booking_kyc_api.py - is what finally books or releases it),
     # "conflict" when the payment settled but the unit was already taken (see
     # inventory_conflict_reason), or null on a non-booking payment / plain read.
     inventory_id: Optional[str] = None
     inventory_status: Optional[str] = None
     inventory_conflict_reason: Optional[str] = None
+    # Set alongside inventory_status="pending_kyc_review" - the new Booking record
+    # ("BKG-2026-000001") this payment created; track its KYC review with it.
+    booking_id: Optional[str] = None
     # Instalment linkage. installment_status is "paid" when this call marked the
     # milestone paid, "rejected" when the payment settled but failed a guard rail
     # (money kept, flagged for review), or null on a non-instalment payment.
@@ -383,6 +392,94 @@ class AdminVisitListItemDTO(BaseModel):
 class AdminVisitListResponseDTO(BaseModel):
     items: List[AdminVisitListItemDTO]
     pagination: PaginationDTO
+
+
+class BookingQueueItemDTO(BaseModel):
+    """One row of the admin panel's Booking Queue (GET /admin/bookings)."""
+    id: str
+    customer_id: str
+    customer_name: Optional[str] = None
+    project_name: Optional[str] = None
+    unit_number: Optional[str] = None
+    amount: Optional[float] = None
+    status: Literal["pending_kyc_review", "booked", "rejected", "cancelled"]
+    kyc_status: Literal["pending", "verified", "needs_resubmission", "rejected"]
+    version: int
+    created_at: Optional[datetime]
+    last_activity_at: Optional[datetime]
+
+
+class BookingQueueResponseDTO(BaseModel):
+    items: List[BookingQueueItemDTO]
+    pagination: PaginationDTO
+
+
+class BookingDocumentChecklistItemDTO(BaseModel):
+    document_type: str
+    label: str
+    uploaded: bool
+    preview_url: Optional[str] = None
+    preview_url_expires_in: Optional[int] = None
+    uploaded_at: Optional[datetime] = None
+
+
+class BookingDecisionHistoryItemDTO(BaseModel):
+    actor: str
+    action: str
+    note: Optional[str] = None
+    created_at: Optional[datetime]
+
+
+class BookingDetailDTO(BaseModel):
+    """GET /admin/bookings/{id} - the full Booking Detail screen: customer +
+    payment details, the KYC document checklist, and the decision-history
+    timeline, in one call."""
+    id: str
+    status: Literal["pending_kyc_review", "booked", "rejected", "cancelled"]
+    kyc_status: Literal["pending", "verified", "needs_resubmission", "rejected"]
+    version: int
+    admin_note: Optional[str] = None
+    customer_id: str
+    customer_name: Optional[str] = None
+    customer_email: Optional[str] = None
+    customer_phone: Optional[str] = None
+    project_name: Optional[str] = None
+    unit_number: Optional[str] = None
+    amount: Optional[float] = None
+    payment_id: str
+    payment_method: Optional[str] = None
+    payment_status: Optional[str] = None
+    razorpay_payment_id: Optional[str] = None
+    utr_number: Optional[str] = None
+    documents: List[BookingDocumentChecklistItemDTO]
+    decision_history: List[BookingDecisionHistoryItemDTO]
+    created_at: Optional[datetime]
+    last_activity_at: Optional[datetime]
+
+
+class BookingDecisionRequestDTO(BaseModel):
+    """Body for Approve/Reject/Cancel - `version` must match the booking's
+    current version (from the last GET) or the request is rejected with a 409,
+    the same way another admin's concurrent decision would be."""
+    note: Optional[str] = Field(None, max_length=2000)
+    version: int = Field(..., ge=1)
+
+
+class MyBookingItemDTO(BaseModel):
+    """GET /bookings/mine - the customer's own view of a booking. can_download_receipt
+    is true only once status='booked' (KYC approved) - the frontend should gate
+    the receipt/PDF download button on this flag directly instead of re-deriving
+    it from status/kyc_status."""
+    id: str
+    project_name: Optional[str] = None
+    unit_number: Optional[str] = None
+    amount: Optional[float] = None
+    status: Literal["pending_kyc_review", "booked", "rejected", "cancelled"]
+    kyc_status: Literal["pending", "verified", "needs_resubmission", "rejected"]
+    admin_note: Optional[str] = None
+    can_download_receipt: bool
+    created_at: Optional[datetime]
+    last_activity_at: Optional[datetime]
 
 
 class MarketTrendOutDTO(BaseModel):

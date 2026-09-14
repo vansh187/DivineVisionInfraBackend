@@ -16,5 +16,6 @@ from .persistence_chatbot import persistenceChatbot
 from .persistence_inventory import persistenceInventory
 from .persistence_milestone import persistenceMilestone
 from .persistence_password_reset import persistencePasswordReset
+from .persistence_booking import persistenceBooking
 
-__all__ = ["PersistenceDB", "persistenceCustomer", "persistenceCustomerProfile", "persistenceBroker", "persistenceAdmin", "persistenceAdminCustomers", "persistenceAdminBrokers", "persistenceAdminVisits", "persistenceDocument", "persistenceKyc", "persistencePayment", "persistenceVisit", "persistenceMarketTrend", "persistenceBrokerCommission", "persistenceChatbot", "persistenceInventory", "persistenceMilestone", "persistencePasswordReset"]
+__all__ = ["PersistenceDB", "persistenceCustomer", "persistenceCustomerProfile", "persistenceBroker", "persistenceAdmin", "persistenceAdminCustomers", "persistenceAdminBrokers", "persistenceAdminVisits", "persistenceDocument", "persistenceKyc", "persistencePayment", "persistenceVisit", "persistenceMarketTrend", "persistenceBrokerCommission", "persistenceChatbot", "persistenceInventory", "persistenceMilestone", "persistencePasswordReset", "persistenceBooking"]
