@@ -41,7 +41,7 @@ def _client_ip(request: Request) -> str:
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
-    RATE_LIMIT_EXEMPT_PATHS = {"/admin/customers", "/admin/brokers"}
+    RATE_LIMIT_EXEMPT_PATHS = {"/admin/customers", "/admin/brokers", "/admin/visits"}
 
     # Caps how many distinct client:path buckets are retained at once - without a bound,
     # a client that hits an endpoint once and never returns leaves its bucket in memory
