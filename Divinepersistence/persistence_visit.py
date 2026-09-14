@@ -17,8 +17,9 @@ class VisitModel(Base):
     customer_contact = Column(String(200))
     visit_date = Column(Date, nullable=False)
     # "HH:MM", kept as text - no timezone math needed, round-trips exactly what was typed.
-    # Nullable: a callback request only has a preferred_window until a broker
-    # locks in an exact time.
+    # Nullable at the DB level for older rows from when a website callback
+    # request had only a preferred_window and no exact time; both flows now
+    # always supply one at creation.
     visit_time = Column(String(5))
     notes = Column(Text)
     # scheduled | confirmed | completed | follow_up | no_show | converted | cancelled
@@ -34,7 +35,10 @@ class VisitModel(Base):
     assigned_to = Column(String(200))  # free-text staff name - no Staff table yet
     # Website "request a callback" form fields (see scripts/add_site_visit_request_fields.py).
     customer_email = Column(String(255))
-    preferred_window = Column(String(20))  # 'today' | 'tomorrow' | 'weekend'
+    # 'today' | 'tomorrow' | 'weekend' - legacy: the website flow originally
+    # collected a loose preferred window instead of an exact date/time. Kept
+    # for old rows; nothing writes it anymore (see serviceVisit.request_callback).
+    preferred_window = Column(String(20))
     # Set only when POST /visits/request was called with a valid customer bearer
     # token (see DivineService.auth.get_optional_customer) - null for an
     # anonymous request or a broker-scheduled visit. Deliberately not a real FK
@@ -89,18 +93,18 @@ class persistenceVisit:
         ))
         queries.setdefault("create_visit_request", (
             'INSERT INTO divine_site_visits('
-            'id, customer_name, customer_contact, customer_email, customer_id, visit_date, notes, status, '
-            'origin_type, source, project_name, preferred_window, created_date, last_updated_date) '
+            'id, customer_name, customer_contact, customer_email, customer_id, visit_date, visit_time, notes, status, '
+            'origin_type, source, project_name, created_date, last_updated_date) '
             'VALUES ('
-            ':id, :customer_name, :customer_contact, :customer_email, :customer_id, :visit_date, :notes, :status, '
-            ':origin_type, :source, :project_name, :preferred_window, :created_date, :last_updated_date) '
+            ':id, :customer_name, :customer_contact, :customer_email, :customer_id, :visit_date, :visit_time, :notes, :status, '
+            ':origin_type, :source, :project_name, :created_date, :last_updated_date) '
             'RETURNING *;'
         ))
         self._queries = queries
         self._engine = engine
 
     def create_visit_request(self, id: str, customer_name: str, customer_contact: str, customer_email: str,
-                              visit_date, notes: str, project_name: str, preferred_window: str,
+                              visit_date, visit_time: str, notes: str, project_name: str,
                               status: str = "scheduled", origin_type: str = "CUSTOMER", source: str = "Website",
                               customer_id: str = None) -> VisitModel:
         with self._session_factory() as db:
@@ -114,12 +118,12 @@ class persistenceVisit:
                     "customer_contact": customer_contact,
                     "customer_email": customer_email,
                     "visit_date": visit_date,
+                    "visit_time": visit_time,
                     "notes": notes,
                     "status": status,
                     "origin_type": origin_type,
                     "source": source,
                     "project_name": project_name,
-                    "preferred_window": preferred_window,
                     "created_date": now,
                     "last_updated_date": now,
                 }

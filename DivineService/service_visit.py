@@ -1,11 +1,10 @@
 import logging
 import uuid
-from datetime import datetime, date, timedelta
+from datetime import datetime, date
 from Divinepersistence import persistenceVisit, persistenceCustomer
 
 logger = logging.getLogger(__name__)
 
-_SATURDAY = 5
 _VALID_PROJECTS = ("ops-divine-greens", "suraksha-enclave")
 
 
@@ -63,24 +62,14 @@ class serviceVisit:
             project_name=validated_project,
         )
 
-    def _resolve_preferred_window_date(self, preferred_window: str, today: date) -> date:
-        try:
-            if preferred_window == "today":
-                return today
-            if preferred_window == "tomorrow":
-                return today + timedelta(days=1)
-            if preferred_window == "weekend":
-                days_ahead = (_SATURDAY - today.weekday()) % 7
-                return today + timedelta(days=days_ahead)
-            raise ValueError("invalid_preferred_window")
-        except (TypeError, OverflowError):
-            raise ValueError("invalid_preferred_window")
-
-    def request_callback(self, project: str, preferred_window: str, customer_name: str, customer_contact: str,
-                          customer_email: str = None, notes: str = None, customer_id: str = None):
-        """Public website 'request a callback' form - no broker/exact date-time
-        yet (see persistenceVisit.create_visit_request). customer_id is set only
-        when the caller sent a valid customer bearer token (optional auth - see
+    def request_callback(self, project: str, visit_date: str, visit_time: str, customer_name: str,
+                          customer_contact: str, customer_email: str = None, notes: str = None,
+                          customer_id: str = None):
+        """Public website 'request a callback' form - the visitor picks the
+        exact date/time directly (same validation as the broker's
+        schedule_visit) so the visit is created as 'scheduled' right away, not
+        a separate pending state. customer_id is set only when the caller sent
+        a valid customer bearer token (optional auth - see
         DivineService.auth.get_optional_customer); an anonymous submission
         leaves it None and is matched later purely by email. Raises ValueError
         on bad input (caught by the router and turned into a 400); anything
@@ -98,7 +87,9 @@ class serviceVisit:
             if not clean_contact:
                 raise ValueError("invalid_contact")
 
-            visit_date = self._resolve_preferred_window_date(preferred_window, datetime.now().date())
+            parsed_date = self._parse_date(visit_date)
+            normalized_time = self._normalize_time(visit_time)
+
             visit_id = str(uuid.uuid4())
             return self._persistence.create_visit_request(
                 id=visit_id,
@@ -106,11 +97,11 @@ class serviceVisit:
                 customer_contact=clean_contact,
                 customer_email=(customer_email or "").strip() or None,
                 customer_id=customer_id,
-                visit_date=visit_date,
+                visit_date=parsed_date,
+                visit_time=normalized_time,
                 notes=(notes or "").strip() or None,
                 project_name=validated_project,
-                preferred_window=preferred_window,
-                status="requested",
+                status="scheduled",
                 origin_type="CUSTOMER",
                 source="Website",
             )

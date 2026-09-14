@@ -345,13 +345,15 @@ class VisitOutDTO(BaseModel):
 
 class VisitRequestCallbackDTO(BaseModel):
     """Public website 'Request a callback' form (POST /visits/request) - no
-    login required. A broker picks the request up later and fills in the
-    exact visit date/time."""
+    login required. Visitor picks the exact date/time directly (same shape as
+    the broker's POST /visits), so the visit is created as 'scheduled', not a
+    separate pending state."""
     customer_name: str = Field(..., min_length=1, max_length=200)
     customer_contact: str = Field(..., min_length=1, max_length=200)
     customer_email: Optional[EmailStr] = None
     project: str = Field(..., min_length=1, max_length=50)
-    preferred_window: Literal["today", "tomorrow", "weekend"]
+    date: str = Field(..., description="YYYY-MM-DD")
+    time: str = Field(..., description="HH:MM, 24-hour")
     notes: Optional[str] = Field(None, max_length=1000)
 
 

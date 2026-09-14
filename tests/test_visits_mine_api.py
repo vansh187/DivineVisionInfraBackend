@@ -69,13 +69,15 @@ def setup_module(module):
         phone="9000000011", project="ops-divine-greens", first_name="Broker", last_name="One",
     )
 
-    # Self-requested (website) visit for the customer.
+    # Self-requested (website) visit for the customer - the website flow now
+    # collects an exact date/time and creates it 'scheduled' directly, same as
+    # the broker flow (see serviceVisit.request_callback).
     persistenceVisit().create_visit_request(
         id=str(uuid.uuid4()),
         customer_name="Rehan Sharma", customer_contact="9999999998",
         customer_email="mine.customer@example.com",
-        visit_date=date(2026, 9, 19), notes="corner plot",
-        project_name="suraksha-enclave", preferred_window="weekend", status="requested",
+        visit_date=date(2026, 9, 19), visit_time="15:00", notes="corner plot",
+        project_name="suraksha-enclave", status="scheduled",
     )
 
     # Broker-scheduled visit for the same customer (matched by email).
@@ -92,8 +94,8 @@ def setup_module(module):
         id=str(uuid.uuid4()),
         customer_name="Someone Else", customer_contact="8888888888",
         customer_email="someone.else@example.com",
-        visit_date=date(2026, 9, 21), notes=None,
-        project_name="suraksha-enclave", preferred_window="today", status="requested",
+        visit_date=date(2026, 9, 21), visit_time="10:00", notes=None,
+        project_name="suraksha-enclave", status="scheduled",
     )
 
     # Tagged with customer_id directly and no customer_email at all - must
@@ -103,8 +105,8 @@ def setup_module(module):
         id=str(uuid.uuid4()),
         customer_name="Id Only", customer_contact="7777777777",
         customer_email=None, customer_id=_CUSTOMER_ID_ONLY_ID,
-        visit_date=date(2026, 9, 22), notes=None,
-        project_name="ops-divine-greens", preferred_window="tomorrow", status="requested",
+        visit_date=date(2026, 9, 22), visit_time="09:00", notes=None,
+        project_name="ops-divine-greens", status="scheduled",
     )
 
 
@@ -143,19 +145,19 @@ def test_list_mine_returns_both_website_and_broker_visits():
     data = r.json()
     assert len(data) == 2
 
-    requested = next(v for v in data if v["status"] == "requested")
-    assert requested["broker_id"] is None
-    assert requested["date"] is None
-    assert requested["time"] is None
-    assert requested["source"] == "website"
-    assert requested["project"] == "suraksha-enclave"
+    website = next(v for v in data if v["source"] == "website")
+    assert website["broker_id"] is None
+    assert website["date"] == "2026-09-19"
+    assert website["time"] == "15:00"
+    assert website["status"] == "scheduled"
+    assert website["project"] == "suraksha-enclave"
 
-    scheduled = next(v for v in data if v["status"] == "scheduled")
-    assert scheduled["broker_id"] is not None
-    assert scheduled["date"] == "2026-09-20"
-    assert scheduled["time"] == "11:00"
-    assert scheduled["source"] == "broker"
-    assert scheduled["project"] == "ops-divine-greens"
+    broker_scheduled = next(v for v in data if v["source"] == "broker")
+    assert broker_scheduled["broker_id"] is not None
+    assert broker_scheduled["date"] == "2026-09-20"
+    assert broker_scheduled["time"] == "11:00"
+    assert broker_scheduled["status"] == "scheduled"
+    assert broker_scheduled["project"] == "ops-divine-greens"
 
     names = {v["customer_name"] for v in data}
     assert names == {"Rehan Sharma"}
@@ -204,12 +206,14 @@ def test_authenticated_request_callback_is_tagged_with_customer_id_and_found_by_
             "customer_name": "Live Request",
             "customer_contact": "6666666666",
             "project": "suraksha-enclave",
-            "preferred_window": "today",
+            "date": "2026-09-23",
+            "time": "14:00",
         },
         headers={"Authorization": f"Bearer {token}"},
     )
     assert r.status_code == 201, r.text
     assert r.json()["broker_id"] is None
+    assert r.json()["status"] == "scheduled"
 
     mine = client.get("/visits/mine", headers={"Authorization": f"Bearer {token}"})
     assert mine.status_code == 200, mine.text
@@ -225,8 +229,10 @@ def test_anonymous_request_callback_still_succeeds_without_a_token():
             "customer_name": "Anonymous Caller",
             "customer_contact": "5555555555",
             "project": "suraksha-enclave",
-            "preferred_window": "today",
+            "date": "2026-09-24",
+            "time": "16:00",
         },
     )
     assert r.status_code == 201, r.text
     assert r.json()["broker_id"] is None
+    assert r.json()["status"] == "scheduled"
