@@ -9,16 +9,18 @@ create_visit: |
     :origin_type, :project_name, :created_date, :last_updated_date
   )
   RETURNING *;
-# Public "request a callback" website form (POST /visits/request) - no broker
-# or exact time yet, see scripts/add_site_visit_request_fields.py.
+# Public "request a callback" website form (POST /visits/request) - the
+# visitor picks the exact date/time directly (same shape as POST /visits), so
+# this is created as 'scheduled', not a separate pending state. No broker yet
+# - see scripts/add_site_visit_request_fields.py.
 create_visit_request: |
   INSERT INTO divine_site_visits(
-    id, customer_name, customer_contact, customer_email, customer_id, visit_date, notes, status,
-    origin_type, source, project_name, preferred_window, created_date, last_updated_date
+    id, customer_name, customer_contact, customer_email, customer_id, visit_date, visit_time, notes, status,
+    origin_type, source, project_name, created_date, last_updated_date
   )
   VALUES (
-    :id, :customer_name, :customer_contact, :customer_email, :customer_id, :visit_date, :notes, :status,
-    :origin_type, :source, :project_name, :preferred_window, :created_date, :last_updated_date
+    :id, :customer_name, :customer_contact, :customer_email, :customer_id, :visit_date, :visit_time, :notes, :status,
+    :origin_type, :source, :project_name, :created_date, :last_updated_date
   )
   RETURNING *;
 get_by_id: |

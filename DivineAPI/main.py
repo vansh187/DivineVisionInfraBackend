@@ -26,6 +26,8 @@ from DivineAPI.zoho_admin_api import router as zoho_admin_router
 from DivineAPI.loan_api import router as loan_router
 from DivineAPI.inventory_api import router as inventory_router
 from DivineAPI.jobs_api import router as jobs_router
+from DivineAPI.booking_api import router as booking_router
+from DivineAPI.admin_booking_kyc_api import router as admin_booking_kyc_router
 from DivineService import serviceHealth
 
 
@@ -41,7 +43,7 @@ def _client_ip(request: Request) -> str:
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
-    RATE_LIMIT_EXEMPT_PATHS = {"/admin/customers", "/admin/brokers", "/admin/visits"}
+    RATE_LIMIT_EXEMPT_PATHS = {"/admin/customers", "/admin/brokers", "/admin/visits", "/admin/bookings"}
 
     # Caps how many distinct client:path buckets are retained at once - without a bound,
     # a client that hits an endpoint once and never returns leaves its bucket in memory
@@ -122,3 +124,5 @@ app.include_router(zoho_admin_router)
 app.include_router(loan_router)
 app.include_router(inventory_router)
 app.include_router(jobs_router)
+app.include_router(booking_router)
+app.include_router(admin_booking_kyc_router)

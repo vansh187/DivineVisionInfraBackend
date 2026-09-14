@@ -380,6 +380,12 @@ class serviceDocument:
     def upload_co_applicant_photo(self, file_bytes: bytes, content_type: str, owner_id: str, owner_role: str):
         return self._upload_photo(file_bytes, content_type, "co_applicant_photo", owner_id, owner_role)
 
+    def upload_cancelled_cheque(self, file_bytes: bytes, content_type: str, owner_id: str, owner_role: str):
+        """Bank-account-verification document for the Booking KYC review checklist
+        (needed to know where an approved refund should go, if one is ever needed
+        later) - same storage/validation path as the other identity photos."""
+        return self._upload_photo(file_bytes, content_type, "cancelled_cheque", owner_id, owner_role)
+
     def upload_booking_application(
         self,
         file_bytes: bytes,
@@ -401,7 +407,7 @@ class serviceDocument:
         `inventory_id` is a safety-net: if the payment settled through an older flow that
         never carried it, this confirms the plot as 'booked' here (idempotent - a no-op
         when servicePayment already flipped it). The result is attached to the returned
-        doc as `doc.inventory_id` / `doc.inventory_status` ("booked" | "conflict" | None)."""
+        doc as `doc.inventory_id` / `doc.inventory_status` ("pending_kyc_review" | "conflict" | None)."""
         if not file_bytes:
             raise ValueError("empty_file")
         if len(file_bytes) > MAX_BOOKING_APPLICATION_UPLOAD_BYTES:
@@ -550,7 +556,15 @@ class serviceDocument:
         Trust rule: the plot is taken from the PAYMENT (purpose 'plot_booking' +
         payment.inventory_id), never from the client form field. The form field is
         only echoed back on the doc and, when the payment carries no inventory_id,
-        used purely to log the mismatch."""
+        used purely to log the mismatch.
+
+        Holds the unit for KYC review (does NOT book it outright) - same as the
+        payment-settlement path in DivineService/service_payment.py. This is a
+        safety net for when that path's own hold didn't fire (a transient error,
+        or the client uploaded the booking application before the webhook/verify
+        call landed); it must apply the SAME gate, not a shortcut around it -
+        otherwise a customer could skip KYC review entirely just by uploading
+        this document before the payment's own settlement runs."""
         try:
             payment_purpose = (getattr(payment, "purpose", None) or "other")
             payment_inventory_id = getattr(payment, "inventory_id", None)
@@ -567,10 +581,10 @@ class serviceDocument:
             if self._inventory_persistence is None:
                 return
 
-            unit = self._inventory_persistence.book_unit(
+            unit = self._inventory_persistence.hold_for_kyc_review(
                 id=payment_inventory_id, payment_id=getattr(payment, "id", None), customer_id=owner_id,
             )
-            doc.inventory_status = "booked" if unit is not None else "conflict"
+            doc.inventory_status = "pending_kyc_review" if unit is not None else "conflict"
         except Exception as e:
             logger.warning("document_inventory_confirm_failed error=%s", e)
             try:
@@ -665,3 +679,23 @@ class serviceDocument:
         bucket = getattr(doc, "storage_bucket", None) or self._bucket
         signed_url = self._sign_url(doc.storage_path, bucket=bucket)
         return doc, signed_url, DEFAULT_SIGNED_URL_EXPIRY_SECONDS
+
+    def admin_get_latest(self, document_type: str, owner_id: str):
+        """Same lookup as get_latest(), but for an admin reviewing a CUSTOMER's
+        documents (e.g. the Booking KYC review screen) - no ownership check,
+        since the caller isn't the document's owner by design. Authorization is
+        the router's get_current_admin dependency, not this method. Returns
+        None (not an exception) when the customer hasn't uploaded that document
+        type yet, since a missing document is an expected, common state for a
+        checklist UI, not an error."""
+        try:
+            doc = self._persistence.get_latest_by_owner_and_type(owner_id, (document_type or "").strip())
+            if not doc:
+                return None, None, None
+            bucket = getattr(doc, "storage_bucket", None) or self._bucket
+            signed_url = self._sign_url(doc.storage_path, bucket=bucket)
+            return doc, signed_url, DEFAULT_SIGNED_URL_EXPIRY_SECONDS
+        except Exception as e:
+            logger.warning("admin_get_latest_document_failed document_type=%s owner_id=%s error=%s",
+                           document_type, owner_id, e)
+            return None, None, None

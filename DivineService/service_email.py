@@ -246,6 +246,70 @@ class serviceEmail:
             logger.warning("installment_receipt_failed email=%s error=%s", email, e)
             return False
 
+    def send_kyc_decision_async(self, email: str, **kwargs) -> None:
+        self._run_async(self.send_kyc_decision, email, **kwargs)
+
+    def send_kyc_decision(self, email: str, decision: str, first_name: str = None, project_name: str = None,
+                          unit_number: str = None, booking_id: str = None, admin_note: str = None,
+                          refund_instructions: str = None, amount=None, currency: str = "INR") -> bool:
+        """KYC review outcome email (post-payment document review) - 'approved' or
+        'rejected'. Carries the admin's own typed note so the customer knows exactly
+        why, and (on rejection) how their refund will reach them. Never raises."""
+        try:
+            to = (email or "").strip()
+            if not to or "@" not in to:
+                return False
+            name = (first_name or "").strip() or "there"
+            approved = (decision or "").strip().lower() == "approved"
+            money = _format_amount(amount, currency) or ""
+            rows = []
+            if booking_id:
+                rows.append(("Booking ID", str(booking_id).strip()))
+            if project_name:
+                rows.append(("Project", str(project_name).strip()))
+            if unit_number:
+                rows.append(("Plot", str(unit_number).strip()))
+            if money:
+                rows.append(("Amount", money))
+
+            if approved:
+                headline = "KYC Verified — Booking Confirmed"
+                body = [
+                    "Your KYC documents have been verified and your booking is now confirmed.",
+                    "You can now download your official booking receipt from your account.",
+                ]
+                cta_label = "Download Receipt"
+                accent = "#1e8449"
+            else:
+                headline = "KYC Review — Action Needed"
+                body = [
+                    "After reviewing your submitted documents, we're unable to confirm this "
+                    "booking at this time.",
+                ]
+                if refund_instructions:
+                    body.append(refund_instructions)
+                cta_label = "Contact Support"
+                accent = "#c0392b"
+
+            note = (admin_note or "").strip()
+            if note:
+                body.append(f"Note from our team: <em>{_escape(note)}</em>")
+
+            html = _luxury_email_html(
+                headline=headline, preheader=headline, greeting_name=name,
+                body_paragraphs=body, detail_rows=rows, cta_label=cta_label,
+                cta_url=_payments_deeplink(self._customer_login_url),
+                footer_note=f"For assistance, contact {_SUPPORT_LINE}.",
+                has_logo=bool(self._logo_b64), accent=accent,
+            )
+            text = _luxury_email_text(headline, name, body, rows, cta_label,
+                                      _payments_deeplink(self._customer_login_url))
+            subject = f"{headline} — Divine Vision Infra"
+            return self._send(to=to, subject=subject, html=html, text=text)
+        except Exception as e:
+            logger.warning("kyc_decision_email_failed email=%s error=%s", email, e)
+            return False
+
     # ----------------------------------------------------------------- private
 
     def _send(self, to: str, subject: str, html: str, text: str = None, attachments: list = None) -> bool:
@@ -320,6 +384,15 @@ def dispatch_booking_confirmation_email(email_service, email: str, first_name: s
             )
     except Exception as e:
         logger.warning("booking_confirmation_dispatch_failed error=%s", e)
+
+
+def dispatch_kyc_decision_email(email_service, email: str, **kwargs) -> None:
+    """Fire-and-forget KYC approve/reject notification. Never raises."""
+    try:
+        if email_service and getattr(email_service, "enabled", False) and email:
+            email_service.send_kyc_decision_async(email, **kwargs)
+    except Exception as e:
+        logger.warning("kyc_decision_dispatch_failed error=%s", e)
 
 
 def dispatch_installment_receipt_email(email_service, email: str, **kwargs) -> None:

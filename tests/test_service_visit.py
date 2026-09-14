@@ -84,6 +84,92 @@ def test_schedule_visit_blanks_optional_fields_to_none():
     assert kwargs["notes"] is None
 
 
+# ---------- request_callback ----------
+
+def _callback_kwargs(**overrides):
+    kwargs = dict(
+        project="suraksha-enclave", visit_date="2026-09-20", visit_time="11:00",
+        customer_name="Rehan Sharma", customer_contact="9999999998",
+        customer_email="rehan@example.com", notes="corner plot",
+    )
+    kwargs.update(overrides)
+    return kwargs
+
+
+def test_request_callback_rejects_unknown_project():
+    svc, _ = _service()
+    try:
+        svc.request_callback(**_callback_kwargs(project="not-a-real-project"))
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert str(e) == "invalid_project"
+
+
+def test_request_callback_rejects_blank_customer_name():
+    svc, _ = _service()
+    try:
+        svc.request_callback(**_callback_kwargs(customer_name="   "))
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert str(e) == "customer_name_required"
+
+
+def test_request_callback_rejects_blank_contact():
+    svc, _ = _service()
+    try:
+        svc.request_callback(**_callback_kwargs(customer_contact="   "))
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert str(e) == "invalid_contact"
+
+
+def test_request_callback_rejects_invalid_date():
+    svc, _ = _service()
+    try:
+        svc.request_callback(**_callback_kwargs(visit_date="20-09-2026"))
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert str(e) == "invalid_date"
+
+
+def test_request_callback_rejects_invalid_time():
+    svc, _ = _service()
+    try:
+        svc.request_callback(**_callback_kwargs(visit_time="11 AM"))
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert str(e) == "invalid_time"
+
+
+def test_request_callback_happy_path_creates_scheduled_website_visit():
+    svc, persistence = _service()
+    persistence.create_visit_request.return_value = MagicMock(id="v1", status="scheduled")
+
+    svc.request_callback(**_callback_kwargs(customer_id="C00001"))
+
+    _, kwargs = persistence.create_visit_request.call_args
+    assert kwargs["customer_name"] == "Rehan Sharma"
+    assert kwargs["customer_contact"] == "9999999998"
+    assert kwargs["customer_email"] == "rehan@example.com"
+    assert kwargs["customer_id"] == "C00001"
+    assert kwargs["project_name"] == "suraksha-enclave"
+    assert kwargs["visit_date"].isoformat() == "2026-09-20"
+    assert kwargs["visit_time"] == "11:00"
+    assert kwargs["status"] == "scheduled"
+    assert kwargs["origin_type"] == "CUSTOMER"
+    assert kwargs["source"] == "Website"
+
+
+def test_request_callback_anonymous_leaves_customer_id_none():
+    svc, persistence = _service()
+    persistence.create_visit_request.return_value = MagicMock(id="v1", status="scheduled")
+
+    svc.request_callback(**_callback_kwargs())
+
+    _, kwargs = persistence.create_visit_request.call_args
+    assert kwargs["customer_id"] is None
+
+
 # ---------- list_visits ----------
 
 def test_list_visits_delegates_to_persistence():

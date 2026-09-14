@@ -17,9 +17,11 @@ _visit_service = serviceVisit()
 
 
 def _to_visit_out(record) -> VisitOutDTO:
-    # A "requested" visit (website self-service, no broker/exact slot yet) shows
-    # date/time as null rather than the internally-stored placeholder date used
-    # for sorting - see serviceVisit._resolve_preferred_window_date.
+    # "requested" is a legacy/safety-net status - the website flow no longer
+    # produces it (POST /visits/request now collects an exact date/time and
+    # creates the visit as 'scheduled' directly, like the broker flow), but an
+    # old row or a future non-website producer of "requested" still shows
+    # date/time as null rather than whatever placeholder happens to be stored.
     is_requested = record.status == "requested"
     return VisitOutDTO(
         id=record.id,
@@ -51,11 +53,13 @@ def _require_customer(current_user: dict) -> str:
 
 @router.post("/request", response_model=VisitOutDTO, status_code=201)
 def request_callback(dto: VisitRequestCallbackDTO, current_customer: dict = Depends(get_optional_customer)):
-    """Public website 'Request a callback' form - no login required. Subject to
-    the app's default IP-based rate limit (not exempted) since it's an
-    unauthenticated write endpoint. When called with a valid customer bearer
-    token, the visit is tagged with that customer_id so it later shows up
-    precisely under GET /visits/mine; an anonymous call (no token, or a
+    """Public website 'Request a callback' form - no login required. Takes the
+    same date/time shape as the broker's POST /visits, so it's created as
+    'scheduled' directly (validated the same way: 400 invalid_date/invalid_time).
+    Subject to the app's default IP-based rate limit (not exempted) since it's
+    an unauthenticated write endpoint. When called with a valid customer
+    bearer token, the visit is tagged with that customer_id so it later shows
+    up precisely under GET /visits/mine; an anonymous call (no token, or a
     token that isn't a valid customer one) still succeeds exactly as before,
     matched later by email only."""
     start = time.monotonic()
@@ -63,7 +67,8 @@ def request_callback(dto: VisitRequestCallbackDTO, current_customer: dict = Depe
     try:
         record = _visit_service.request_callback(
             project=dto.project,
-            preferred_window=dto.preferred_window,
+            visit_date=dto.date,
+            visit_time=dto.time,
             customer_name=dto.customer_name,
             customer_contact=dto.customer_contact,
             customer_email=dto.customer_email,

@@ -139,3 +139,41 @@ unbook_unit: |
       last_updated_date = :now
   WHERE id = :id AND status = 'booked'
   RETURNING *;
+
+# ---- Booking KYC review (see Divinepersistence/persistence_booking.py) ----
+# Payment settlement now HOLDS the unit for admin KYC review instead of
+# immediately booking it - book_unit (above) is unchanged/still used by the
+# broker-confirms-cash flow, which has no KYC review step.
+hold_for_kyc_review: |
+  UPDATE divine_project_inventory
+  SET status = 'pending_kyc_review',
+      booked_at = :now,
+      booked_payment_id = :payment_id,
+      booked_by = :customer_id,
+      reserved_by_broker_id = NULL,
+      reserved_at = NULL,
+      reserved_until = NULL,
+      last_updated_date = :now
+  WHERE id = :id
+    AND (
+      status IN ('available', 'held')
+      OR (status = 'pending_kyc_review' AND booked_payment_id = :payment_id)
+    )
+  RETURNING *;
+
+confirm_booking_after_kyc: |
+  UPDATE divine_project_inventory
+  SET status = 'booked',
+      last_updated_date = :now
+  WHERE id = :id AND status = 'pending_kyc_review' AND booked_payment_id = :payment_id
+  RETURNING *;
+
+release_from_kyc_review: |
+  UPDATE divine_project_inventory
+  SET status = 'available',
+      booked_at = NULL,
+      booked_payment_id = NULL,
+      booked_by = NULL,
+      last_updated_date = :now
+  WHERE id = :id AND status = 'pending_kyc_review' AND booked_payment_id = :payment_id
+  RETURNING *;

@@ -1,7 +1,7 @@
 # SQL queries for the payments API
 create_payment: |
-  INSERT INTO divine_payments(id, owner_id, owner_role, amount, currency, status, method, purpose, inventory_id, installment_no, due_date, razorpay_order_id, notes, created_date, last_updated_date)
-  VALUES (:id, :owner_id, :owner_role, :amount, :currency, :status, :method, :purpose, :inventory_id, :installment_no, :due_date, :razorpay_order_id, :notes, :created_date, :last_updated_date)
+  INSERT INTO divine_payments(id, owner_id, owner_role, amount, currency, status, method, purpose, inventory_id, installment_no, due_date, razorpay_order_id, utr_number, notes, created_date, last_updated_date)
+  VALUES (:id, :owner_id, :owner_role, :amount, :currency, :status, :method, :purpose, :inventory_id, :installment_no, :due_date, :razorpay_order_id, :utr_number, :notes, :created_date, :last_updated_date)
   RETURNING *;
 get_by_id: |
   SELECT * FROM divine_payments WHERE id = :id LIMIT 1;
@@ -13,5 +13,11 @@ update_payment_status: |
   WHERE id = :id RETURNING *;
 flag_manual_review: |
   UPDATE divine_payments SET needs_manual_review = true, manual_review_reason = :reason,
+  last_updated_date = :last_updated_date
+  WHERE id = :id RETURNING *;
+update_refund_status: |
+  UPDATE divine_payments SET refund_status = :refund_status, refund_amount = :refund_amount,
+  razorpay_refund_id = :razorpay_refund_id, refund_initiated_date = :refund_initiated_date,
+  refund_completed_date = :refund_completed_date, refund_note = :refund_note,
   last_updated_date = :last_updated_date
   WHERE id = :id RETURNING *;

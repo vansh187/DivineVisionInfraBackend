@@ -1,5 +1,5 @@
 import json
-from sqlalchemy import Column, String, DateTime, Date, Integer, Numeric, JSON, Boolean, text
+from sqlalchemy import Column, String, DateTime, Date, Integer, Numeric, JSON, Boolean, Text, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import IntegrityError
 from datetime import datetime, timezone
@@ -36,6 +36,21 @@ class PaymentModel(Base):
     razorpay_order_id = Column(String(64), nullable=True, index=True)
     razorpay_payment_id = Column(String(64))
     razorpay_signature = Column(String(255))
+    # Customer-entered bank reference number for an "rtgs_neft" payment (collected on
+    # the payment-method entry screen) - there's no gateway transaction id for those,
+    # this is the equivalent of razorpay_payment_id for that method.
+    utr_number = Column(String(50))
+    # Refund bookkeeping - see DivineService/service_payment.py::initiate_refund.
+    # 'none' | 'pending' | 'processing' | 'completed' | 'failed'. 'pending'/'processing'
+    # cover both an in-flight Razorpay refund and a cash/rtgs_neft refund the business
+    # still owes manually; 'completed' is set by the admin once a manual refund is
+    # actually paid out (Razorpay refunds are auto-completed by the gateway).
+    refund_status = Column(String(20), nullable=False, default="none", server_default="none")
+    refund_amount = Column(Numeric(12, 2))
+    razorpay_refund_id = Column(String(64))
+    refund_initiated_date = Column(DateTime)
+    refund_completed_date = Column(DateTime)
+    refund_note = Column(Text)
     notes = Column(JSON().with_variant(JSONB, "postgresql"))
     created_date = Column(DateTime)
     last_updated_date = Column(DateTime)
@@ -46,8 +61,8 @@ class persistencePayment:
         self._session_factory = session_factory
         queries = load_queries("payment_queries.yaml")
         queries.setdefault("create_payment", (
-            'INSERT INTO divine_payments(id, owner_id, owner_role, amount, currency, status, method, purpose, inventory_id, installment_no, due_date, razorpay_order_id, notes, created_date, last_updated_date) '
-            'VALUES (:id, :owner_id, :owner_role, :amount, :currency, :status, :method, :purpose, :inventory_id, :installment_no, :due_date, :razorpay_order_id, :notes, :created_date, :last_updated_date) RETURNING *;'
+            'INSERT INTO divine_payments(id, owner_id, owner_role, amount, currency, status, method, purpose, inventory_id, installment_no, due_date, razorpay_order_id, utr_number, notes, created_date, last_updated_date) '
+            'VALUES (:id, :owner_id, :owner_role, :amount, :currency, :status, :method, :purpose, :inventory_id, :installment_no, :due_date, :razorpay_order_id, :utr_number, :notes, :created_date, :last_updated_date) RETURNING *;'
         ))
         queries.setdefault("get_by_id", 'SELECT * FROM divine_payments WHERE id = :id LIMIT 1;')
         queries.setdefault("get_by_razorpay_order_id", 'SELECT * FROM divine_payments WHERE razorpay_order_id = :razorpay_order_id LIMIT 1;')
@@ -60,10 +75,17 @@ class persistencePayment:
             'UPDATE divine_payments SET needs_manual_review = true, manual_review_reason = :reason, '
             'last_updated_date = :last_updated_date WHERE id = :id RETURNING *;'
         ))
+        queries.setdefault("update_refund_status", (
+            'UPDATE divine_payments SET refund_status = :refund_status, refund_amount = :refund_amount, '
+            'razorpay_refund_id = :razorpay_refund_id, refund_initiated_date = :refund_initiated_date, '
+            'refund_completed_date = :refund_completed_date, refund_note = :refund_note, '
+            'last_updated_date = :last_updated_date '
+            'WHERE id = :id RETURNING *;'
+        ))
         self._queries = queries
         self._engine = engine
 
-    def create_payment(self, id: str, owner_id: str, owner_role: str, amount, currency: str, status: str, razorpay_order_id: str = None, method: str = "razorpay", notes: dict = None, purpose: str = "other", inventory_id: str = None, installment_no: int = None, due_date=None) -> PaymentModel:
+    def create_payment(self, id: str, owner_id: str, owner_role: str, amount, currency: str, status: str, razorpay_order_id: str = None, method: str = "razorpay", notes: dict = None, purpose: str = "other", inventory_id: str = None, installment_no: int = None, due_date=None, utr_number: str = None) -> PaymentModel:
         with self._session_factory() as db:
             try:
                 now = datetime.now(timezone.utc)
@@ -81,6 +103,7 @@ class persistencePayment:
                     "installment_no": installment_no,
                     "due_date": due_date,
                     "razorpay_order_id": razorpay_order_id,
+                    "utr_number": utr_number,
                     "notes": json.dumps(notes or {}),
                     "created_date": now,
                     "last_updated_date": now,
@@ -104,6 +127,30 @@ class persistencePayment:
                     "id": id, "reason": (reason or "")[:60],
                     "last_updated_date": datetime.now(timezone.utc),
                 })
+                row = result.mappings().first()
+                db.commit()
+                return RowWrapper(row) if row else None
+            except Exception:
+                db.rollback()
+                raise
+
+    def update_refund_status(self, id: str, refund_status: str, refund_amount=None,
+                             razorpay_refund_id: str = None, refund_initiated_date=None,
+                             refund_completed_date=None, refund_note: str = None) -> PaymentModel:
+        with self._session_factory() as db:
+            try:
+                query = self._queries.get("update_refund_status")
+                params = {
+                    "id": id,
+                    "refund_status": refund_status,
+                    "refund_amount": refund_amount,
+                    "razorpay_refund_id": razorpay_refund_id,
+                    "refund_initiated_date": refund_initiated_date,
+                    "refund_completed_date": refund_completed_date,
+                    "refund_note": refund_note,
+                    "last_updated_date": datetime.now(timezone.utc),
+                }
+                result = db.execute(text(query), params)
                 row = result.mappings().first()
                 db.commit()
                 return RowWrapper(row) if row else None
