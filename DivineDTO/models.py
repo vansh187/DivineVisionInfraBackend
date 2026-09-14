@@ -310,6 +310,9 @@ class PaymentOutDTO(BaseModel):
 class VisitScheduleRequestDTO(BaseModel):
     customer_name: str = Field(..., min_length=1, max_length=200)
     customer_contact: Optional[str] = Field(None, max_length=200)
+    # Optional: lets GET /visits/mine later match this broker-scheduled visit to
+    # the customer's own account by email, the same way a self-requested one is.
+    customer_email: Optional[EmailStr] = None
     project: str = Field(..., min_length=1, max_length=50)
     date: str = Field(..., description="YYYY-MM-DD")
     time: str = Field(..., description="HH:MM, 24-hour")
@@ -328,6 +331,7 @@ class VisitOutDTO(BaseModel):
     broker_id: Optional[str] = None
     customer_name: str
     customer_contact: Optional[str] = None
+    customer_email: Optional[str] = None
     project: Optional[str] = None
     # None on a "requested" visit - no confirmed slot yet.
     date: Optional[str] = None

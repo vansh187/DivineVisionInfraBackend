@@ -1,11 +1,11 @@
 # SQL queries for the site-visits API
 create_visit: |
   INSERT INTO divine_site_visits(
-    id, broker_id, customer_name, customer_contact, visit_date, visit_time, notes, status,
+    id, broker_id, customer_name, customer_contact, customer_email, visit_date, visit_time, notes, status,
     origin_type, project_name, created_date, last_updated_date
   )
   VALUES (
-    :id, :broker_id, :customer_name, :customer_contact, :visit_date, :visit_time, :notes, :status,
+    :id, :broker_id, :customer_name, :customer_contact, :customer_email, :visit_date, :visit_time, :notes, :status,
     :origin_type, :project_name, :created_date, :last_updated_date
   )
   RETURNING *;
@@ -13,11 +13,11 @@ create_visit: |
 # or exact time yet, see scripts/add_site_visit_request_fields.py.
 create_visit_request: |
   INSERT INTO divine_site_visits(
-    id, customer_name, customer_contact, customer_email, visit_date, notes, status,
+    id, customer_name, customer_contact, customer_email, customer_id, visit_date, notes, status,
     origin_type, source, project_name, preferred_window, created_date, last_updated_date
   )
   VALUES (
-    :id, :customer_name, :customer_contact, :customer_email, :visit_date, :notes, :status,
+    :id, :customer_name, :customer_contact, :customer_email, :customer_id, :visit_date, :notes, :status,
     :origin_type, :source, :project_name, :preferred_window, :created_date, :last_updated_date
   )
   RETURNING *;
@@ -26,6 +26,14 @@ get_by_id: |
 list_by_broker: |
   SELECT * FROM divine_site_visits WHERE broker_id = :broker_id AND status = 'scheduled'
   ORDER BY visit_date ASC, visit_time ASC;
+# A visit matches "mine" when its own customer_id equals the caller's, OR (for
+# a row with no customer_id - an anonymous website request or a broker-
+# scheduled visit) its customer_email matches the caller's account email.
+list_mine: |
+  SELECT * FROM divine_site_visits WHERE
+    (customer_id = :customer_id)
+    OR (customer_id IS NULL AND :email IS NOT NULL AND lower(customer_email) = lower(:email))
+  ORDER BY created_date DESC;
 list_history_by_broker: |
   SELECT * FROM divine_site_visits
   WHERE broker_id = :broker_id
