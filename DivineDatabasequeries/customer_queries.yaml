@@ -9,6 +9,8 @@ get_by_email: |
   SELECT * FROM divine_customer_users WHERE lower(email) = lower(:email) LIMIT 1;
 get_by_id: |
   SELECT * FROM divine_customer_users WHERE id = :id LIMIT 1;
+get_by_ids: |
+  SELECT * FROM divine_customer_users WHERE id IN :ids;
 
 # ---- Customer profile assembly (GET /customer/profile) --------------------
 profile_get_customer: |

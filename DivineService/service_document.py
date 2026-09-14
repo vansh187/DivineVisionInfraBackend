@@ -9,7 +9,7 @@ import numpy as np
 import requests
 from fpdf import FPDF
 from fpdf.enums import XPos, YPos
-from Divinepersistence import persistenceDocument, persistencePayment, persistenceCustomer, persistenceInventory
+from Divinepersistence import persistenceDocument, persistencePayment, persistenceCustomer, persistenceInventory, persistenceBooking
 from DivineDTO.models import DocumentGenerateRequestDTO
 from DivineService.service_email import serviceEmail, dispatch_booking_confirmation_email
 from DivineService.service_payment_schedule import build_payment_schedule
@@ -109,7 +109,7 @@ def _pdf_safe_text(value) -> str:
 class serviceDocument:
     def __init__(self, persistence: persistenceDocument = None, payment_persistence: persistencePayment = None,
                  customer_persistence: persistenceCustomer = None, email: serviceEmail = None,
-                 inventory_persistence: persistenceInventory = None):
+                 inventory_persistence: persistenceInventory = None, booking_persistence: persistenceBooking = None):
         self._persistence = persistence or persistenceDocument()
         self._payment_persistence = payment_persistence or persistencePayment()
         try:
@@ -117,6 +117,16 @@ class serviceDocument:
         except Exception as e:
             logger.warning("document_inventory_persistence_init_failed: %s", e)
             self._inventory_persistence = None
+        # Only used by the booking-application-upload safety net below, to create
+        # the divine_bookings row a fresh KYC-review hold needs - see
+        # _confirm_inventory_booked. Guarded the same way as inventory_persistence:
+        # a missing/broken dependency here must never stop a document from being
+        # stored, it only degrades this one fallback path.
+        try:
+            self._booking_persistence = booking_persistence or persistenceBooking()
+        except Exception as e:
+            logger.warning("document_booking_persistence_init_failed: %s", e)
+            self._booking_persistence = None
         self._supabase_url = os.getenv("SUPABASE_URL")
         self._service_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
         self._bucket = os.getenv("SUPABASE_STORAGE_BUCKET", "documents")
@@ -585,12 +595,39 @@ class serviceDocument:
                 id=payment_inventory_id, payment_id=getattr(payment, "id", None), customer_id=owner_id,
             )
             doc.inventory_status = "pending_kyc_review" if unit is not None else "conflict"
+            if unit is not None:
+                self._ensure_booking_record(payment, unit, owner_id)
         except Exception as e:
             logger.warning("document_inventory_confirm_failed error=%s", e)
             try:
                 doc.inventory_status = "conflict"
             except Exception:
                 pass
+
+    def _ensure_booking_record(self, payment, unit, owner_id: str) -> None:
+        """Creates the divine_bookings row this fresh KYC-review hold needs to
+        actually be reviewable - without it the unit sits 'pending_kyc_review'
+        forever with no way for an admin to Approve/Reject it and no way for the
+        customer to see it under GET /bookings/mine. Idempotent for a repeat run
+        on the same payment_id (persistenceBooking.create_booking returns the
+        existing row instead of erroring) - safe even when
+        _apply_booking_to_inventory already created it and this safety net is
+        just re-confirming the same hold. Never raises - a failure here is
+        logged, not surfaced as a document-upload failure."""
+        if self._booking_persistence is None:
+            return
+        try:
+            self._booking_persistence.create_booking(
+                payment_id=getattr(payment, "id", None),
+                inventory_id=getattr(payment, "inventory_id", None),
+                customer_id=owner_id,
+                project_name=getattr(unit, "project_name", None),
+                unit_number=getattr(unit, "unit_number", None),
+                amount=getattr(payment, "amount", None),
+            )
+        except Exception as e:
+            logger.warning("document_booking_record_create_failed payment_id=%s error=%s",
+                           getattr(payment, "id", None), e)
 
     def _notify_booking_confirmation(self, owner_id: str, owner_role: str, form_data: dict,
                                      amount=None, currency: str = "INR") -> None:

@@ -48,23 +48,46 @@ class serviceBookingKyc:
             self._email_service_override = None
         return self._email_service_override
 
+    def _format_customer_name(self, customer) -> str:
+        if not customer:
+            return None
+        first = (getattr(customer, "first_name", None) or "").strip()
+        last = (getattr(customer, "last_name", None) or "").strip()
+        full = f"{first} {last}".strip()
+        return full or None
+
     def _customer_name(self, customer_id: str) -> str:
         try:
             customer = self._customer_persistence.get_by_id(customer_id)
-            if not customer:
-                return None
-            first = (getattr(customer, "first_name", None) or "").strip()
-            last = (getattr(customer, "last_name", None) or "").strip()
-            full = f"{first} {last}".strip()
-            return full or None
+            return self._format_customer_name(customer)
         except Exception:
             return None
 
-    def _as_queue_item(self, row) -> dict:
+    def _customer_names(self, rows) -> dict:
+        ids = list(dict.fromkeys(
+            getattr(r, "customer_id", None)
+            for r in (rows or [])
+            if getattr(r, "customer_id", None)
+        ))
+        if not ids:
+            return {}
+        try:
+            customers = self._customer_persistence.get_by_ids(ids)
+            return {
+                getattr(c, "id", None): self._format_customer_name(c)
+                for c in customers
+                if getattr(c, "id", None)
+            }
+        except Exception:
+            logger.warning("booking_kyc.customer_batch_lookup_failed", exc_info=True)
+            return {}
+
+    def _as_queue_item(self, row, customer_names: dict = None) -> dict:
+        customer_names = customer_names or {}
         return {
             "id": row.id,
             "customer_id": row.customer_id,
-            "customer_name": self._customer_name(row.customer_id),
+            "customer_name": customer_names.get(row.customer_id),
             "project_name": row.project_name,
             "unit_number": row.unit_number,
             "amount": float(row.amount) if row.amount is not None else None,
@@ -87,9 +110,10 @@ class serviceBookingKyc:
                 total_items = int(rows[0].total_count)
             else:
                 total_items = self._persistence.count_queue(search=search, status=status, kyc_status=kyc_status)
+            customer_names = self._customer_names(rows)
             total_pages = (total_items + page_size - 1) // page_size if page_size else 0
             return {
-                "items": [self._as_queue_item(r) for r in rows],
+                "items": [self._as_queue_item(r, customer_names) for r in rows],
                 "pagination": {
                     "page": page, "page_size": page_size,
                     "total_items": total_items, "total_pages": total_pages,
@@ -276,6 +300,7 @@ class serviceBookingKyc:
                 raise ValueError("version_conflict")
 
             self._persistence.add_decision(booking_id, actor=admin_id, action="approved", note=clean_note)
+            self._payment_service.notify_booking_confirmed(booking.payment_id, booking=updated)
             self._notify_decision(booking, updated, decision="approved", admin_note=clean_note)
             return self.get_detail(booking_id)
         except ValueError:
