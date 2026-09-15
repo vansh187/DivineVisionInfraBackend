@@ -60,6 +60,8 @@ def _handle_decision_errors(e: ValueError):
         raise HTTPException(status_code=409, detail="version_conflict")
     if code == "booking_not_reviewable":
         raise HTTPException(status_code=409, detail="booking_not_reviewable")
+    if code == "booking_not_cancellable":
+        raise HTTPException(status_code=409, detail="booking_not_cancellable")
     if code == "inventory_confirm_failed":
         raise HTTPException(status_code=409, detail="inventory_confirm_failed")
     raise HTTPException(status_code=400, detail=code)
@@ -106,8 +108,11 @@ def reject_booking(booking_id: str, dto: BookingDecisionRequestDTO, current_admi
 @router.post("/{booking_id}/cancel", response_model=BookingDetailDTO)
 def cancel_booking(booking_id: str, dto: BookingDecisionRequestDTO, current_admin: dict = Depends(get_current_admin)):
     """Admin cancels the booking outright (distinct from a KYC Reject - e.g. the
-    customer asked to cancel). Same plot-release + refund-initiate effect as
-    reject, recorded as its own action in the decision history."""
+    customer asked to cancel), whether it's still awaiting KYC review or already
+    booked/approved. Releases the plot, initiates a refund matched to how the
+    payment arrived (automatic for Razorpay, manual instructions for cash /
+    RTGS-NEFT), and always emails the customer with refund instructions - `version`
+    must match the booking's current version (409 version_conflict otherwise)."""
     start = time.monotonic()
     try:
         return _booking_service.cancel(

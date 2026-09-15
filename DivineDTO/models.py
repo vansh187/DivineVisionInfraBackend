@@ -312,6 +312,19 @@ class PaymentOutDTO(BaseModel):
     installment_status: Optional[str] = None
 
 
+class RefundStatusDTO(BaseModel):
+    """Response for POST /admin/payments/{payment_id}/refund/retry - the payment's
+    refund bookkeeping after a retried Razorpay gateway attempt."""
+    id: str
+    method: str
+    refund_status: Literal["none", "pending", "processing", "completed", "failed"]
+    refund_amount: Optional[float] = None
+    razorpay_refund_id: Optional[str] = None
+    refund_initiated_date: Optional[datetime] = None
+    refund_completed_date: Optional[datetime] = None
+    refund_note: Optional[str] = None
+
+
 # project is a plain str (not a Literal) on every visit DTO below so an
 # unrecognized value can be turned into a 400 "invalid_project" by the service
 # layer instead of an automatic 422 from Pydantic - see service_visit.py's
@@ -493,6 +506,48 @@ class RevenueSummaryDTO(BaseModel):
     cash_amount: float
     refund_pending_amount: float
     refunded_amount: float
+
+
+class RefundListItemDTO(BaseModel):
+    """One row of the admin panel's Refunds tab (GET /admin/refunds). `id` is
+    the underlying payment's id - a refund has no identity of its own separate
+    from the payment it refunds. `status` is a display-ready bucket derived
+    from (method, refund_status) - see admin_refunds_queries.yaml's CASE
+    expression, which this Literal must stay in sync with."""
+    id: str
+    booking_id: Optional[str] = None
+    customer_id: str
+    customer_name: Optional[str] = None
+    project_name: Optional[str] = None
+    unit_number: Optional[str] = None
+    amount: float
+    currency: str
+    method: Literal["razorpay", "cash", "rtgs_neft"]
+    status: Literal["processing", "completed", "failed", "cash_refund_pending", "cash_collected",
+                    "bank_transfer_pending", "bank_transfer_completed"]
+    refund_initiated_date: Optional[datetime] = None
+    refund_completed_date: Optional[datetime] = None
+
+
+class RefundListResponseDTO(BaseModel):
+    items: List[RefundListItemDTO]
+    pagination: PaginationDTO
+
+
+class RefundDetailDTO(RefundListItemDTO):
+    """GET /admin/refunds/{payment_id} - adds the gateway/manual-reference
+    fields and the internal refund_note not needed by the list view."""
+    razorpay_payment_id: Optional[str] = None
+    razorpay_refund_id: Optional[str] = None
+    utr_number: Optional[str] = None
+    refund_note: Optional[str] = None
+    created_at: Optional[datetime] = None
+
+
+class RefundMarkCollectedRequestDTO(BaseModel):
+    """Body for POST /admin/refunds/{payment_id}/mark-collected - admin
+    confirms a cash/rtgs_neft refund was actually paid out."""
+    note: Optional[str] = Field(None, max_length=2000)
 
 
 class BookingDecisionRequestDTO(BaseModel):

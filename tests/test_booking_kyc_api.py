@@ -355,3 +355,67 @@ def test_cancel_happy_path_releases_the_plot():
 
     unit_after = persistenceInventory().get_by_id(unit3_id)
     assert unit_after.status == "available"
+
+
+def test_cancel_an_already_booked_plot_unbooks_it_and_initiates_cash_refund():
+    """The client's core new requirement: cancel isn't just for a booking still
+    under KYC review - an admin must be able to cancel a plot that's already
+    fully booked (KYC approved), release it back to available, and kick off a
+    refund. Suraksha Enclave here also exercises the Ganaur-office cash-pickup
+    address selection."""
+    unit4_id = str(uuid.uuid4())
+    persistenceInventory().upsert_unit(
+        id=unit4_id, project_name="Suraksha Enclave", city="Sonipat", unit_number="C-9",
+        area_sqmt=180, area_sqyd=215, status="available",
+    )
+    # owner_role="broker" is required for a cash payment to be trusted enough to
+    # flip the unit into KYC review immediately (see servicePayment._booking_flip_trusted -
+    # a customer's own self-reported cash entry is deliberately NOT trusted); the
+    # booking's customer_id still ends up as owner_id, so this still lands as
+    # _CUSTOMER_ID's booking for the rest of the test.
+    payment4 = servicePayment().record_cash_payment(
+        amount=900000, owner_id=_CUSTOMER_ID, owner_role="broker",
+        purpose="plot_booking", inventory_id=unit4_id, method="cash",
+    )
+    booking4_id = payment4.booking_id
+    assert booking4_id
+
+    approve = client.post(
+        f"/admin/bookings/{booking4_id}/approve",
+        json={"note": "All KYC documents verified", "version": 1},
+        headers=_admin_headers(),
+    )
+    assert approve.status_code == 200, approve.text
+    assert approve.json()["status"] == "booked"
+
+    inv_booked = persistenceInventory().get_by_id(unit4_id)
+    assert inv_booked.status == "booked"
+
+    cancel = client.post(
+        f"/admin/bookings/{booking4_id}/cancel",
+        json={"note": "Customer requested cancellation post-booking", "version": 2},
+        headers=_admin_headers(),
+    )
+    assert cancel.status_code == 200, cancel.text
+    data = cancel.json()
+    assert data["status"] == "cancelled"
+    assert data["kyc_status"] == "verified"
+    assert any(d["action"] == "cancelled" for d in data["decision_history"])
+
+    inv_after = persistenceInventory().get_by_id(unit4_id)
+    assert inv_after.status == "available"
+    assert inv_after.booked_payment_id is None
+
+    from Divinepersistence.persistence_payment import persistencePayment
+    payment_after = persistencePayment().get_by_id(payment4.id)
+    assert payment_after.refund_status == "pending"
+    assert "office" in (payment_after.refund_note or "").lower()
+
+    # A second cancel on an already-cancelled booking is rejected, not silently re-applied.
+    recancel = client.post(
+        f"/admin/bookings/{booking4_id}/cancel",
+        json={"note": "again", "version": 3},
+        headers=_admin_headers(),
+    )
+    assert recancel.status_code == 409, recancel.text
+    assert recancel.json()["detail"] == "booking_not_cancellable"

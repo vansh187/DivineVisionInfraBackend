@@ -665,17 +665,22 @@ class servicePayment:
             raise PermissionError("forbidden")
         return record
 
+    # A refund's gateway call gets one immediate extra attempt before falling back
+    # to 'pending' - most Razorpay/network hiccups (a timeout, a transient 5xx) are
+    # gone on the very next try, so this alone clears the large majority of what
+    # would otherwise become a stuck refund needing an admin's manual retry.
+    _RAZORPAY_REFUND_ATTEMPTS = 2
+
     def initiate_refund(self, payment_id: str, reason: str = None):
         """Starts a refund for a KYC-rejected/cancelled booking payment (called by
         serviceBookingKyc.reject/cancel, never directly from a router). Branches
         by HOW the money arrived:
 
-          * razorpay - calls Razorpay's real refund API. A gateway failure here
-            still leaves the payment refund_status='pending' (not 'failed') so an
-            admin can see it needs a retry, rather than silently losing track of
-            an owed refund; only a successful gateway call marks 'completed'
-            (Razorpay refunds settle same-day for online payments, so there's no
-            separate async "processing" webhook this codebase listens for yet).
+          * razorpay - calls Razorpay's real refund API (via _attempt_razorpay_refund,
+            with a built-in one-retry). A gateway failure on both attempts still
+            leaves the payment refund_status='pending' (not 'failed') so it's never
+            silently lost - see retry_razorpay_refund() for the admin-triggered path
+            that resumes it from there without needing DB access.
           * cash / rtgs_neft - no gateway to call. Settles refund_status='pending'
             with a human-readable instruction note (collect from office / manual
             NEFT-RTGS by the business, both within 5-7 days) for the admin/business
@@ -698,46 +703,7 @@ class servicePayment:
         now = datetime.now(timezone.utc)
 
         if method == "razorpay":
-            razorpay_payment_id = getattr(record, "razorpay_payment_id", None)
-            if not razorpay_payment_id:
-                # Never actually charged (e.g. a booking cancelled before the
-                # gateway payment settled) - nothing to refund at the gateway.
-                return self._persistence.update_refund_status(
-                    id=payment_id, refund_status="completed", refund_amount=0,
-                    refund_initiated_date=now, refund_completed_date=now,
-                    refund_note="No gateway charge was captured - nothing to refund.",
-                )
-            try:
-                client = self._client()
-                amount_paise = int(round(float(amount) * 100)) if amount is not None else None
-                refund_kwargs = {"amount": amount_paise} if amount_paise else {}
-                logger.info(
-                    "payment.razorpay.refund_request_start payment_id=%s razorpay_payment_id=%s amount_paise=%s",
-                    payment_id, razorpay_payment_id, amount_paise,
-                )
-                refund = client.payment.refund(razorpay_payment_id, refund_kwargs)
-                logger.info(
-                    "payment.razorpay.refund_request_done payment_id=%s razorpay_payment_id=%s "
-                    "razorpay_refund_id=%s status=%s",
-                    payment_id, razorpay_payment_id,
-                    refund.get("id") if isinstance(refund, dict) else None,
-                    refund.get("status") if isinstance(refund, dict) else None,
-                )
-                return self._persistence.update_refund_status(
-                    id=payment_id, refund_status="completed", refund_amount=amount,
-                    razorpay_refund_id=refund.get("id") if isinstance(refund, dict) else None,
-                    refund_initiated_date=now, refund_completed_date=now,
-                    refund_note=(reason or "").strip() or None,
-                )
-            except Exception as e:
-                detail = self._gateway_error_detail(e)
-                logger.warning("payment.refund.razorpay_failed payment_id=%s gateway_error=%s",
-                               payment_id, e, exc_info=True)
-                return self._persistence.update_refund_status(
-                    id=payment_id, refund_status="pending", refund_amount=amount,
-                    refund_initiated_date=now,
-                    refund_note=f"Automatic refund failed ({detail}) - needs manual retry.",
-                )
+            return self._attempt_razorpay_refund(record, reason)
 
         # cash / rtgs_neft - no gateway involved, purely a bookkeeping/notification entry.
         if method == "cash":
@@ -751,3 +717,131 @@ class servicePayment:
             id=payment_id, refund_status="pending", refund_amount=amount,
             refund_initiated_date=now, refund_note=note,
         )
+
+    def _attempt_razorpay_refund(self, record, reason: str = None):
+        """The actual Razorpay gateway call, shared by initiate_refund (first
+        attempt) and retry_razorpay_refund (a later, admin-triggered attempt) so
+        the two can never drift out of sync on what "success" means. Retries the
+        gateway call once on any exception (network blip, timeout, transient 5xx)
+        before giving up - real money, so a single lost round-trip must not be the
+        difference between an automatic refund and a manual one.
+
+        This always requests the FULL captured amount (never a partial), which is
+        what makes the retry-on-exception safe against Razorpay's response being
+        lost after a request that actually succeeded server-side: Razorpay itself
+        refuses to refund more than a payment's still-refundable balance, so a
+        second call for the same full amount after a real first success comes back
+        as a definite gateway error (over-refund), not a silent duplicate charge -
+        it settles 'pending' for a human to reconcile, exactly like any other
+        failed attempt, rather than actually refunding the customer twice.
+
+        Never raises - every path ends in a persisted refund_status."""
+        payment_id = record.id
+        amount = getattr(record, "amount", None)
+        now = datetime.now(timezone.utc)
+        razorpay_payment_id = getattr(record, "razorpay_payment_id", None)
+        if not razorpay_payment_id:
+            # Never actually charged (e.g. a booking cancelled before the gateway
+            # payment settled) - nothing to refund at the gateway.
+            return self._persistence.update_refund_status(
+                id=payment_id, refund_status="completed", refund_amount=0,
+                refund_initiated_date=now, refund_completed_date=now,
+                refund_note="No gateway charge was captured - nothing to refund.",
+            )
+
+        last_error = None
+        refund = None
+        client = None
+        # Only the gateway call (and the client/amount setup immediately before
+        # it - no network I/O, but still wrapped so a corrupt amount or a client
+        # construction error can never escape this "never raises" method) is
+        # retried here. Persisting the result (below, outside this loop) is
+        # deliberately NOT inside this try/except: if the gateway call actually
+        # succeeds but the DB write to record that then fails, that must never be
+        # mistaken for a failed gateway call and trigger a second real refund -
+        # it's a persistence problem, not a refund problem, and is left to
+        # propagate to the caller's own safety net (serviceBookingKyc.cancel/reject
+        # already log-and-continue on any initiate_refund exception) rather than
+        # silently relabelled 'pending'.
+        for attempt in range(1, self._RAZORPAY_REFUND_ATTEMPTS + 1):
+            try:
+                if client is None:
+                    client = self._client()
+                amount_paise = int(round(float(amount) * 100)) if amount is not None else None
+                refund_kwargs = {"amount": amount_paise} if amount_paise else {}
+                logger.info(
+                    "payment.razorpay.refund_request_start payment_id=%s razorpay_payment_id=%s "
+                    "amount_paise=%s attempt=%s",
+                    payment_id, razorpay_payment_id, amount_paise, attempt,
+                )
+                refund = client.payment.refund(razorpay_payment_id, refund_kwargs)
+                break
+            except Exception as e:
+                last_error = e
+                logger.warning(
+                    "payment.refund.razorpay_attempt_failed payment_id=%s attempt=%s error=%s",
+                    payment_id, attempt, e, exc_info=(attempt == self._RAZORPAY_REFUND_ATTEMPTS),
+                )
+
+        if refund is not None:
+            refund_id = refund.get("id") if isinstance(refund, dict) else None
+            gateway_status = refund.get("status") if isinstance(refund, dict) else None
+            logger.info(
+                "payment.razorpay.refund_request_done payment_id=%s razorpay_payment_id=%s "
+                "razorpay_refund_id=%s status=%s",
+                payment_id, razorpay_payment_id, refund_id, gateway_status,
+            )
+            # A successful (non-raising) gateway call means Razorpay has accepted
+            # and recorded the refund - settles 'completed' immediately (Razorpay
+            # refunds settle same-day for online payments, and this codebase has
+            # no refund webhook to later advance a finer-grained 'processing'
+            # state, so persisting anything less final here would be a refund
+            # with no path to ever reach 'completed').
+            return self._persistence.update_refund_status(
+                id=payment_id, refund_status="completed",
+                refund_amount=amount, razorpay_refund_id=refund_id,
+                refund_initiated_date=now, refund_completed_date=now,
+                refund_note=(reason or "").strip() or None,
+            )
+
+        detail = self._gateway_error_detail(last_error)
+        return self._persistence.update_refund_status(
+            id=payment_id, refund_status="pending", refund_amount=amount,
+            refund_initiated_date=now,
+            refund_note=f"Automatic refund failed ({detail}) - needs manual retry.",
+        )
+
+    def retry_razorpay_refund(self, payment_id: str, reason: str = None):
+        """Admin-triggered resumption of a Razorpay refund stuck at
+        refund_status='pending' after both of initiate_refund's own attempts
+        failed at the gateway - the ONLY path that can move a Razorpay refund
+        forward from there, since initiate_refund's own guard deliberately blocks
+        a second call once any refund is 'pending' (a cash/rtgs_neft 'pending' is
+        a legitimate steady state awaiting manual payout, not a failure, so that
+        guard must stay blanket there). Narrowly scoped so it can never trigger a
+        duplicate gateway refund: only runs when the payment is razorpay, still
+        'pending', and has no razorpay_refund_id yet (proof the previous attempts
+        never actually reached the gateway successfully) - and that check-and-claim
+        happens as ONE atomic DB compare-and-swap (persistence.claim_refund_retry),
+        not a plain read followed by a separate write, so two concurrent retries
+        (an admin double-click, or two admins racing the same stuck payment) can
+        never both pass and both call the gateway - only the one whose claim
+        actually lands proceeds; the other is refused outright. Raises
+        ValueError('not_found') / ValueError('payment_not_paid') /
+        ValueError('not_a_razorpay_refund') / ValueError('refund_not_retryable')."""
+        record = self._persistence.get_by_id(payment_id)
+        if not record:
+            raise ValueError("not_found")
+        if (getattr(record, "status", None) or "") != "paid":
+            raise ValueError("payment_not_paid")
+        method = (getattr(record, "method", None) or "razorpay").lower()
+        if method != "razorpay":
+            raise ValueError("not_a_razorpay_refund")
+        claimed = self._persistence.claim_refund_retry(id=payment_id)
+        if claimed is None:
+            # The claim's WHERE clause is the single source of truth for
+            # eligibility (pending + no razorpay_refund_id) - a None here means
+            # not eligible for any reason (already resolved, already has a
+            # razorpay_refund_id, or a concurrent retry claimed it first).
+            raise ValueError("refund_not_retryable")
+        return self._attempt_razorpay_refund(claimed, reason)

@@ -261,16 +261,7 @@ class serviceEmail:
                 return False
             name = (first_name or "").strip() or "there"
             approved = (decision or "").strip().lower() == "approved"
-            money = _format_amount(amount, currency) or ""
-            rows = []
-            if booking_id:
-                rows.append(("Booking ID", str(booking_id).strip()))
-            if project_name:
-                rows.append(("Project", str(project_name).strip()))
-            if unit_number:
-                rows.append(("Plot", str(unit_number).strip()))
-            if money:
-                rows.append(("Amount", money))
+            rows = _booking_decision_detail_rows(booking_id, project_name, unit_number, amount, currency)
 
             if approved:
                 headline = "KYC Verified — Booking Confirmed"
@@ -308,6 +299,45 @@ class serviceEmail:
             return self._send(to=to, subject=subject, html=html, text=text)
         except Exception as e:
             logger.warning("kyc_decision_email_failed email=%s error=%s", email, e)
+            return False
+
+    def send_booking_cancellation_async(self, email: str, **kwargs) -> None:
+        self._run_async(self.send_booking_cancellation, email, **kwargs)
+
+    def send_booking_cancellation(self, email: str, first_name: str = None, project_name: str = None,
+                                  unit_number: str = None, booking_id: str = None, admin_note: str = None,
+                                  refund_instructions: str = None, amount=None, currency: str = "INR") -> bool:
+        """Admin-initiated booking-cancellation email (e.g. the customer asked to
+        cancel, at either the KYC-review or already-booked stage). Always carries
+        refund_instructions - the client's requirement that a refund notice goes
+        out no matter how the customer paid. Never raises."""
+        try:
+            to = (email or "").strip()
+            if not to or "@" not in to:
+                return False
+            name = (first_name or "").strip() or "there"
+            rows = _booking_decision_detail_rows(booking_id, project_name, unit_number, amount, currency,
+                                                 amount_label="Amount Paid")
+
+            body = ["Your booking with Divine Vision Infra has been cancelled as requested."]
+            if refund_instructions:
+                body.append(refund_instructions)
+            note = (admin_note or "").strip()
+            if note:
+                body.append(f"Note from our team: <em>{_escape(note)}</em>")
+
+            html = _luxury_email_html(
+                headline="Booking Cancelled", preheader="Your booking has been cancelled",
+                greeting_name=name, body_paragraphs=body, detail_rows=rows,
+                cta_label="Contact Support", cta_url=_payments_deeplink(self._customer_login_url),
+                footer_note=f"For assistance, contact {_SUPPORT_LINE}.",
+                has_logo=bool(self._logo_b64), accent="#c0392b",
+            )
+            text = _luxury_email_text("Booking Cancelled", name, body, rows, "Contact Support",
+                                      _payments_deeplink(self._customer_login_url))
+            return self._send(to=to, subject="Booking Cancelled — Divine Vision Infra", html=html, text=text)
+        except Exception as e:
+            logger.warning("booking_cancellation_email_failed email=%s error=%s", email, e)
             return False
 
     # ----------------------------------------------------------------- private
@@ -393,6 +423,15 @@ def dispatch_kyc_decision_email(email_service, email: str, **kwargs) -> None:
             email_service.send_kyc_decision_async(email, **kwargs)
     except Exception as e:
         logger.warning("kyc_decision_dispatch_failed error=%s", e)
+
+
+def dispatch_booking_cancellation_email(email_service, email: str, **kwargs) -> None:
+    """Fire-and-forget booking-cancellation notification. Never raises."""
+    try:
+        if email_service and getattr(email_service, "enabled", False) and email:
+            email_service.send_booking_cancellation_async(email, **kwargs)
+    except Exception as e:
+        logger.warning("booking_cancellation_dispatch_failed error=%s", e)
 
 
 def dispatch_installment_receipt_email(email_service, email: str, **kwargs) -> None:
@@ -668,6 +707,25 @@ def _format_amount(amount, currency: str = "INR") -> str:
         return ""
     symbol = "₹" if (currency or "INR").upper() == "INR" else f"{currency} "
     return f"{symbol}{value:,.0f}"
+
+
+def _booking_decision_detail_rows(booking_id, project_name, unit_number, amount, currency: str = "INR",
+                                  amount_label: str = "Amount"):
+    """[(label, value)] shared by the KYC-decision and booking-cancellation
+    emails - Booking ID, Project, Plot, Amount, only the rows that actually have
+    a value. Kept as one helper so a future change to this shape (e.g. adding a
+    Payment Method row) only needs to happen once."""
+    rows = []
+    if booking_id and str(booking_id).strip():
+        rows.append(("Booking ID", str(booking_id).strip()))
+    if project_name and str(project_name).strip():
+        rows.append(("Project", str(project_name).strip()))
+    if unit_number and str(unit_number).strip():
+        rows.append(("Plot", str(unit_number).strip()))
+    money = _format_amount(amount, currency)
+    if money:
+        rows.append((amount_label, money))
+    return rows
 
 
 def _booking_detail_rows(project_name, unit_number, amount, currency: str = "INR"):

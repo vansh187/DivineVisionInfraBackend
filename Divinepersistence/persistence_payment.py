@@ -158,6 +158,46 @@ class persistencePayment:
                 db.rollback()
                 raise
 
+    def claim_refund_retry(self, id: str) -> PaymentModel:
+        """Atomic compare-and-swap: 'pending' -> 'processing', only for a razorpay
+        refund with no razorpay_refund_id yet. Returns the row on success, None if
+        the claim lost (already claimed by a concurrent retry, already resolved,
+        or not eligible) - see claim_refund_retry in payment_queries.yaml."""
+        with self._session_factory() as db:
+            try:
+                query = self._queries.get("claim_refund_retry")
+                result = db.execute(text(query), {"id": id, "now": datetime.now(timezone.utc)})
+                row = result.mappings().first()
+                if not row:
+                    db.rollback()
+                    return None
+                db.commit()
+                return RowWrapper(row)
+            except Exception:
+                db.rollback()
+                raise
+
+    def mark_manual_refund_collected(self, id: str, note: str = None) -> PaymentModel:
+        """Atomic compare-and-swap: 'pending'/'processing' -> 'completed', only for
+        a cash/rtgs_neft refund - see mark_refund_collected in payment_queries.yaml.
+        Returns None if not eligible (razorpay, already completed, or no refund in
+        flight)."""
+        with self._session_factory() as db:
+            try:
+                query = self._queries.get("mark_refund_collected")
+                result = db.execute(text(query), {
+                    "id": id, "note": note, "now": datetime.now(timezone.utc),
+                })
+                row = result.mappings().first()
+                if not row:
+                    db.rollback()
+                    return None
+                db.commit()
+                return RowWrapper(row)
+            except Exception:
+                db.rollback()
+                raise
+
     def get_by_id(self, id: str):
         with self._session_factory() as db:
             query = self._queries.get("get_by_id")

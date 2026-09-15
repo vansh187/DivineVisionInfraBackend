@@ -1,0 +1,151 @@
+# SQL for the admin panel's Refunds tab (GET /admin/refunds/*).
+# See Divinepersistence/persistence_refund.py.
+#
+# Scope: only divine_payments rows where a refund has actually been initiated
+# (refund_status != 'none') - a payment nobody has tried to refund yet has no
+# business appearing on this screen. Every such row maps to exactly one
+# `display_status`, via the same CASE expression repeated identically in every
+# query below (list/count/detail) so filtering and the returned value can
+# never disagree:
+#   processing               - razorpay, refund_status pending/processing
+#   completed                - razorpay, refund_status completed
+#   failed                   - razorpay, refund_status failed
+#   cash_refund_pending      - cash, refund_status pending/processing
+#   cash_collected           - cash, refund_status completed
+#   bank_transfer_pending    - rtgs_neft, refund_status pending/processing
+#   bank_transfer_completed  - rtgs_neft, refund_status completed
+#
+# Booking/customer join, search escaping, and the total_count window-function
+# pagination all follow the exact same shape as admin_revenue_queries.yaml -
+# see that file's own header comment for why the booking join is written as a
+# COALESCE of two single-purpose subqueries rather than one combined OR.
+
+list_refunds: |
+  WITH filtered AS (
+    SELECT
+      p.id AS id,
+      p.amount AS amount,
+      p.currency AS currency,
+      p.method AS method,
+      p.refund_status AS refund_status,
+      p.refund_amount AS refund_amount,
+      p.refund_initiated_date AS refund_initiated_date,
+      p.refund_completed_date AS refund_completed_date,
+      p.owner_id AS customer_id,
+      p.created_date AS created_date,
+      b.id AS booking_id,
+      b.project_name AS project_name,
+      b.unit_number AS unit_number,
+      cu.first_name AS customer_first_name,
+      cu.last_name AS customer_last_name,
+      CASE
+        WHEN p.method = 'razorpay' AND p.refund_status = 'completed' THEN 'completed'
+        WHEN p.method = 'razorpay' AND p.refund_status = 'failed' THEN 'failed'
+        WHEN p.method = 'razorpay' THEN 'processing'
+        WHEN p.method = 'cash' AND p.refund_status = 'completed' THEN 'cash_collected'
+        WHEN p.method = 'cash' THEN 'cash_refund_pending'
+        WHEN p.refund_status = 'completed' THEN 'bank_transfer_completed'
+        ELSE 'bank_transfer_pending'
+      END AS display_status
+    FROM divine_payments p
+    LEFT JOIN divine_bookings b ON b.id = COALESCE(
+      (SELECT b2.id FROM divine_bookings b2 WHERE b2.payment_id = p.id LIMIT 1),
+      (SELECT b2.id FROM divine_bookings b2
+       WHERE p.purpose = 'installment' AND b2.inventory_id = p.inventory_id AND b2.customer_id = p.owner_id
+       ORDER BY b2.created_date DESC LIMIT 1)
+    )
+    LEFT JOIN divine_customer_users cu ON cu.id = p.owner_id
+    WHERE p.refund_status != 'none'
+      AND (:search IS NULL
+           OR lower(p.id) LIKE '%' || replace(replace(lower(:search), '%', '\%'), '_', '\_') || '%' ESCAPE '\'
+           OR lower(coalesce(b.id, '')) LIKE '%' || replace(replace(lower(:search), '%', '\%'), '_', '\_') || '%' ESCAPE '\'
+           OR lower(coalesce(b.project_name, '')) LIKE '%' || replace(replace(lower(:search), '%', '\%'), '_', '\_') || '%' ESCAPE '\'
+           OR lower(coalesce(b.unit_number, '')) LIKE '%' || replace(replace(lower(:search), '%', '\%'), '_', '\_') || '%' ESCAPE '\'
+           OR lower(coalesce(cu.first_name, '') || ' ' || coalesce(cu.last_name, '')) LIKE '%' || replace(replace(lower(:search), '%', '\%'), '_', '\_') || '%' ESCAPE '\')
+      AND (:status IS NULL
+           OR CASE
+                WHEN p.method = 'razorpay' AND p.refund_status = 'completed' THEN 'completed'
+                WHEN p.method = 'razorpay' AND p.refund_status = 'failed' THEN 'failed'
+                WHEN p.method = 'razorpay' THEN 'processing'
+                WHEN p.method = 'cash' AND p.refund_status = 'completed' THEN 'cash_collected'
+                WHEN p.method = 'cash' THEN 'cash_refund_pending'
+                WHEN p.refund_status = 'completed' THEN 'bank_transfer_completed'
+                ELSE 'bank_transfer_pending'
+              END = :status)
+      AND (:method IS NULL OR p.method = :method)
+  )
+  SELECT *, count(*) OVER() AS total_count FROM filtered
+  ORDER BY refund_initiated_date DESC, created_date DESC
+  LIMIT :limit OFFSET :offset;
+
+count_refunds: |
+  SELECT count(*) AS total FROM (
+    SELECT p.id
+    FROM divine_payments p
+    LEFT JOIN divine_bookings b ON b.id = COALESCE(
+      (SELECT b2.id FROM divine_bookings b2 WHERE b2.payment_id = p.id LIMIT 1),
+      (SELECT b2.id FROM divine_bookings b2
+       WHERE p.purpose = 'installment' AND b2.inventory_id = p.inventory_id AND b2.customer_id = p.owner_id
+       ORDER BY b2.created_date DESC LIMIT 1)
+    )
+    LEFT JOIN divine_customer_users cu ON cu.id = p.owner_id
+    WHERE p.refund_status != 'none'
+      AND (:search IS NULL
+           OR lower(p.id) LIKE '%' || replace(replace(lower(:search), '%', '\%'), '_', '\_') || '%' ESCAPE '\'
+           OR lower(coalesce(b.id, '')) LIKE '%' || replace(replace(lower(:search), '%', '\%'), '_', '\_') || '%' ESCAPE '\'
+           OR lower(coalesce(b.project_name, '')) LIKE '%' || replace(replace(lower(:search), '%', '\%'), '_', '\_') || '%' ESCAPE '\'
+           OR lower(coalesce(b.unit_number, '')) LIKE '%' || replace(replace(lower(:search), '%', '\%'), '_', '\_') || '%' ESCAPE '\'
+           OR lower(coalesce(cu.first_name, '') || ' ' || coalesce(cu.last_name, '')) LIKE '%' || replace(replace(lower(:search), '%', '\%'), '_', '\_') || '%' ESCAPE '\')
+      AND (:status IS NULL
+           OR CASE
+                WHEN p.method = 'razorpay' AND p.refund_status = 'completed' THEN 'completed'
+                WHEN p.method = 'razorpay' AND p.refund_status = 'failed' THEN 'failed'
+                WHEN p.method = 'razorpay' THEN 'processing'
+                WHEN p.method = 'cash' AND p.refund_status = 'completed' THEN 'cash_collected'
+                WHEN p.method = 'cash' THEN 'cash_refund_pending'
+                WHEN p.refund_status = 'completed' THEN 'bank_transfer_completed'
+                ELSE 'bank_transfer_pending'
+              END = :status)
+      AND (:method IS NULL OR p.method = :method)
+  ) counted;
+
+get_refund_by_id: |
+  SELECT
+    p.id AS id,
+    p.amount AS amount,
+    p.currency AS currency,
+    p.method AS method,
+    p.refund_status AS refund_status,
+    p.refund_amount AS refund_amount,
+    p.refund_initiated_date AS refund_initiated_date,
+    p.refund_completed_date AS refund_completed_date,
+    p.refund_note AS refund_note,
+    p.razorpay_payment_id AS razorpay_payment_id,
+    p.razorpay_refund_id AS razorpay_refund_id,
+    p.utr_number AS utr_number,
+    p.owner_id AS customer_id,
+    p.created_date AS created_date,
+    b.id AS booking_id,
+    b.project_name AS project_name,
+    b.unit_number AS unit_number,
+    cu.first_name AS customer_first_name,
+    cu.last_name AS customer_last_name,
+    CASE
+      WHEN p.method = 'razorpay' AND p.refund_status = 'completed' THEN 'completed'
+      WHEN p.method = 'razorpay' AND p.refund_status = 'failed' THEN 'failed'
+      WHEN p.method = 'razorpay' THEN 'processing'
+      WHEN p.method = 'cash' AND p.refund_status = 'completed' THEN 'cash_collected'
+      WHEN p.method = 'cash' THEN 'cash_refund_pending'
+      WHEN p.refund_status = 'completed' THEN 'bank_transfer_completed'
+      ELSE 'bank_transfer_pending'
+    END AS display_status
+  FROM divine_payments p
+  LEFT JOIN divine_bookings b ON b.id = COALESCE(
+    (SELECT b2.id FROM divine_bookings b2 WHERE b2.payment_id = p.id LIMIT 1),
+    (SELECT b2.id FROM divine_bookings b2
+     WHERE p.purpose = 'installment' AND b2.inventory_id = p.inventory_id AND b2.customer_id = p.owner_id
+     ORDER BY b2.created_date DESC LIMIT 1)
+  )
+  LEFT JOIN divine_customer_users cu ON cu.id = p.owner_id
+  WHERE p.id = :id AND p.refund_status != 'none'
+  LIMIT 1;
