@@ -1,8 +1,10 @@
 import os
 import logging
+import uuid
 from datetime import datetime, timedelta, timezone
 from passlib.context import CryptContext
 import jwt
+import requests
 from dotenv import load_dotenv
 from Divinepersistence import persistenceAdmin
 from DivineDTO.models import AdminCreateDTO, AdminLoginDTO
@@ -15,11 +17,17 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 DEFAULT_ACCESS_TOKEN_EXPIRE_MINUTES = 30
 DEFAULT_REFRESH_TOKEN_EXPIRE_DAYS = 7
+DEFAULT_PROFILE_PHOTO_BUCKET = "admin-profile-photos"
+MAX_PROFILE_PHOTO_BYTES = 5 * 1024 * 1024
+PROFILE_PHOTO_CONTENT_TYPES = {"image/jpeg": "jpg", "image/png": "png"}
 
 
 class serviceAdmin:
     def __init__(self, persistence: persistenceAdmin = None, secret_key: str = None):
         self._persistence = persistence or persistenceAdmin()
+        self._supabase_url = os.getenv("SUPABASE_URL")
+        self._service_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+        self._profile_photo_bucket = os.getenv("SUPABASE_ADMIN_PROFILE_PHOTO_BUCKET", DEFAULT_PROFILE_PHOTO_BUCKET)
         # Deliberately its own secret, not the customer/broker JWT_SECRET_KEY - keeps a
         # leaked admin secret from forging customer/broker tokens, and vice versa.
         self._secret = secret_key or os.getenv("ADMIN_JWT_SECRET_KEY")
@@ -68,6 +76,157 @@ class serviceAdmin:
         if not self._verify_password(dto.password, user.password_hash):
             raise ValueError("invalid_credentials")
         return self._issue_tokens(user.id, user.email)
+
+    def profile(self, admin_id: str) -> dict:
+        """Returns the current admin's profile fields for the admin panel.
+
+        Raises ValueError("not_found") if the token points at an admin account
+        that no longer exists.
+        """
+        try:
+            clean_id = (admin_id or "").strip()
+            if not clean_id:
+                raise ValueError("not_found")
+            user = self._persistence.get_profile_by_id(clean_id)
+            if not user:
+                raise ValueError("not_found")
+
+            full_name = (getattr(user, "full_name", None) or "").strip()
+            email = (getattr(user, "email", None) or "").strip()
+            source = full_name or email
+            parts = [p for p in source.replace(".", " ").replace("_", " ").split() if p]
+            if len(parts) >= 2:
+                initials = f"{parts[0][0]}{parts[-1][0]}".upper()
+            elif parts:
+                initials = parts[0][0].upper()
+            else:
+                initials = "A"
+
+            return {
+                "id": user.id,
+                "full_name": full_name,
+                "employee_id": user.employee_id,
+                "email": email,
+                "phone": None,
+                "avatar_url": getattr(user, "profile_photo_url", None),
+                "initials": initials,
+                "created_by": getattr(user, "created_by", None),
+                "created_date": getattr(user, "created_date", None),
+                "last_updated_by": getattr(user, "last_updated_by", None),
+                "last_updated_date": getattr(user, "last_updated_date", None),
+            }
+        except ValueError:
+            raise
+        except Exception:
+            logger.exception("admin_profile_lookup_failed admin_id=%s", admin_id)
+            raise RuntimeError("profile_lookup_failed")
+
+    def upload_profile_photo(self, admin_id: str, file_bytes: bytes, content_type: str) -> dict:
+        """Uploads the current admin's profile photo to Supabase Storage and
+        stores the public object URL on divine_admin_users.profile_photo_url."""
+        object_path = None
+        committed = False
+        try:
+            clean_id = (admin_id or "").strip()
+            if not clean_id:
+                raise ValueError("not_found")
+            existing = self._persistence.get_by_id(clean_id)
+            if not existing:
+                raise ValueError("not_found")
+            clean_type = (content_type or "").split(";")[0].strip().lower()
+            ext = PROFILE_PHOTO_CONTENT_TYPES.get(clean_type)
+            if not ext:
+                raise ValueError("unsupported_file_type")
+            if not file_bytes:
+                raise ValueError("empty_file")
+            if len(file_bytes) > MAX_PROFILE_PHOTO_BYTES:
+                raise ValueError("file_too_large")
+            if clean_type == "image/png" and not file_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+                raise ValueError("unsupported_file_type")
+            if clean_type == "image/jpeg" and not file_bytes.startswith(b"\xff\xd8"):
+                raise ValueError("unsupported_file_type")
+
+            object_path = f"{clean_id}/profile_{uuid.uuid4().hex}.{ext}"
+            self._upload_to_storage(object_path, file_bytes, clean_type)
+            photo_url = self._public_storage_url(object_path)
+            updated = self._persistence.update_profile_photo(
+                id=clean_id,
+                profile_photo_url=photo_url,
+                profile_photo_path=object_path,
+                profile_photo_bucket=self._profile_photo_bucket,
+                updated_by=clean_id,
+            )
+            if not updated:
+                self._delete_from_storage(object_path)
+                raise ValueError("not_found")
+            committed = True
+
+            old_path = getattr(existing, "profile_photo_path", None)
+            old_bucket = getattr(existing, "profile_photo_bucket", None)
+            if old_path and old_path != object_path:
+                self._delete_from_storage(old_path, bucket=old_bucket)
+            return self.profile(clean_id)
+        except ValueError:
+            raise
+        except RuntimeError:
+            if object_path and not committed:
+                self._delete_from_storage(object_path)
+            raise
+        except Exception:
+            if object_path and not committed:
+                self._delete_from_storage(object_path)
+            logger.exception("admin_profile_photo_upload_failed admin_id=%s", admin_id)
+            raise RuntimeError("profile_photo_upload_failed")
+
+    def _upload_to_storage(self, object_path: str, file_bytes: bytes, content_type: str) -> None:
+        try:
+            if not self._supabase_url or not self._service_key:
+                raise RuntimeError("storage_not_configured")
+            upload_url = f"{self._supabase_url}/storage/v1/object/{self._profile_photo_bucket}/{object_path}"
+            resp = requests.post(
+                upload_url,
+                headers={
+                    "Authorization": f"Bearer {self._service_key}",
+                    "Content-Type": content_type,
+                    "x-upsert": "false",
+                },
+                data=file_bytes,
+                timeout=30,
+            )
+            if resp.status_code not in (200, 201):
+                raise RuntimeError(f"storage_upload_failed:{resp.status_code}")
+        except RuntimeError:
+            raise
+        except requests.exceptions.RequestException:
+            raise RuntimeError("storage_unreachable")
+        except Exception:
+            logger.exception("admin_profile_photo_storage_upload_failed path=%s", object_path)
+            raise RuntimeError("storage_upload_failed")
+
+    def _delete_from_storage(self, object_path: str, bucket: str = None) -> None:
+        try:
+            if not self._supabase_url or not self._service_key or not object_path:
+                return
+            delete_url = f"{self._supabase_url}/storage/v1/object/{bucket or self._profile_photo_bucket}/{object_path}"
+            requests.delete(
+                delete_url,
+                headers={"Authorization": f"Bearer {self._service_key}"},
+                timeout=30,
+            )
+        except Exception:
+            logger.warning("admin_profile_photo_storage_cleanup_failed path=%s", object_path, exc_info=True)
+
+    def _public_storage_url(self, object_path: str) -> str:
+        try:
+            if not self._supabase_url:
+                raise RuntimeError("storage_not_configured")
+            return f"{self._supabase_url}/storage/v1/object/public/{self._profile_photo_bucket}/{object_path}"
+        except RuntimeError:
+            raise
+        except Exception:
+            logger.exception("admin_profile_photo_public_url_failed path=%s", object_path)
+            raise RuntimeError("storage_url_failed")
+
 
     def refresh(self, refresh_token: str) -> dict:
         """Verifies a refresh token (type=refresh, role=admin) and mints a fresh

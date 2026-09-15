@@ -13,6 +13,9 @@ class AdminModel(Base):
     employee_id = Column(String(32), unique=True, nullable=False)
     email = Column(String(255), unique=True, nullable=False)
     password_hash = Column(String(255), nullable=False)
+    profile_photo_url = Column(String(1000))
+    profile_photo_path = Column(String(500))
+    profile_photo_bucket = Column(String(100))
     created_by = Column(String(255))
     created_date = Column(DateTime)
     last_updated_by = Column(String(255))
@@ -30,8 +33,19 @@ class persistenceAdmin:
         queries.setdefault("get_by_email", 'SELECT * FROM divine_admin_users WHERE lower(email) = lower(:email) LIMIT 1;')
         queries.setdefault("get_by_employee_id", 'SELECT * FROM divine_admin_users WHERE lower(employee_id) = lower(:employee_id) LIMIT 1;')
         queries.setdefault("get_by_id", 'SELECT * FROM divine_admin_users WHERE id = :id LIMIT 1;')
+        queries.setdefault("get_profile_by_id", (
+            'SELECT id, full_name, employee_id, email, profile_photo_url, profile_photo_path, '
+            'profile_photo_bucket, created_by, created_date, last_updated_by, last_updated_date '
+            'FROM divine_admin_users WHERE id = :id LIMIT 1;'
+        ))
         queries.setdefault("update_password", (
             'UPDATE divine_admin_users SET password_hash = :password_hash, last_updated_date = :last_updated_date '
+            'WHERE id = :id RETURNING *;'
+        ))
+        queries.setdefault("update_profile_photo", (
+            'UPDATE divine_admin_users SET profile_photo_url = :profile_photo_url, '
+            'profile_photo_path = :profile_photo_path, profile_photo_bucket = :profile_photo_bucket, '
+            'last_updated_by = :last_updated_by, last_updated_date = :last_updated_date '
             'WHERE id = :id RETURNING *;'
         ))
         self._queries = queries
@@ -99,12 +113,44 @@ class persistenceAdmin:
                 return None
             return RowWrapper(row)
 
+    def get_profile_by_id(self, id: str):
+        with self._session_factory() as db:
+            try:
+                query = self._queries.get("get_profile_by_id")
+                result = db.execute(text(query), {"id": id})
+                row = result.mappings().first()
+                if not row:
+                    return None
+                return RowWrapper(row)
+            except Exception:
+                raise
+
     def update_password(self, id: str, password_hash: str):
         with self._session_factory() as db:
             try:
                 query = self._queries.get("update_password")
                 result = db.execute(text(query), {
                     "id": id, "password_hash": password_hash,
+                    "last_updated_date": datetime.now(timezone.utc),
+                })
+                row = result.mappings().first()
+                db.commit()
+                return RowWrapper(row) if row else None
+            except Exception:
+                db.rollback()
+                raise
+
+    def update_profile_photo(self, id: str, profile_photo_url: str, profile_photo_path: str,
+                             profile_photo_bucket: str, updated_by: str = None):
+        with self._session_factory() as db:
+            try:
+                query = self._queries.get("update_profile_photo")
+                result = db.execute(text(query), {
+                    "id": id,
+                    "profile_photo_url": profile_photo_url,
+                    "profile_photo_path": profile_photo_path,
+                    "profile_photo_bucket": profile_photo_bucket,
+                    "last_updated_by": updated_by,
                     "last_updated_date": datetime.now(timezone.utc),
                 })
                 row = result.mappings().first()

@@ -9,3 +9,24 @@ get_by_employee_id: |
   SELECT * FROM divine_admin_users WHERE lower(employee_id) = lower(:employee_id) LIMIT 1;
 get_by_id: |
   SELECT * FROM divine_admin_users WHERE id = :id LIMIT 1;
+get_profile_by_id: |
+  SELECT
+    id,
+    full_name,
+    employee_id,
+    email,
+    profile_photo_url,
+    profile_photo_path,
+    profile_photo_bucket,
+    created_by,
+    created_date,
+    last_updated_by,
+    last_updated_date
+  FROM divine_admin_users
+  WHERE id = :id
+  LIMIT 1;
+update_profile_photo: |
+  UPDATE divine_admin_users SET profile_photo_url = :profile_photo_url,
+  profile_photo_path = :profile_photo_path, profile_photo_bucket = :profile_photo_bucket,
+  last_updated_by = :last_updated_by, last_updated_date = :last_updated_date
+  WHERE id = :id RETURNING *;

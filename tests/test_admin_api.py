@@ -1,5 +1,6 @@
 import os
 import pytest
+from unittest.mock import MagicMock, patch
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
@@ -50,6 +51,77 @@ def test_admin_signup_login_and_refresh_happy_path():
     refreshed_data = refreshed.json()
     assert refreshed_data["access_token"]
     assert refreshed_data["expires_in"] == 30 * 60
+
+
+def test_admin_profile_autopopulates_current_admin():
+    login = client.post("/admin/login", json={"email": "arjun@example.com", "password": "strongpassword"})
+    token = login.json()["access_token"]
+
+    r = client.get("/admin/profile", headers={"Authorization": f"Bearer {token}"})
+
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["full_name"] == "Arjun Mehta"
+    assert data["employee_id"] == "DV1024"
+    assert data["email"] == "arjun@example.com"
+    assert data["initials"] == "AM"
+    assert data["phone"] is None
+    assert data["avatar_url"] is None
+
+
+def test_admin_profile_requires_admin_access_token():
+    assert client.get("/admin/profile").status_code == 401
+
+    login = client.post("/admin/login", json={"email": "arjun@example.com", "password": "strongpassword"})
+    refresh_token = login.json()["refresh_token"]
+    r = client.get("/admin/profile", headers={"Authorization": f"Bearer {refresh_token}"})
+    assert r.status_code == 401, r.text
+
+
+def test_admin_profile_photo_upload_stores_public_url():
+    import DivineAPI.admin_api as admin_api
+
+    login = client.post("/admin/login", json={"email": "arjun@example.com", "password": "strongpassword"})
+    token = login.json()["access_token"]
+
+    admin_api._admin_service._supabase_url = "https://fake.supabase.co"
+    admin_api._admin_service._service_key = "service-role"
+    admin_api._admin_service._profile_photo_bucket = "admin-profile-photos"
+
+    tiny_png = b"\x89PNG\r\n\x1a\n" + b"png-data"
+    with patch("DivineService.service_admin.requests.post") as mock_post:
+        mock_post.return_value = MagicMock(status_code=201)
+        r = client.post(
+            "/admin/profile/photo",
+            headers={"Authorization": f"Bearer {token}"},
+            files={"file": ("avatar.png", tiny_png, "image/png")},
+        )
+
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["avatar_url"].startswith(
+        "https://fake.supabase.co/storage/v1/object/public/admin-profile-photos/"
+    )
+    assert data["avatar_url"].endswith(".png")
+    mock_post.assert_called_once()
+
+    profile = client.get("/admin/profile", headers={"Authorization": f"Bearer {token}"})
+    assert profile.status_code == 200, profile.text
+    assert profile.json()["avatar_url"] == data["avatar_url"]
+
+
+def test_admin_profile_photo_upload_rejects_invalid_image():
+    login = client.post("/admin/login", json={"email": "arjun@example.com", "password": "strongpassword"})
+    token = login.json()["access_token"]
+
+    r = client.post(
+        "/admin/profile/photo",
+        headers={"Authorization": f"Bearer {token}"},
+        files={"file": ("avatar.txt", b"not an image", "text/plain")},
+    )
+
+    assert r.status_code == 400, r.text
+    assert r.json()["detail"] == "unsupported_file_type"
 
 
 def test_admin_signup_rejects_employee_id_not_starting_with_dv():

@@ -48,7 +48,7 @@ def _client_ip(request: Request) -> str:
 class RateLimitMiddleware(BaseHTTPMiddleware):
     RATE_LIMIT_EXEMPT_PATHS = {
         "/admin/customers", "/admin/brokers", "/admin/visits", "/admin/bookings",
-        "/admin/revenue/summary", "/admin/revenue/transactions",
+        "/admin/profile", "/admin/revenue/summary", "/admin/revenue/transactions",
         "/admin/refunds",
     }
 
