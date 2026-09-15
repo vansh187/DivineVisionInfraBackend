@@ -1,0 +1,187 @@
+# SQL for the admin panel's Revenue tab (GET /admin/revenue/*).
+# See Divinepersistence/persistence_revenue.py.
+#
+# Revenue is derived from divine_payments rows that actually settled
+# (status = 'paid') - a 'created'/'failed' payment never happened financially
+# and must never show up here. A settled row is bucketed into exactly one of
+# four labels via the same CASE expression, repeated identically in every
+# query below so filtering, the returned label, and the summary counts can
+# never disagree with each other:
+#   refunded       - refund_status = 'completed'
+#   refund_pending - refund_status = 'pending' or 'processing'
+#   cash_recorded  - method = 'cash' (and no refund in flight)
+#   captured       - anything else settled (razorpay/rtgs_neft, no refund)
+#
+# ONE payment maps to AT MOST ONE booking - never more, and this is deliberate,
+# not incidental. b.payment_id has a UNIQUE constraint, so the direct match is
+# already 1:1. The fallback match (a later installment payment, which never
+# gets its own bookings row, matched instead by inventory_id + customer_id) is
+# NOT safe as a second OR'd join condition: if a customer ever cancels a
+# booking and later rebooks the SAME plot, two divine_bookings rows share that
+# inventory_id + customer_id, and an OR-joined installment payment on that
+# plot would match BOTH rows - the LEFT JOIN would then emit that ONE payment
+# TWICE, once per matching booking, silently duplicating it in the table and
+# inflating pagination/search counts. That's the exact bug the COALESCE(...)
+# form below closes: the direct payment_id match (tried first - guaranteed at
+# most one row by the UNIQUE constraint) wins whenever it exists; only when it
+# doesn't does the second subquery run, picking the single MOST RECENT
+# inventory_id + customer_id match (by created_date). Never both, so a settled
+# payment always appears in these results exactly once.
+#
+# NOTE: this is deliberately NOT the more obvious single-subquery form
+# `(SELECT ... ORDER BY CASE WHEN b2.payment_id = p.id THEN 0 ELSE 1 END ...)`
+# - SQLite does not resolve a correlated outer-query reference (here, p.id)
+# inside a subquery's own ORDER BY expression ("no such column: p.id"), even
+# though the identical reference in that same subquery's WHERE clause resolves
+# fine. Splitting into two single-purpose subqueries (each only ever ordering
+# by the inner table's own column) sidesteps that engine quirk entirely and
+# also reads more plainly. The search filter escapes '%' and '_' in :search
+# before it's wrapped in wildcards (ESCAPE '\'), same convention as
+# booking_queries.yaml.
+
+list_transactions: |
+  WITH filtered AS (
+    SELECT
+      p.id AS transaction_id,
+      p.amount AS amount,
+      p.currency AS currency,
+      p.method AS method,
+      p.status AS payment_status,
+      p.refund_status AS refund_status,
+      p.owner_id AS customer_id,
+      p.created_date AS created_date,
+      b.id AS booking_id,
+      b.project_name AS project_name,
+      b.unit_number AS unit_number,
+      cu.first_name AS customer_first_name,
+      cu.last_name AS customer_last_name,
+      CASE
+        WHEN p.refund_status = 'completed' THEN 'refunded'
+        WHEN p.refund_status IN ('pending', 'processing') THEN 'refund_pending'
+        WHEN p.method = 'cash' THEN 'cash_recorded'
+        ELSE 'captured'
+      END AS revenue_status
+    FROM divine_payments p
+    LEFT JOIN divine_bookings b ON b.id = COALESCE(
+      (SELECT b2.id FROM divine_bookings b2 WHERE b2.payment_id = p.id LIMIT 1),
+      (SELECT b2.id FROM divine_bookings b2
+       WHERE p.purpose = 'installment' AND b2.inventory_id = p.inventory_id AND b2.customer_id = p.owner_id
+       ORDER BY b2.created_date DESC LIMIT 1)
+    )
+    LEFT JOIN divine_customer_users cu ON cu.id = p.owner_id
+    WHERE p.status = 'paid'
+      AND (:search IS NULL
+           OR lower(p.id) LIKE '%' || replace(replace(lower(:search), '%', '\%'), '_', '\_') || '%' ESCAPE '\'
+           OR lower(coalesce(b.id, '')) LIKE '%' || replace(replace(lower(:search), '%', '\%'), '_', '\_') || '%' ESCAPE '\'
+           OR lower(coalesce(b.project_name, '')) LIKE '%' || replace(replace(lower(:search), '%', '\%'), '_', '\_') || '%' ESCAPE '\'
+           OR lower(coalesce(cu.first_name, '') || ' ' || coalesce(cu.last_name, '')) LIKE '%' || replace(replace(lower(:search), '%', '\%'), '_', '\_') || '%' ESCAPE '\')
+      AND (:revenue_status IS NULL
+           OR CASE
+                WHEN p.refund_status = 'completed' THEN 'refunded'
+                WHEN p.refund_status IN ('pending', 'processing') THEN 'refund_pending'
+                WHEN p.method = 'cash' THEN 'cash_recorded'
+                ELSE 'captured'
+              END = :revenue_status)
+      AND (:method IS NULL OR p.method = :method)
+      AND (:date_from IS NULL OR p.created_date >= :date_from)
+      AND (:date_to IS NULL OR p.created_date <= :date_to)
+  )
+  SELECT *, count(*) OVER() AS total_count FROM filtered
+  ORDER BY created_date DESC
+  LIMIT :limit OFFSET :offset;
+
+count_transactions: |
+  SELECT count(*) AS total FROM (
+    SELECT p.id
+    FROM divine_payments p
+    LEFT JOIN divine_bookings b ON b.id = COALESCE(
+      (SELECT b2.id FROM divine_bookings b2 WHERE b2.payment_id = p.id LIMIT 1),
+      (SELECT b2.id FROM divine_bookings b2
+       WHERE p.purpose = 'installment' AND b2.inventory_id = p.inventory_id AND b2.customer_id = p.owner_id
+       ORDER BY b2.created_date DESC LIMIT 1)
+    )
+    LEFT JOIN divine_customer_users cu ON cu.id = p.owner_id
+    WHERE p.status = 'paid'
+      AND (:search IS NULL
+           OR lower(p.id) LIKE '%' || replace(replace(lower(:search), '%', '\%'), '_', '\_') || '%' ESCAPE '\'
+           OR lower(coalesce(b.id, '')) LIKE '%' || replace(replace(lower(:search), '%', '\%'), '_', '\_') || '%' ESCAPE '\'
+           OR lower(coalesce(b.project_name, '')) LIKE '%' || replace(replace(lower(:search), '%', '\%'), '_', '\_') || '%' ESCAPE '\'
+           OR lower(coalesce(cu.first_name, '') || ' ' || coalesce(cu.last_name, '')) LIKE '%' || replace(replace(lower(:search), '%', '\%'), '_', '\_') || '%' ESCAPE '\')
+      AND (:revenue_status IS NULL
+           OR CASE
+                WHEN p.refund_status = 'completed' THEN 'refunded'
+                WHEN p.refund_status IN ('pending', 'processing') THEN 'refund_pending'
+                WHEN p.method = 'cash' THEN 'cash_recorded'
+                ELSE 'captured'
+              END = :revenue_status)
+      AND (:method IS NULL OR p.method = :method)
+      AND (:date_from IS NULL OR p.created_date >= :date_from)
+      AND (:date_to IS NULL OR p.created_date <= :date_to)
+  ) counted;
+
+get_transaction_by_id: |
+  SELECT
+    p.id AS transaction_id,
+    p.amount AS amount,
+    p.currency AS currency,
+    p.method AS method,
+    p.status AS payment_status,
+    p.refund_status AS refund_status,
+    p.owner_id AS customer_id,
+    p.created_date AS created_date,
+    p.razorpay_payment_id AS razorpay_payment_id,
+    p.utr_number AS utr_number,
+    b.id AS booking_id,
+    b.project_name AS project_name,
+    b.unit_number AS unit_number,
+    cu.first_name AS customer_first_name,
+    cu.last_name AS customer_last_name,
+    CASE
+      WHEN p.refund_status = 'completed' THEN 'refunded'
+      WHEN p.refund_status IN ('pending', 'processing') THEN 'refund_pending'
+      WHEN p.method = 'cash' THEN 'cash_recorded'
+      ELSE 'captured'
+    END AS revenue_status
+  FROM divine_payments p
+  LEFT JOIN divine_bookings b ON b.id = COALESCE(
+    (SELECT b2.id FROM divine_bookings b2 WHERE b2.payment_id = p.id LIMIT 1),
+    (SELECT b2.id FROM divine_bookings b2
+     WHERE p.purpose = 'installment' AND b2.inventory_id = p.inventory_id AND b2.customer_id = p.owner_id
+     ORDER BY b2.created_date DESC LIMIT 1)
+  )
+  LEFT JOIN divine_customer_users cu ON cu.id = p.owner_id
+  WHERE p.id = :transaction_id AND p.status = 'paid'
+  LIMIT 1;
+
+get_summary: |
+  -- Sums are bucketed by the exact same revenue_status CASE expression that
+  -- list_transactions/count_transactions/get_transaction_by_id use (never a
+  -- separately-written condition) so captured_amount + cash_amount +
+  -- refund_pending_amount + refunded_amount always sums to gross_amount, and
+  -- a row labeled e.g. 'captured' in the transactions table can never fall
+  -- into a different bucket here - including a refund_status='failed' row,
+  -- which the shared CASE (deliberately) treats the same as 'none': the
+  -- refund attempt didn't reduce what was actually collected, so it stays
+  -- captured/cash_recorded rather than silently vanishing from every bucket.
+  SELECT
+    count(*) AS total_transactions,
+    coalesce(sum(amount), 0) AS gross_amount,
+    coalesce(sum(CASE WHEN revenue_status != 'refunded' THEN amount ELSE 0 END), 0) AS net_amount,
+    coalesce(sum(CASE WHEN revenue_status = 'captured' THEN amount ELSE 0 END), 0) AS captured_amount,
+    coalesce(sum(CASE WHEN revenue_status = 'cash_recorded' THEN amount ELSE 0 END), 0) AS cash_amount,
+    coalesce(sum(CASE WHEN revenue_status = 'refund_pending' THEN amount ELSE 0 END), 0) AS refund_pending_amount,
+    coalesce(sum(CASE WHEN revenue_status = 'refunded' THEN amount ELSE 0 END), 0) AS refunded_amount
+  FROM (
+    SELECT
+      p.amount AS amount,
+      CASE
+        WHEN p.refund_status = 'completed' THEN 'refunded'
+        WHEN p.refund_status IN ('pending', 'processing') THEN 'refund_pending'
+        WHEN p.method = 'cash' THEN 'cash_recorded'
+        ELSE 'captured'
+      END AS revenue_status
+    FROM divine_payments p
+    WHERE p.status = 'paid'
+      AND (:date_from IS NULL OR p.created_date >= :date_from)
+      AND (:date_to IS NULL OR p.created_date <= :date_to)
+  ) settled_payments;
