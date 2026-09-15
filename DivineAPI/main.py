@@ -31,6 +31,7 @@ from DivineAPI.admin_booking_kyc_api import router as admin_booking_kyc_router
 from DivineAPI.admin_revenue_api import router as admin_revenue_router
 from DivineAPI.admin_payments_api import router as admin_payments_router
 from DivineAPI.admin_refunds_api import router as admin_refunds_router
+from DivineAPI.admin_help_support_api import router as admin_help_support_router
 from DivineService import serviceHealth
 
 
@@ -136,3 +137,4 @@ app.include_router(admin_booking_kyc_router)
 app.include_router(admin_revenue_router)
 app.include_router(admin_payments_router)
 app.include_router(admin_refunds_router)
+app.include_router(admin_help_support_router)
