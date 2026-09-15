@@ -214,6 +214,85 @@ def test_reject_raises_booking_not_reviewable_for_already_cancelled():
     persistence.update_decision.assert_not_called()
 
 
+def test_cancel_an_already_booked_plot_unbooks_instead_of_releasing_from_review():
+    """The client's new requirement: cancel must also work once a plot is already
+    fully booked (KYC approved), not just while still pending_kyc_review - and it
+    must unbook the unit (booked -> available), not call the KYC-review-only
+    release path."""
+    svc, persistence, inventory, payment_service, document_service, customer_persistence = _service()
+    booked = _booking(status="booked", kyc_status="verified", version=2)
+    updated_booking = _booking(status="cancelled", kyc_status="verified", version=3)
+    persistence.get_by_id.side_effect = [booked, updated_booking]
+    persistence.update_decision.return_value = updated_booking
+    persistence.list_decisions.return_value = []
+    customer_persistence.get_by_id.return_value = None
+    document_service.admin_get_latest.return_value = (None, None, None)
+
+    detail = svc.cancel("BKG-1", admin_id="DV0001", note="Customer asked to cancel", expected_version=2)
+
+    inventory.unbook_unit_for_payment.assert_called_once_with(id="INV-1", payment_id="pay1")
+    inventory.unbook_unit.assert_not_called()
+    inventory.release_from_kyc_review.assert_not_called()
+    persistence.update_decision.assert_called_once_with(
+        id="BKG-1", expected_version=2, status="cancelled", kyc_status="verified",
+        admin_note="Customer asked to cancel")
+    payment_service.initiate_refund.assert_called_once_with("pay1", reason="Customer asked to cancel")
+    assert detail["status"] == "cancelled"
+
+
+def test_cancel_raises_booking_not_cancellable_for_already_terminal_booking():
+    svc, persistence, inventory, *_ = _service()
+    persistence.get_by_id.return_value = _booking(status="rejected")
+    try:
+        svc.cancel("BKG-1", admin_id="DV0001", note="x", expected_version=1)
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert str(e) == "booking_not_cancellable"
+    persistence.update_decision.assert_not_called()
+    inventory.unbook_unit.assert_not_called()
+    inventory.release_from_kyc_review.assert_not_called()
+
+
+def test_cancel_sends_project_specific_cash_office_address():
+    """Suraksha Enclave cash-refund cancellations must point the customer to the
+    Ganaur site office, not the default OPS Divine Greens office."""
+    svc, persistence, inventory, payment_service, document_service, customer_persistence = _service()
+    booked = _booking(status="booked", kyc_status="verified", version=1, project_name="Suraksha Enclave")
+    updated_booking = _booking(status="cancelled", kyc_status="verified", version=2,
+                               project_name="Suraksha Enclave")
+    persistence.get_by_id.side_effect = [booked, updated_booking]
+    persistence.update_decision.return_value = updated_booking
+    persistence.list_decisions.return_value = []
+    customer_persistence.get_by_id.return_value = SimpleNamespace(
+        first_name="Rehan", last_name="Sharma", email="rehan@example.com", phone="9999999998")
+    document_service.admin_get_latest.return_value = (None, None, None)
+    payment_service.get.return_value = SimpleNamespace(method="cash", status="paid",
+                                                        razorpay_payment_id=None, utr_number=None)
+
+    svc.cancel("BKG-1", admin_id="DV0001", note="Customer asked to cancel", expected_version=1)
+
+    email_service = svc._email_service_override
+    email_service.send_booking_cancellation_async.assert_called_once()
+    kwargs = email_service.send_booking_cancellation_async.call_args.kwargs
+    assert "ganaur" in kwargs["refund_instructions"].lower()
+
+
+def test_cancel_refund_failure_does_not_fail_the_cancel():
+    svc, persistence, inventory, payment_service, document_service, customer_persistence = _service()
+    updated_booking = _booking(status="cancelled", kyc_status="rejected", version=2)
+    persistence.get_by_id.side_effect = [_booking(), updated_booking]
+    persistence.update_decision.return_value = updated_booking
+    persistence.list_decisions.return_value = []
+    customer_persistence.get_by_id.return_value = None
+    document_service.admin_get_latest.return_value = (None, None, None)
+    payment_service.initiate_refund.side_effect = RuntimeError("gateway down")
+
+    detail = svc.cancel("BKG-1", admin_id="DV0001", note="Customer asked to cancel", expected_version=1)
+
+    assert detail["status"] == "cancelled"
+    persistence.add_decision.assert_called_once()
+
+
 # ---------- list_mine / get_receipt ----------
 
 def test_list_mine_returns_empty_list_for_no_bookings():

@@ -140,6 +140,20 @@ unbook_unit: |
   WHERE id = :id AND status = 'booked'
   RETURNING *;
 
+# Same effect as unbook_unit, but only for the SAME payment currently holding the
+# unit - used by the admin Cancel-a-booked-plot path, which (unlike approve()'s
+# narrow version-conflict rollback via plain unbook_unit) is reachable any time
+# for any booking id, so it must not release a unit some other payment now owns.
+unbook_unit_for_payment: |
+  UPDATE divine_project_inventory
+  SET status = 'available',
+      booked_at = NULL,
+      booked_payment_id = NULL,
+      booked_by = NULL,
+      last_updated_date = :now
+  WHERE id = :id AND status = 'booked' AND booked_payment_id = :payment_id
+  RETURNING *;
+
 # ---- Booking KYC review (see Divinepersistence/persistence_booking.py) ----
 # Payment settlement now HOLDS the unit for admin KYC review instead of
 # immediately booking it - book_unit (above) is unchanged/still used by the

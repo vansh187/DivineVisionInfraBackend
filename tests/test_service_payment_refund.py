@@ -170,6 +170,173 @@ def test_initiate_refund_handles_none_amount_without_crashing():
     assert kwargs["refund_amount"] is None
 
 
+def test_initiate_refund_razorpay_corrupt_amount_never_raises_and_settles_pending():
+    """Regression guard: amount_paise's float()/int(round(...)) conversion used
+    to run BEFORE the retry loop's try/except - a corrupt/non-numeric amount
+    would then escape this 'never raises' method uncaught instead of settling
+    'pending' like any other failed attempt."""
+    svc, persistence = _service()
+    persistence.get_by_id.return_value = _row(amount="not-a-number")
+    persistence.update_refund_status.return_value = _row(refund_status="pending")
+
+    result = svc.initiate_refund("pay1", reason="KYC rejected")
+
+    _, kwargs = persistence.update_refund_status.call_args
+    assert kwargs["refund_status"] == "pending"
+    assert "manual retry" in kwargs["refund_note"]
+    assert result is not None
+
+
+@patch.object(servicePayment, "_client")
+def test_initiate_refund_razorpay_retries_once_on_transient_failure_then_succeeds(mock_client):
+    """A single transient gateway error (timeout, blip) must not strand the
+    refund at 'pending' - the built-in one-retry should recover it within the
+    same call, so most such failures never need an admin's manual retry."""
+    svc, persistence = _service()
+    persistence.get_by_id.return_value = _row()
+    persistence.update_refund_status.return_value = _row(refund_status="completed")
+    mock_client.return_value.payment.refund.side_effect = [
+        RuntimeError("gateway timeout"), {"id": "rfnd_retry_1", "status": "processed"},
+    ]
+
+    svc.initiate_refund("pay1", reason="KYC rejected")
+
+    assert mock_client.return_value.payment.refund.call_count == 2
+    _, kwargs = persistence.update_refund_status.call_args
+    assert kwargs["refund_status"] == "completed"
+    assert kwargs["razorpay_refund_id"] == "rfnd_retry_1"
+
+
+@patch.object(servicePayment, "_client")
+def test_initiate_refund_razorpay_both_attempts_failing_settles_pending(mock_client):
+    svc, persistence = _service()
+    persistence.get_by_id.return_value = _row()
+    persistence.update_refund_status.return_value = _row(refund_status="pending")
+    mock_client.return_value.payment.refund.side_effect = RuntimeError("gateway down")
+
+    svc.initiate_refund("pay1", reason="KYC rejected")
+
+    assert mock_client.return_value.payment.refund.call_count == 2
+    _, kwargs = persistence.update_refund_status.call_args
+    assert kwargs["refund_status"] == "pending"
+    assert "manual retry" in kwargs["refund_note"]
+
+
+@patch.object(servicePayment, "_client")
+def test_initiate_refund_razorpay_any_successful_gateway_call_settles_completed(mock_client):
+    """A successful (non-raising) gateway call always settles 'completed' -
+    there's no refund webhook in this codebase to later advance a finer-grained
+    'processing' state, so persisting anything less final would strand the
+    refund with no path to ever reach 'completed'."""
+    svc, persistence = _service()
+    persistence.get_by_id.return_value = _row()
+    persistence.update_refund_status.return_value = _row(refund_status="completed")
+    mock_client.return_value.payment.refund.return_value = {"id": "rfnd_async", "status": "pending"}
+
+    svc.initiate_refund("pay1")
+
+    _, kwargs = persistence.update_refund_status.call_args
+    assert kwargs["refund_status"] == "completed"
+    assert kwargs["refund_completed_date"] is not None
+
+
+def test_retry_razorpay_refund_raises_not_found():
+    svc, persistence = _service()
+    persistence.get_by_id.return_value = None
+    try:
+        svc.retry_razorpay_refund("pay1")
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert str(e) == "not_found"
+
+
+def test_retry_razorpay_refund_raises_not_a_razorpay_refund_for_cash():
+    svc, persistence = _service()
+    persistence.get_by_id.return_value = _row(method="cash", refund_status="pending")
+    try:
+        svc.retry_razorpay_refund("pay1")
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert str(e) == "not_a_razorpay_refund"
+    persistence.update_refund_status.assert_not_called()
+
+
+def test_retry_razorpay_refund_raises_refund_not_retryable_when_not_pending():
+    """The claim query itself is the source of truth for eligibility - a
+    non-'pending' row fails the atomic claim and is refused, without ever
+    touching update_refund_status again or calling the gateway."""
+    svc, persistence = _service()
+    persistence.get_by_id.return_value = _row(refund_status="none")
+    persistence.claim_refund_retry.return_value = None
+    try:
+        svc.retry_razorpay_refund("pay1")
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert str(e) == "refund_not_retryable"
+    persistence.update_refund_status.assert_not_called()
+
+
+def test_retry_razorpay_refund_raises_refund_not_retryable_when_already_completed():
+    svc, persistence = _service()
+    persistence.get_by_id.return_value = _row(refund_status="completed")
+    persistence.claim_refund_retry.return_value = None
+    try:
+        svc.retry_razorpay_refund("pay1")
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert str(e) == "refund_not_retryable"
+
+
+def test_retry_razorpay_refund_refuses_to_call_gateway_again_when_a_refund_id_already_exists():
+    """Defense in depth against a duplicate gateway refund: the claim query's own
+    WHERE clause excludes a row that already has a razorpay_refund_id, so this
+    never even reaches the gateway call."""
+    svc, persistence = _service()
+    persistence.get_by_id.return_value = _row(refund_status="pending", razorpay_refund_id="rfnd_existing")
+    persistence.claim_refund_retry.return_value = None
+    with patch.object(servicePayment, "_client") as mock_client:
+        try:
+            svc.retry_razorpay_refund("pay1")
+            assert False, "expected ValueError"
+        except ValueError as e:
+            assert str(e) == "refund_not_retryable"
+        mock_client.return_value.payment.refund.assert_not_called()
+
+
+def test_retry_razorpay_refund_uses_the_atomic_claim_not_the_raw_get_by_id_row():
+    """Regression guard for the concurrency fix: retry must act on whatever
+    claim_refund_retry's compare-and-swap returns (the source of truth at the
+    moment of the claim), not the earlier get_by_id snapshot - two concurrent
+    retries must never both pass a plain Python-level check."""
+    svc, persistence = _service()
+    persistence.get_by_id.return_value = _row(refund_status="pending")
+    persistence.claim_refund_retry.return_value = None
+
+    try:
+        svc.retry_razorpay_refund("pay1")
+        assert False, "expected ValueError - the claim losing must be respected"
+    except ValueError as e:
+        assert str(e) == "refund_not_retryable"
+    persistence.claim_refund_retry.assert_called_once_with(id="pay1")
+
+
+@patch.object(servicePayment, "_client")
+def test_retry_razorpay_refund_happy_path_recovers_a_stuck_refund(mock_client):
+    svc, persistence = _service()
+    persistence.get_by_id.return_value = _row(refund_status="pending")
+    persistence.claim_refund_retry.return_value = _row(refund_status="processing")
+    persistence.update_refund_status.return_value = _row(refund_status="completed")
+    mock_client.return_value.payment.refund.return_value = {"id": "rfnd_recovered", "status": "processed"}
+
+    result = svc.retry_razorpay_refund("pay1", reason="admin retry")
+
+    mock_client.return_value.payment.refund.assert_called_once()
+    _, kwargs = persistence.update_refund_status.call_args
+    assert kwargs["refund_status"] == "completed"
+    assert kwargs["razorpay_refund_id"] == "rfnd_recovered"
+    assert result.refund_status == "completed"
+
+
 @patch.object(servicePayment, "_client")
 def test_initiate_refund_razorpay_none_amount_omits_amount_kwarg(mock_client):
     """No amount on the row -> don't send amount to Razorpay at all (their API

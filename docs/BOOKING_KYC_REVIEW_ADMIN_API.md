@@ -155,15 +155,24 @@ match the booking's current version exactly.
 |---|---|
 | **Approve** | KYC verified. Plot flips to `booked`. Customer's receipt/PDF download unlocks. Customer gets a "KYC Verified — Booking Confirmed" email with your note. |
 | **Reject** | KYC failed. Plot releases back to `available`. A refund is started (see below). Customer gets a "KYC Review — Action Needed" email with your note and refund instructions. |
-| **Cancel** | Admin cancels the booking outright (e.g. customer asked to cancel) — same plot-release + refund effect as Reject, recorded as a distinct `cancelled` action in the timeline so it's distinguishable from a KYC rejection. |
+| **Cancel** | Admin cancels the booking outright (e.g. customer asked to cancel) — allowed both while still `pending_kyc_review` **and** once already `booked` (post-approval). Releases/unbooks the plot, starts a refund (see below), and **always** emails the customer with refund instructions, recorded as a distinct `cancelled` action in the timeline so it's distinguishable from a KYC rejection. |
 
 ### Refund behavior on Reject/Cancel (automatic, nothing the frontend needs to send)
 - **Paid via Razorpay (online):** a real refund is triggered through Razorpay's API
-  immediately.
-- **Paid via cash:** no gateway involved — the customer is told to collect the cash refund
-  from the office within 5–7 business days.
-- **Paid via RTGS/NEFT:** no gateway involved — a manual bank transfer refund is queued for
-  the business team to execute within 5–7 business days.
+  immediately, and the customer is emailed that it's on its way to their original payment
+  method.
+- **Paid via cash:** no gateway involved — the customer is emailed to collect the cash
+  refund from the project's site office within 5–7 working days. The office address in the
+  email is project-specific: OPS Divine Greens customers are pointed to the OPS Divine
+  Greens office, Suraksha Enclave customers to the Ganaur site office.
+- **Paid via RTGS/NEFT (UTR):** no gateway involved — the admin processes the transfer
+  manually, and the customer is emailed that the refund will be credited within 5–7 working
+  days.
+
+A refund-notification email is sent to the customer in every case above — a Razorpay,
+cash, or RTGS/NEFT payment all result in an email, even if the automatic refund/gateway
+call itself fails (that failure is logged for manual follow-up, never surfaced as an error
+on this endpoint — the booking decision and plot release have already succeeded).
 
 ### Errors (all three endpoints)
 | Status | `detail` | Meaning |
@@ -171,7 +180,8 @@ match the booking's current version exactly.
 | 401 | — | missing/invalid/non-admin token |
 | 404 | `not_found` | unknown booking id |
 | 409 | `version_conflict` | your `version` doesn't match the booking's current version — **re-fetch the detail and show the latest state**; someone else (or you, in another tab) already decided it, or your copy is stale. |
-| 409 | `booking_not_reviewable` | the booking was already Approved/Rejected/Cancelled — same remedy as above |
+| 409 | `booking_not_reviewable` | (Approve/Reject only) the booking isn't `pending_kyc_review` — same remedy as above |
+| 409 | `booking_not_cancellable` | (Cancel only) the booking is already `rejected`/`cancelled` — same remedy as above |
 | 409 | `inventory_confirm_failed` | (Approve only, rare) the plot could not be confirmed at the DB level — re-fetch and retry |
 | 422 | — | `version` missing or not a positive integer |
 | 500 | `internal_error` | unexpected server error — safe to retry |

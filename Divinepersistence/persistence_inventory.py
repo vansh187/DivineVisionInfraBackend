@@ -255,6 +255,28 @@ class persistenceInventory:
                 db.rollback()
                 raise
 
+    def unbook_unit_for_payment(self, id: str, payment_id: str):
+        """Admin-cancel-a-booked-plot path: 'booked' -> 'available', only for the
+        SAME payment currently holding the unit - same payment-matched guard as
+        release_from_kyc_review, so a stale/mismatched booking row can never
+        release a unit some other payment now owns. Returns None if the unit
+        isn't currently 'booked' under that payment."""
+        with self._session_factory() as db:
+            try:
+                now = datetime.now(timezone.utc)
+                result = db.execute(text(self._q("unbook_unit_for_payment")), {
+                    "id": id, "payment_id": payment_id, "now": now,
+                })
+                row = result.mappings().first()
+                if not row:
+                    db.rollback()
+                    return None
+                db.commit()
+                return RowWrapper(row)
+            except Exception:
+                db.rollback()
+                raise
+
     # ---- Booking KYC review -----------------------------------------------
     def hold_for_kyc_review(self, id: str, payment_id: str, customer_id: str = None):
         """Race-safe flip to 'pending_kyc_review' - the plot-booking payment's

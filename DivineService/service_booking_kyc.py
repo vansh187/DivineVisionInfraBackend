@@ -1,9 +1,21 @@
 import logging
+import os
 from Divinepersistence import persistenceBooking, persistenceInventory, persistenceCustomer
 from DivineService.service_payment import servicePayment
 from DivineService.service_document import serviceDocument
 
 logger = logging.getLogger(__name__)
+
+# Cash-refund pickup addresses for a cancelled booking - project-specific per the
+# client's requirement (Suraksha Enclave customers collect from the Ganaur site
+# office, everyone else from the OPS Divine Greens office). The OPS office reuses
+# DIVINE_PROJECT_ADDRESS - the SAME env var service_demand_letter.py and
+# service_payment_receipt.py already use for that physical office - so a single
+# address change (e.g. the office relocating) stays in sync across every
+# customer-facing document/email instead of drifting behind a second var.
+_DEFAULT_OPS_OFFICE_ADDRESS = "OPS Divine Greens - Sec-16, Taraori, Karnal, Haryana 132116"
+_DEFAULT_SURAKSHA_OFFICE_ADDRESS = ("Suraksha Enclave Site Office - Village Garhi Kesri, Sector-15, "
+                                    "Ganaur, Sonipat, Haryana")
 
 # The KYC document checklist for a booking review - Aadhaar (front/back), PAN,
 # applicant photo, and a cancelled cheque (bank-account proof, for any future
@@ -21,6 +33,10 @@ _DOCUMENT_LABELS = {
 }
 
 _ACTIVE_STATUSES = ("pending_kyc_review",)
+# cancel() is allowed at either stage: still under KYC review, or already
+# approved/booked - the client's requirement is that an admin can cancel an
+# already-booked plot too, e.g. at the customer's own request post-approval.
+_CANCELLABLE_STATUSES = ("pending_kyc_review", "booked")
 
 
 class serviceBookingKyc:
@@ -368,12 +384,139 @@ class serviceBookingKyc:
         return self._reject_or_cancel(booking_id, admin_id, note, expected_version,
                                       target_status="rejected", action_label="rejected")
 
+    def _require_cancellable(self, booking):
+        """cancel() is allowed while a booking is still under KYC review OR already
+        booked (approved) - only a booking already decided as rejected/cancelled is
+        terminal. Kept separate from _require_reviewable since approve/reject must
+        stay restricted to the pending_kyc_review stage only."""
+        if (getattr(booking, "status", None) or "") not in _CANCELLABLE_STATUSES:
+            raise ValueError("booking_not_cancellable")
+
+    def _cash_pickup_office(self, project_name: str) -> str:
+        """Which office address a cash-refund pickup email should point the
+        customer to - Suraksha Enclave -> the Ganaur site office, everything else
+        (including an unrecognised/blank project) -> the OPS Divine Greens office."""
+        try:
+            name = (project_name or "").strip().lower()
+            if "suraksha" in name:
+                return os.getenv("DIVINE_SURAKSHA_OFFICE_ADDRESS", _DEFAULT_SURAKSHA_OFFICE_ADDRESS)
+            return os.getenv("DIVINE_PROJECT_ADDRESS", _DEFAULT_OPS_OFFICE_ADDRESS)
+        except Exception:  # pragma: no cover - defensive, env/string ops only
+            return _DEFAULT_OPS_OFFICE_ADDRESS
+
+    def _refund_instructions_for(self, booking, payment) -> str:
+        """Customer-facing refund copy shared by the Reject and Cancel emails -
+        branches on how the money arrived, exactly matching
+        servicePayment.initiate_refund's own branching so the email never promises
+        something different from what the refund pipeline actually does. Kept as
+        one shared method (rather than duplicated per-caller copy) precisely so a
+        cash refund gets the same project-specific office address regardless of
+        which decision triggered it."""
+        try:
+            method = (getattr(payment, "method", None) or "razorpay").lower() if payment else "razorpay"
+            if method == "razorpay":
+                return "Your payment is being refunded automatically to your original payment method."
+            if method == "cash":
+                office = self._cash_pickup_office(getattr(booking, "project_name", None))
+                return f"Please collect your cash refund from our office at {office} within 5-7 business days."
+            return ("A manual bank transfer (NEFT/RTGS) refund is being processed by our team and will "
+                    "be credited within 5-7 business days.")
+        except Exception:  # pragma: no cover - defensive
+            return "Your refund is being processed by our team and will be completed within 5-7 business days."
+
     def cancel(self, booking_id: str, admin_id: str, note: str, expected_version: int) -> dict:
-        """Admin cancels the booking outright (e.g. at the customer's own request) -
-        same release-plot + refund-initiate effect as reject(), recorded as a
-        distinct action/status so the two are distinguishable in the timeline."""
-        return self._reject_or_cancel(booking_id, admin_id, note, expected_version,
-                                      target_status="cancelled", action_label="cancelled")
+        """Admin cancels a booking outright, at any stage up to and including an
+        already-approved (booked) plot - e.g. the customer asked to cancel after
+        KYC was already verified. Releases/unbooks the plot, initiates a refund
+        matched to how the payment arrived (automatic for Razorpay, manual
+        instructions for cash/RTGS-NEFT), and always emails the customer with
+        refund instructions regardless of payment method. Raises
+        ValueError('not_found') / ValueError('version_conflict') /
+        ValueError('booking_not_cancellable')."""
+        try:
+            booking = self._persistence.get_by_id(booking_id)
+            if not booking:
+                raise ValueError("not_found")
+            self._require_cancellable(booking)
+            self._require_current_version(booking, expected_version)
+
+            was_booked = booking.status == "booked"
+            if was_booked:
+                released = self._inventory_persistence.unbook_unit_for_payment(
+                    id=booking.inventory_id, payment_id=booking.payment_id,
+                )
+            else:
+                released = self._inventory_persistence.release_from_kyc_review(
+                    id=booking.inventory_id, payment_id=booking.payment_id,
+                )
+            if released is None:
+                # See _reject_or_cancel's identical note - a concurrent double-cancel
+                # racing here is a harmless no-op (already released), the version
+                # check on update_decision below is what actually guards against a
+                # double-applied decision; still worth logging for ops visibility.
+                logger.info(
+                    "booking_kyc.cancel_release_no_op booking_id=%s inventory_id=%s was_booked=%s",
+                    booking_id, booking.inventory_id, was_booked,
+                )
+
+            clean_note = (note or "").strip() or None
+            # A booked plot was already KYC-verified - cancelling it isn't a KYC
+            # judgment, so kyc_status is left as-is; a still-under-review booking
+            # keeps reject()'s existing "rejected" kyc_status on cancel.
+            kyc_status = booking.kyc_status if was_booked else "rejected"
+            updated = self._persistence.update_decision(
+                id=booking_id, expected_version=expected_version,
+                status="cancelled", kyc_status=kyc_status, admin_note=clean_note,
+            )
+            if not updated:
+                raise ValueError("version_conflict")
+
+            self._persistence.add_decision(booking_id, actor=admin_id, action="cancelled", note=clean_note)
+
+            payment = None
+            try:
+                payment = self._payment_service.get(booking.payment_id, requester_id=booking.customer_id)
+            except Exception:
+                payment = None
+
+            try:
+                self._payment_service.initiate_refund(booking.payment_id, reason=clean_note)
+            except Exception as e:
+                # The booking decision and plot release already succeeded (both are
+                # the customer-facing/business-critical parts) - a refund-kickoff
+                # failure here is logged for manual follow-up, never rolled back
+                # into a 500 that would make the admin think the cancel didn't work.
+                logger.warning("booking_kyc.cancel_refund_initiate_failed booking_id=%s payment_id=%s error=%s",
+                               booking_id, booking.payment_id, e)
+
+            self._notify_cancellation(booking, payment, admin_note=clean_note)
+            return self.get_detail(booking_id)
+        except ValueError:
+            raise
+        except Exception:
+            logger.exception("booking_kyc.cancel_failed booking_id=%s", booking_id)
+            raise RuntimeError("cancel_failed")
+
+    def _notify_cancellation(self, booking, payment, admin_note: str) -> None:
+        """Best-effort cancellation email - always attempted regardless of payment
+        method, per the client's requirement that a refund notice goes out in
+        every case. Never raises - same defensive shape as _notify_decision."""
+        try:
+            customer = self._customer_persistence.get_by_id(booking.customer_id)
+            email = getattr(customer, "email", None) if customer else None
+            if not email:
+                return
+            refund_instructions = self._refund_instructions_for(booking, payment)
+            from DivineService.service_email import dispatch_booking_cancellation_email
+            dispatch_booking_cancellation_email(
+                self._email(), email,
+                first_name=getattr(customer, "first_name", None),
+                project_name=booking.project_name, unit_number=booking.unit_number,
+                booking_id=booking.id, admin_note=admin_note,
+                refund_instructions=refund_instructions, amount=booking.amount,
+            )
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning("booking_kyc.cancellation_email_failed booking_id=%s error=%s", booking.id, e)
 
     def _notify_decision(self, booking, updated, decision: str, admin_note: str) -> None:
         """Best-effort KYC-decision email. Never raises - see serviceEmail's own
@@ -391,14 +534,7 @@ class serviceBookingKyc:
                     payment = self._payment_service.get(booking.payment_id, requester_id=booking.customer_id)
                 except Exception:
                     payment = None
-                method = (getattr(payment, "method", None) or "razorpay").lower()
-                if method == "razorpay":
-                    refund_instructions = "Your payment is being refunded to your original payment method."
-                elif method == "cash":
-                    refund_instructions = "Please collect your cash refund from our office within 5-7 business days."
-                else:
-                    refund_instructions = ("A manual bank transfer (NEFT/RTGS) refund will be initiated by our "
-                                           "team within 5-7 business days.")
+                refund_instructions = self._refund_instructions_for(booking, payment)
             from DivineService.service_email import dispatch_kyc_decision_email
             dispatch_kyc_decision_email(
                 self._email(), email,

@@ -312,6 +312,19 @@ class PaymentOutDTO(BaseModel):
     installment_status: Optional[str] = None
 
 
+class RefundStatusDTO(BaseModel):
+    """Response for POST /admin/payments/{payment_id}/refund/retry - the payment's
+    refund bookkeeping after a retried Razorpay gateway attempt."""
+    id: str
+    method: str
+    refund_status: Literal["none", "pending", "processing", "completed", "failed"]
+    refund_amount: Optional[float] = None
+    razorpay_refund_id: Optional[str] = None
+    refund_initiated_date: Optional[datetime] = None
+    refund_completed_date: Optional[datetime] = None
+    refund_note: Optional[str] = None
+
+
 # project is a plain str (not a Literal) on every visit DTO below so an
 # unrecognized value can be turned into a 400 "invalid_project" by the service
 # layer instead of an automatic 422 from Pydantic - see service_visit.py's

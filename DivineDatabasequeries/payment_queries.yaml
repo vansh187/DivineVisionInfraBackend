@@ -21,3 +21,15 @@ update_refund_status: |
   refund_completed_date = :refund_completed_date, refund_note = :refund_note,
   last_updated_date = :last_updated_date
   WHERE id = :id RETURNING *;
+
+# Atomic compare-and-swap for POST /admin/payments/{id}/refund/retry - flips
+# 'pending' -> 'processing' ONLY when it's still 'pending' with no
+# razorpay_refund_id, so two concurrent retry requests for the same stuck
+# refund can never both pass and both call the Razorpay gateway; the loser
+# gets no row back and is refused. 'processing' here is a short-lived claim
+# marker, not a persisted gateway state - the same call immediately finalizes
+# it to 'completed' or back to 'pending' once the gateway attempt returns.
+claim_refund_retry: |
+  UPDATE divine_payments SET refund_status = 'processing', last_updated_date = :now
+  WHERE id = :id AND method = 'razorpay' AND refund_status = 'pending' AND razorpay_refund_id IS NULL
+  RETURNING *;
