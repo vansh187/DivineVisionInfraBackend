@@ -30,6 +30,7 @@ from DivineAPI.booking_api import router as booking_router
 from DivineAPI.admin_booking_kyc_api import router as admin_booking_kyc_router
 from DivineAPI.admin_revenue_api import router as admin_revenue_router
 from DivineAPI.admin_payments_api import router as admin_payments_router
+from DivineAPI.admin_refunds_api import router as admin_refunds_router
 from DivineService import serviceHealth
 
 
@@ -48,6 +49,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     RATE_LIMIT_EXEMPT_PATHS = {
         "/admin/customers", "/admin/brokers", "/admin/visits", "/admin/bookings",
         "/admin/revenue/summary", "/admin/revenue/transactions",
+        "/admin/refunds",
     }
 
     # Caps how many distinct client:path buckets are retained at once - without a bound,
@@ -133,3 +135,4 @@ app.include_router(booking_router)
 app.include_router(admin_booking_kyc_router)
 app.include_router(admin_revenue_router)
 app.include_router(admin_payments_router)
+app.include_router(admin_refunds_router)

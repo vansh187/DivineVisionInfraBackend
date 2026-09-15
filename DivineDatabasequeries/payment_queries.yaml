@@ -33,3 +33,14 @@ claim_refund_retry: |
   UPDATE divine_payments SET refund_status = 'processing', last_updated_date = :now
   WHERE id = :id AND method = 'razorpay' AND refund_status = 'pending' AND razorpay_refund_id IS NULL
   RETURNING *;
+
+# Admin confirms a cash/rtgs_neft refund (no gateway, so no automatic
+# confirmation is possible) was actually paid out - atomic compare-and-swap,
+# only applies while still a manual method with a refund in flight, so it can
+# never mark a razorpay refund "collected" or double-apply to an
+# already-completed one.
+mark_refund_collected: |
+  UPDATE divine_payments SET refund_status = 'completed', refund_completed_date = :now,
+  refund_note = :note, last_updated_date = :now
+  WHERE id = :id AND method IN ('cash', 'rtgs_neft') AND refund_status IN ('pending', 'processing')
+  RETURNING *;

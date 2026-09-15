@@ -177,6 +177,27 @@ class persistencePayment:
                 db.rollback()
                 raise
 
+    def mark_manual_refund_collected(self, id: str, note: str = None) -> PaymentModel:
+        """Atomic compare-and-swap: 'pending'/'processing' -> 'completed', only for
+        a cash/rtgs_neft refund - see mark_refund_collected in payment_queries.yaml.
+        Returns None if not eligible (razorpay, already completed, or no refund in
+        flight)."""
+        with self._session_factory() as db:
+            try:
+                query = self._queries.get("mark_refund_collected")
+                result = db.execute(text(query), {
+                    "id": id, "note": note, "now": datetime.now(timezone.utc),
+                })
+                row = result.mappings().first()
+                if not row:
+                    db.rollback()
+                    return None
+                db.commit()
+                return RowWrapper(row)
+            except Exception:
+                db.rollback()
+                raise
+
     def get_by_id(self, id: str):
         with self._session_factory() as db:
             query = self._queries.get("get_by_id")
