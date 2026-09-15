@@ -2,11 +2,11 @@ import os
 import time
 import logging
 from typing import Optional, Literal
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from sqlalchemy.exc import IntegrityError
 
 from DivineDTO.models import (
-    AdminCreateDTO, AdminLoginDTO, AdminOutDTO, AdminTokenDTO, AdminAccessTokenDTO, AdminRefreshDTO,
+    AdminCreateDTO, AdminLoginDTO, AdminOutDTO, AdminProfileDTO, AdminTokenDTO, AdminAccessTokenDTO, AdminRefreshDTO,
     CustomerListResponseDTO, CustomerListItemDTO, CustomerCreateDTO, BrokerListResponseDTO,
     AdminVisitListResponseDTO, AdminVisitListItemDTO,
     ForgotPasswordDTO, ResetPasswordDTO, MessageDTO,
@@ -87,6 +87,45 @@ def admin_refresh(dto: AdminRefreshDTO):
         raise HTTPException(status_code=500, detail="internal_error")
     finally:
         logger.debug("admin_refresh_latency_ms=%.2f", (time.monotonic() - start) * 1000)
+
+
+@router.get("/profile", response_model=AdminProfileDTO)
+def admin_profile(current_admin: dict = Depends(get_current_admin)):
+    """Current admin profile for the admin panel header/profile page."""
+    start = time.monotonic()
+    try:
+        return _admin_service.profile(current_admin["sub"])
+    except ValueError:
+        raise HTTPException(status_code=404, detail="not_found")
+    except Exception:
+        logger.exception("admin_profile_failed admin_id=%s", current_admin.get("sub"))
+        raise HTTPException(status_code=500, detail="internal_error")
+    finally:
+        logger.debug("admin_profile_latency_ms=%.2f", (time.monotonic() - start) * 1000)
+
+
+@router.post("/profile/photo", response_model=AdminProfileDTO)
+def upload_admin_profile_photo(
+    file: UploadFile = File(...),
+    current_admin: dict = Depends(get_current_admin),
+):
+    """Upload and apply the current admin's profile photo."""
+    start = time.monotonic()
+    try:
+        file_bytes = file.file.read()
+        return _admin_service.upload_profile_photo(current_admin["sub"], file_bytes, file.content_type)
+    except ValueError as e:
+        code = str(e)
+        if code == "not_found":
+            raise HTTPException(status_code=404, detail="not_found")
+        raise HTTPException(status_code=400, detail=code)
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    except Exception:
+        logger.exception("admin_profile_photo_upload_failed admin_id=%s", current_admin.get("sub"))
+        raise HTTPException(status_code=500, detail="internal_error")
+    finally:
+        logger.debug("admin_profile_photo_upload_latency_ms=%.2f", (time.monotonic() - start) * 1000)
 
 
 @router.post("/forgot-password", response_model=MessageDTO)

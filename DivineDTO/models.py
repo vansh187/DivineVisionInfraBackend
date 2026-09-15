@@ -110,6 +110,17 @@ class AdminOutDTO(BaseModel):
     last_updated_date: Optional[datetime]
 
 
+class AdminProfileDTO(AdminOutDTO):
+    """Current admin profile for GET /admin/profile.
+
+    phone is nullable because the current admin table does not store it yet.
+    avatar_url is populated after POST /admin/profile/photo.
+    """
+    phone: Optional[str] = None
+    avatar_url: Optional[str] = None
+    initials: str
+
+
 class AdminTokenDTO(BaseModel):
     access_token: str
     refresh_token: str
