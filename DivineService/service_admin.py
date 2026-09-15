@@ -186,6 +186,7 @@ class serviceAdmin:
             resp = requests.post(
                 upload_url,
                 headers={
+                    "apikey": self._service_key,
                     "Authorization": f"Bearer {self._service_key}",
                     "Content-Type": content_type,
                     "x-upsert": "false",
@@ -194,6 +195,10 @@ class serviceAdmin:
                 timeout=30,
             )
             if resp.status_code not in (200, 201):
+                logger.warning(
+                    "admin_profile_photo_storage_upload_rejected status=%s bucket=%s path=%s body=%s",
+                    resp.status_code, self._profile_photo_bucket, object_path, (resp.text or "")[:500],
+                )
                 raise RuntimeError(f"storage_upload_failed:{resp.status_code}")
         except RuntimeError:
             raise
@@ -210,7 +215,7 @@ class serviceAdmin:
             delete_url = f"{self._supabase_url}/storage/v1/object/{bucket or self._profile_photo_bucket}/{object_path}"
             requests.delete(
                 delete_url,
-                headers={"Authorization": f"Bearer {self._service_key}"},
+                headers={"apikey": self._service_key, "Authorization": f"Bearer {self._service_key}"},
                 timeout=30,
             )
         except Exception:

@@ -173,3 +173,11 @@ The profile endpoints read from the existing `divine_admin_users` table plus the
 ## Supabase Storage Notes
 
 Create a public Supabase Storage bucket named `admin-profile-photos`, or set `SUPABASE_ADMIN_PROFILE_PHOTO_BUCKET` to another public bucket name. The backend stores the public object URL in `profile_photo_url` so the admin panel can display it directly.
+
+Run this once to create/verify the bucket:
+
+```bash
+python scripts/setup_admin_profile_photo_bucket.py
+```
+
+The bucket must be public because `avatar_url` is stored as a direct public Storage URL.
