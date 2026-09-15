@@ -25,6 +25,11 @@ _DEFAULT_FROM_NAME = "Divine Vision Infra"
 _DEFAULT_CUSTOMER_LOGIN_URL = "https://www.divinevisioninfra.com"
 _DEFAULT_PARTNER_LOGIN_URL = "https://www.divinevisioninfra.com"
 
+# Where admin-panel "Help & Support" tickets are notified. Configured entirely
+# via the SUPPORT_TICKET_EMAIL env var (e.g. set in Render) - no hardcoded
+# fallback, so an unset env var means tickets are simply not emailed rather
+# than silently going to a stale address baked into the code.
+
 # Optional brand logo embedded inline (as a CID attachment). Falls back to a
 # typographic wordmark when the file is absent.
 _DEFAULT_LOGO_PATH = str(Path(__file__).resolve().parent / "assets" / "divine_logo.png")
@@ -50,6 +55,7 @@ class serviceEmail:
         self._customer_login_url = (os.getenv("DIVINE_CUSTOMER_LOGIN_URL") or _DEFAULT_CUSTOMER_LOGIN_URL).strip()
         self._partner_login_url = (os.getenv("DIVINE_PARTNER_LOGIN_URL") or _DEFAULT_PARTNER_LOGIN_URL).strip()
         self._logo_b64 = _load_logo_b64(logo_path or os.getenv("DIVINE_LOGO_PATH") or _DEFAULT_LOGO_PATH)
+        self._support_ticket_email = (os.getenv("SUPPORT_TICKET_EMAIL") or "").strip()
         # True only when a send could actually succeed. Callers check this before
         # dispatching so an unconfigured environment never spawns no-op threads.
         self.enabled = bool(self._api_key and self._from_email)
@@ -338,6 +344,56 @@ class serviceEmail:
             return self._send(to=to, subject="Booking Cancelled — Divine Vision Infra", html=html, text=text)
         except Exception as e:
             logger.warning("booking_cancellation_email_failed email=%s error=%s", email, e)
+            return False
+
+    # ---- admin panel "Help & Support" tickets ---------------------------
+    def send_ticket_notification(self, ticket_number: str, subject: str, description: str,
+                                 raised_by_name: str = None, raised_by_email: str = None,
+                                 recipient: str = None) -> bool:
+        """Notifies the support inbox of a new admin-panel Help & Support
+        ticket. Synchronous (not fire-and-forget, unlike most sends here): the
+        whole point of the endpoint is this email, so its own success/failure
+        response must depend on whether the send actually went out. Still
+        never raises - a malformed template or unexpected error is treated the
+        same as a send failure, returning False."""
+        try:
+            to = (recipient or self._support_ticket_email or "").strip()
+            if not to or "@" not in to:
+                logger.warning("ticket_email_skipped: no valid support recipient configured")
+                return False
+            clean_subject = (subject or "").strip()
+            if not clean_subject:
+                logger.info("ticket_email_skipped: empty subject")
+                return False
+            clean_description = (description or "").strip()
+            clean_number = (ticket_number or "").strip() or "N/A"
+            raiser = (raised_by_name or "").strip() or "Unknown admin"
+
+            rows = [("Ticket #", clean_number), ("Raised By", raiser)]
+            clean_raiser_email = (raised_by_email or "").strip()
+            if clean_raiser_email:
+                rows.append(("Raised By Email", clean_raiser_email))
+            rows.append(("Subject", clean_subject))
+
+            safe_description = _escape(clean_description).replace("\n", "<br>") or "(no description provided)"
+            body = [safe_description]
+
+            html = _luxury_email_html(
+                headline="New Support Ticket", preheader=f"{clean_number} - {clean_subject}",
+                greeting_name="Support Team", body_paragraphs=body, detail_rows=rows,
+                cta_label="Open Admin Panel", cta_url=self._customer_login_url,
+                footer_note="This is an automated notification from the Divine Vision Infra admin panel.",
+                has_logo=bool(self._logo_b64), accent="#2c3e50",
+            )
+            text = _luxury_email_text(
+                "New Support Ticket", "Support Team",
+                [clean_description or "(no description provided)"], rows,
+                "Open Admin Panel", self._customer_login_url,
+            )
+            email_subject = f"[{clean_number}] {clean_subject}"
+            return self._send(to=to, subject=email_subject, html=html, text=text)
+        except Exception as e:
+            logger.warning("ticket_email_failed ticket_number=%s error=%s", ticket_number, e)
             return False
 
     # ----------------------------------------------------------------- private

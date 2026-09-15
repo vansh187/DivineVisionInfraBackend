@@ -1022,3 +1022,33 @@ class CustomerProfileDTO(BaseModel):
     # when the list is non-empty. Old clients that only read `booking` keep working.
     booking: CustomerBookingDTO = Field(default_factory=CustomerBookingDTO)
     bookings: List[CustomerBookingDTO] = Field(default_factory=list)
+
+
+class SupportTicketRequestDTO(BaseModel):
+    """Body for POST /admin/support-tickets - the admin panel's Help & Support
+    form. Both fields are required; whitespace-only input is rejected the same
+    as empty input so a blank form can never raise a support email."""
+    subject: str = Field(..., min_length=1, max_length=150)
+    description: str = Field(..., min_length=1, max_length=3000)
+
+    @field_validator("subject")
+    @classmethod
+    def subject_must_not_be_blank(cls, v: str) -> str:
+        return _require_non_blank(v, min_length=1)
+
+    @field_validator("description")
+    @classmethod
+    def description_must_not_be_blank(cls, v: str) -> str:
+        return _require_non_blank(v, min_length=1)
+
+
+class SupportTicketResponseDTO(BaseModel):
+    """Response for POST /admin/support-tickets. `email_sent` tells the admin
+    panel whether the notification actually reached the support inbox, in
+    case it wants to surface that distinctly from a hard failure."""
+    ticket_number: str
+    subject: str
+    description: str
+    raised_by: Optional[str] = None
+    submitted_date: datetime
+    email_sent: bool
