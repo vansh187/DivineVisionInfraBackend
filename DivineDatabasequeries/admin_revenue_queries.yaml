@@ -154,15 +154,34 @@ get_transaction_by_id: |
   LIMIT 1;
 
 get_summary: |
+  -- Sums are bucketed by the exact same revenue_status CASE expression that
+  -- list_transactions/count_transactions/get_transaction_by_id use (never a
+  -- separately-written condition) so captured_amount + cash_amount +
+  -- refund_pending_amount + refunded_amount always sums to gross_amount, and
+  -- a row labeled e.g. 'captured' in the transactions table can never fall
+  -- into a different bucket here - including a refund_status='failed' row,
+  -- which the shared CASE (deliberately) treats the same as 'none': the
+  -- refund attempt didn't reduce what was actually collected, so it stays
+  -- captured/cash_recorded rather than silently vanishing from every bucket.
   SELECT
     count(*) AS total_transactions,
-    coalesce(sum(p.amount), 0) AS gross_amount,
-    coalesce(sum(CASE WHEN p.refund_status != 'completed' THEN p.amount ELSE 0 END), 0) AS net_amount,
-    coalesce(sum(CASE WHEN p.method != 'cash' AND (p.refund_status IS NULL OR p.refund_status = 'none') THEN p.amount ELSE 0 END), 0) AS captured_amount,
-    coalesce(sum(CASE WHEN p.method = 'cash' AND (p.refund_status IS NULL OR p.refund_status = 'none') THEN p.amount ELSE 0 END), 0) AS cash_amount,
-    coalesce(sum(CASE WHEN p.refund_status IN ('pending', 'processing') THEN p.amount ELSE 0 END), 0) AS refund_pending_amount,
-    coalesce(sum(CASE WHEN p.refund_status = 'completed' THEN p.amount ELSE 0 END), 0) AS refunded_amount
-  FROM divine_payments p
-  WHERE p.status = 'paid'
-    AND (:date_from IS NULL OR p.created_date >= :date_from)
-    AND (:date_to IS NULL OR p.created_date <= :date_to);
+    coalesce(sum(amount), 0) AS gross_amount,
+    coalesce(sum(CASE WHEN revenue_status != 'refunded' THEN amount ELSE 0 END), 0) AS net_amount,
+    coalesce(sum(CASE WHEN revenue_status = 'captured' THEN amount ELSE 0 END), 0) AS captured_amount,
+    coalesce(sum(CASE WHEN revenue_status = 'cash_recorded' THEN amount ELSE 0 END), 0) AS cash_amount,
+    coalesce(sum(CASE WHEN revenue_status = 'refund_pending' THEN amount ELSE 0 END), 0) AS refund_pending_amount,
+    coalesce(sum(CASE WHEN revenue_status = 'refunded' THEN amount ELSE 0 END), 0) AS refunded_amount
+  FROM (
+    SELECT
+      p.amount AS amount,
+      CASE
+        WHEN p.refund_status = 'completed' THEN 'refunded'
+        WHEN p.refund_status IN ('pending', 'processing') THEN 'refund_pending'
+        WHEN p.method = 'cash' THEN 'cash_recorded'
+        ELSE 'captured'
+      END AS revenue_status
+    FROM divine_payments p
+    WHERE p.status = 'paid'
+      AND (:date_from IS NULL OR p.created_date >= :date_from)
+      AND (:date_to IS NULL OR p.created_date <= :date_to)
+  ) settled_payments;

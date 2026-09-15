@@ -106,7 +106,9 @@ class serviceRevenue:
                     search=clean_search, revenue_status=status, method=method,
                     date_from=parsed_from, date_to=parsed_to,
                 )
-            total_pages = (total_items + page_size - 1) // page_size if page_size else 0
+            # page_size < 1 already raised invalid_pagination above, so page_size
+            # is always truthy here - no falsy-guard needed on this division.
+            total_pages = (total_items + page_size - 1) // page_size
             return {
                 "items": [self._as_transaction_item(r) for r in rows],
                 "pagination": {

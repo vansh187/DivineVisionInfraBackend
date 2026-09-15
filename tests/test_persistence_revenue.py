@@ -32,10 +32,11 @@ _CAPTURED_ID = None
 _CASH_ID = None
 _REFUNDED_ID = None
 _REFUND_PENDING_ID = None
+_FAILED_REFUND_ID = None
 
 
 def setup_module(module):
-    global _CUSTOMER_A, _CUSTOMER_B, _CAPTURED_ID, _CASH_ID, _REFUNDED_ID, _REFUND_PENDING_ID
+    global _CUSTOMER_A, _CUSTOMER_B, _CAPTURED_ID, _CASH_ID, _REFUNDED_ID, _REFUND_PENDING_ID, _FAILED_REFUND_ID
     db_file = os.path.join(os.getcwd(), "test_db.sqlite")
     try:
         if os.path.exists(db_file):
@@ -120,6 +121,21 @@ def setup_module(module):
     payment_persistence.update_refund_status(refund_pending.id, refund_status="pending", refund_amount=500000)
     _REFUND_PENDING_ID = refund_pending.id
 
+    # Settled cash payment whose refund attempt FAILED (a real, schema-valid
+    # refund_status - see service_payment.initiate_refund's own
+    # existing_refund_status guard). The money was never actually returned,
+    # so this must still count as revenue (cash_recorded), not silently drop
+    # out of every summary bucket.
+    failed_refund = payment_persistence.create_payment(
+        id=str(uuid.uuid4()), owner_id=_CUSTOMER_B, owner_role="customer",
+        amount=300000, currency="INR", status="created", method="cash", purpose="other",
+    )
+    payment_persistence.update_payment_status(
+        failed_refund.id, status="paid", razorpay_payment_id=None, razorpay_signature=None,
+    )
+    payment_persistence.update_refund_status(failed_refund.id, refund_status="failed", refund_amount=300000)
+    _FAILED_REFUND_ID = failed_refund.id
+
     # Never-settled payment - must NEVER show up in revenue at all.
     payment_persistence.create_payment(
         id=str(uuid.uuid4()), owner_id=_CUSTOMER_A, owner_role="customer",
@@ -141,6 +157,7 @@ def test_settled_fixtures_are_all_returned():
     assert _CASH_ID in rows
     assert _REFUNDED_ID in rows
     assert _REFUND_PENDING_ID in rows
+    assert _FAILED_REFUND_ID in rows
 
 
 def test_never_settled_payment_is_excluded():
@@ -305,8 +322,32 @@ def test_rebooked_plot_never_duplicates_an_installment_payment():
 
 def test_get_summary_reflects_fixture_amounts():
     summary = _persistence().get_summary()
-    assert int(summary.total_transactions) >= 4
+    assert int(summary.total_transactions) >= 5
     assert float(summary.captured_amount) >= 3120000
-    assert float(summary.cash_amount) >= 980000
+    assert float(summary.cash_amount) >= 980000 + 300000  # cash_recorded + the failed-refund cash fixture
     assert float(summary.refunded_amount) >= 2100000
     assert float(summary.refund_pending_amount) >= 500000
+
+
+def test_failed_refund_still_counts_as_settled_revenue():
+    """A refund_status='failed' payment never actually got its money back -
+    it must still be labeled cash_recorded/captured (never vanish from the
+    revenue_status bucketing, and never fall out of every summary bucket)."""
+    row = _persistence().get_transaction(_FAILED_REFUND_ID)
+    assert row is not None
+    assert row.revenue_status == "cash_recorded"
+
+
+def test_summary_buckets_always_sum_to_gross_amount():
+    """captured_amount + cash_amount + refund_pending_amount + refunded_amount
+    must always equal gross_amount, over the WHOLE settled-payments universe -
+    not just this file's fixtures - because every bucket is derived from the
+    same exhaustive, mutually-exclusive CASE expression. If any settled row
+    (e.g. a refund_status='failed' one) fell into none of the four buckets,
+    this sum would come up short of gross_amount."""
+    summary = _persistence().get_summary()
+    bucket_total = (
+        float(summary.captured_amount) + float(summary.cash_amount)
+        + float(summary.refund_pending_amount) + float(summary.refunded_amount)
+    )
+    assert abs(bucket_total - float(summary.gross_amount)) < 0.01

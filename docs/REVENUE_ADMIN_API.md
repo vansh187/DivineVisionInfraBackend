@@ -64,9 +64,16 @@ Field meanings:
 - `gross_amount` — sum of every settled payment's amount, refunds included.
 - `net_amount` — `gross_amount` minus anything already **refunded** (`refund_pending` money
   is still counted as net revenue until the refund actually completes).
-- `captured_amount` / `cash_amount` — the two "money actually kept, no refund in flight"
-  buckets, split by method, for the Captured / Cash Recorded stat cards.
+- `captured_amount` / `cash_amount` — the two "money actually kept" buckets, split by
+  method, for the Captured / Cash Recorded stat cards. A payment whose refund attempt
+  **failed** is counted here too — the money was never actually returned, so it stays
+  captured/cash revenue rather than disappearing from every bucket.
 - `refund_pending_amount` / `refunded_amount` — for the refund-related stat card(s).
+
+`captured_amount + cash_amount + refund_pending_amount + refunded_amount` always equals
+`gross_amount` — the four buckets are exhaustive and mutually exclusive over every settled
+payment in range, so you can safely render them as a breakdown of one total without a
+"leftover"/"other" slice.
 
 A bad `date_from`/`date_to` (not `YYYY-MM-DD`) is rejected with `422` before it reaches the
 service. `date_from` after `date_to` is rejected with `400 {"detail": "date_from_after_date_to"}`.
