@@ -18,5 +18,6 @@ from .service_inventory import serviceInventory
 from .service_email import serviceEmail
 from .service_password_reset import servicePasswordReset, PasswordResetError
 from .service_booking_kyc import serviceBookingKyc
+from .service_revenue import serviceRevenue
 
-__all__ = ["serviceCustomer", "serviceCustomerProfile", "serviceBroker", "serviceAdmin", "serviceAdminCustomers", "serviceAdminBrokers", "serviceAdminVisits", "serviceDocument", "serviceKyc", "serviceHealth", "servicePayment", "serviceVisit", "serviceMarketTrend", "serviceBrokerCommission", "serviceChatbot", "serviceZoho", "serviceInventory", "serviceEmail", "servicePasswordReset", "PasswordResetError", "serviceBookingKyc"]
+__all__ = ["serviceCustomer", "serviceCustomerProfile", "serviceBroker", "serviceAdmin", "serviceAdminCustomers", "serviceAdminBrokers", "serviceAdminVisits", "serviceDocument", "serviceKyc", "serviceHealth", "servicePayment", "serviceVisit", "serviceMarketTrend", "serviceBrokerCommission", "serviceChatbot", "serviceZoho", "serviceInventory", "serviceEmail", "servicePasswordReset", "PasswordResetError", "serviceBookingKyc", "serviceRevenue"]

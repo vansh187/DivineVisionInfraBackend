@@ -457,6 +457,44 @@ class BookingDetailDTO(BaseModel):
     last_activity_at: Optional[datetime]
 
 
+class RevenueTransactionItemDTO(BaseModel):
+    """One row of the admin panel's Revenue tab (GET /admin/revenue/transactions)."""
+    transaction_id: str
+    booking_id: Optional[str] = None
+    customer_id: str
+    customer_name: Optional[str] = None
+    project_name: Optional[str] = None
+    unit_number: Optional[str] = None
+    amount: float
+    currency: str
+    method: str
+    status: Literal["captured", "cash_recorded", "refund_pending", "refunded"]
+    created_at: Optional[datetime]
+
+
+class RevenueTransactionListResponseDTO(BaseModel):
+    items: List[RevenueTransactionItemDTO]
+    pagination: PaginationDTO
+
+
+class RevenueTransactionDetailDTO(RevenueTransactionItemDTO):
+    razorpay_payment_id: Optional[str] = None
+    utr_number: Optional[str] = None
+
+
+class RevenueSummaryDTO(BaseModel):
+    """GET /admin/revenue/summary - totals behind the Revenue tab's stat cards,
+    over the same settled-payments universe (and optional date range) as
+    GET /admin/revenue/transactions."""
+    total_transactions: int
+    gross_amount: float
+    net_amount: float
+    captured_amount: float
+    cash_amount: float
+    refund_pending_amount: float
+    refunded_amount: float
+
+
 class BookingDecisionRequestDTO(BaseModel):
     """Body for Approve/Reject/Cancel - `version` must match the booking's
     current version (from the last GET) or the request is rejected with a 409,
