@@ -200,6 +200,10 @@ class servicePayment:
             customer = self._load_customer(owner_id)
             if not customer:
                 return
+            # push_booking_contact_async runs everything - the Zoho upsert AND (on
+            # success) fetching+attaching the booking-application PDF - on a background
+            # thread, so nothing here (including the PDF fetch) blocks this caller
+            # (the admin's KYC-approval request).
             serviceZoho().push_booking_contact_async(
                 customer_id=owner_id,
                 first_name=getattr(customer, "first_name", None),

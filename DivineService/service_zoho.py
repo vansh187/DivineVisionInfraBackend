@@ -13,8 +13,10 @@ logger = logging.getLogger(__name__)
 
 _TOKEN_URL_TMPL = "https://{domain}/oauth/v2/token"
 _UPSERT_URL_TMPL = "{api_base}/crm/v3/{module}/upsert"
+_ATTACHMENT_URL_TMPL = "{api_base}/crm/v3/{module}/{record_id}/Attachments"
 _TOKEN_REFRESH_MARGIN_SECONDS = 60
 _REQUEST_TIMEOUT_SECONDS = 8
+_ATTACHMENT_REQUEST_TIMEOUT_SECONDS = 30
 _ENV_FILE_PATH = Path(__file__).resolve().parent.parent / ".env"
 
 
@@ -265,20 +267,24 @@ class serviceZoho:
             return False
 
     # ---- Generic upsert -----------------------------------------------------
-    def _upsert(self, module: str, record: dict, duplicate_check_fields: list) -> bool:
+    def _upsert(self, module: str, record: dict, duplicate_check_fields: list, return_id: bool = False):
+        """Returns bool (synced or not) by default. With return_id=True, returns the
+        Zoho record's id string on success or None on failure instead - used by callers
+        (e.g. push_booking_contact) that need the id to attach a file afterwards."""
+        failure = None if return_id else False
         try:
             token = self._get_access_token()
             if not token:
-                return False
+                return failure
 
             try:
                 clean_record = {k: v for k, v in record.items() if v not in (None, "")}
             except Exception as e:
                 logger.warning("zoho_record_clean_failed module=%s error=%s", module, e)
-                return False
+                return failure
             if not clean_record:
                 logger.info("zoho_upsert_skipped module=%s reason=empty_record", module)
-                return False
+                return failure
 
             body = {"data": [clean_record], "duplicate_check_fields": duplicate_check_fields}
             url = _UPSERT_URL_TMPL.format(api_base=self._get_api_base(), module=module)
@@ -299,7 +305,7 @@ class serviceZoho:
                 logger.info("zoho_upsert_request_done module=%s status=%s", module, resp.status_code)
             except requests.RequestException as e:
                 logger.warning("zoho_upsert_request_failed module=%s error=%s", module, e)
-                return False
+                return failure
 
             try:
                 if resp.status_code not in (200, 201):
@@ -309,14 +315,14 @@ class serviceZoho:
                         # still valid (revoked/invalidated server-side) - drop it so the
                         # NEXT call refreshes instead of failing silently for up to an hour.
                         self._invalidate_cached_token()
-                    return False
+                    return failure
                 result = resp.json()
                 entries = result.get("data") if isinstance(result, dict) else None
                 entry = entries[0] if entries else {}
                 status = entry.get("status") if isinstance(entry, dict) else None
             except Exception as e:
                 logger.warning("zoho_upsert_response_parse_failed module=%s error=%s", module, e)
-                return False
+                return failure
 
             if status != "success":
                 logger.warning("zoho_upsert_rejected module=%s response=%s", module, entry)
@@ -325,15 +331,73 @@ class serviceZoho:
                         self._invalidate_cached_token()
                 except Exception as e:
                     logger.warning("zoho_token_invalidate_check_failed: %s", e)
-                return False
+                return failure
+            record_id = (entry.get("details") or {}).get("id")
             logger.info(
                 "zoho_upsert_succeeded module=%s action=%s record_id=%s",
-                module, entry.get("action"), (entry.get("details") or {}).get("id"),
+                module, entry.get("action"), record_id,
             )
-            return True
+            return record_id if return_id else True
         except Exception as e:
             # Final safety net - this method must never raise into the caller.
             logger.warning("zoho_upsert_unexpected_exception module=%s error=%s", module, e)
+            return failure
+
+    # ---- Attachments ----------------------------------------------------------
+    def upload_attachment(self, module: str, record_id: str, file_bytes: bytes, file_name: str) -> bool:
+        """Attaches a file (e.g. a customer's signed booking-application PDF) to an
+        EXISTING Zoho record - call this after _upsert(..., return_id=True) has already
+        created/updated that record. Same never-raise contract as _upsert: a Zoho outage
+        or bad file must not propagate to the caller, it just means the attachment
+        didn't make it this time."""
+        try:
+            if not record_id or not file_bytes:
+                logger.info("zoho_attachment_upload_skipped module=%s record_id=%s reason=missing_record_id_or_bytes",
+                            module, record_id)
+                return False
+            token = self._get_access_token()
+            if not token:
+                return False
+
+            url = _ATTACHMENT_URL_TMPL.format(api_base=self._get_api_base(), module=module, record_id=record_id)
+            try:
+                logger.info("zoho_attachment_upload_start module=%s record_id=%s file_name=%s size=%s",
+                            module, record_id, file_name, len(file_bytes))
+                resp = requests.post(
+                    url,
+                    headers={"Authorization": f"Zoho-oauthtoken {token}"},
+                    files={"file": (file_name or "attachment.pdf", file_bytes, "application/pdf")},
+                    timeout=_ATTACHMENT_REQUEST_TIMEOUT_SECONDS,
+                )
+                logger.info("zoho_attachment_upload_request_done module=%s record_id=%s status=%s",
+                             module, record_id, resp.status_code)
+            except requests.RequestException as e:
+                logger.warning("zoho_attachment_upload_request_failed module=%s record_id=%s error=%s", module, record_id, e)
+                return False
+
+            try:
+                if resp.status_code not in (200, 201):
+                    logger.warning("zoho_attachment_upload_failed module=%s record_id=%s status=%s body=%s",
+                                   module, record_id, resp.status_code, resp.text[:300])
+                    if resp.status_code in (401, 403):
+                        self._invalidate_cached_token()
+                    return False
+                result = resp.json()
+                entries = result.get("data") if isinstance(result, dict) else None
+                entry = entries[0] if entries else {}
+                status = entry.get("status") if isinstance(entry, dict) else None
+            except Exception as e:
+                logger.warning("zoho_attachment_upload_response_parse_failed module=%s record_id=%s error=%s",
+                               module, record_id, e)
+                return False
+
+            if status != "success":
+                logger.warning("zoho_attachment_upload_rejected module=%s record_id=%s response=%s", module, record_id, entry)
+                return False
+            logger.info("zoho_attachment_upload_succeeded module=%s record_id=%s", module, record_id)
+            return True
+        except Exception as e:
+            logger.warning("zoho_attachment_upload_exception module=%s record_id=%s error=%s", module, record_id, e)
             return False
 
     def find_by_email(self, module: str, email: str) -> dict:
@@ -505,7 +569,20 @@ class serviceZoho:
         on Email and/or Phone so a retry (e.g. the webhook re-confirming a booking
         /verify already settled) updates the same Contact instead of duplicating it;
         with neither identifier there's nothing safe to dedupe on, so the sync is
-        skipped."""
+        skipped.
+
+        Phone is written to BOTH the Phone and Mobile fields - Zoho's default Contacts
+        layout can be configured to surface either one, and without knowing which this
+        org's layout shows, populating both is the only way to guarantee the number is
+        visible.
+
+        On a successful upsert, best-effort fetches the customer's signed
+        booking-application PDF (via payment_id) and attaches it to the resulting
+        Contact record. This method is always invoked on a background thread (see
+        push_booking_contact_async / _run_async, its only real caller), so the
+        Supabase download and Zoho attachment upload here never add latency to
+        whatever request originally triggered the sync (e.g. an admin's KYC-approval
+        call) - deliberately NOT done in the caller before dispatching to that thread."""
         try:
             dup_fields = []
             if email:
@@ -536,10 +613,33 @@ class serviceZoho:
                 "First_Name": first_name,
                 "Email": email,
                 "Phone": phone,
+                "Mobile": phone,
                 "Lead_Source": "Website Plot Booking",
                 "Description": description,
             }
-            return self._upsert("Contacts", record, dup_fields)
+            record_id = self._upsert("Contacts", record, dup_fields, return_id=True)
+            success = record_id is not None
+            if success and payment_id:
+                self._attach_booking_application(record_id, payment_id, customer_id)
+            return success
         except Exception as e:
             logger.warning("zoho_push_booking_contact_exception customer_id=%s error=%s", customer_id, e)
             return False
+
+    def _attach_booking_application(self, record_id: str, payment_id: str, customer_id: str) -> None:
+        """Best-effort: fetches the customer's signed booking-application PDF from
+        Supabase (via serviceDocument, imported lazily to avoid a module-level import
+        cycle) and attaches it to the given Zoho Contact. Called from push_booking_contact
+        AFTER it already runs on a background thread (see that method's docstring), so
+        the Supabase round-trip here never blocks the request that triggered the sync.
+        Never raises - a missing PDF or a Supabase/Zoho outage is logged and skipped."""
+        try:
+            from DivineService.service_document import serviceDocument
+            pdf_bytes, pdf_filename = serviceDocument().get_booking_application_bytes(payment_id)
+            if not pdf_bytes:
+                return
+            self.upload_attachment("Contacts", record_id, pdf_bytes,
+                                    pdf_filename or f"booking-application-{customer_id}.pdf")
+        except Exception as e:
+            logger.warning("zoho_attach_booking_application_failed record_id=%s payment_id=%s error=%s",
+                           record_id, payment_id, e)
