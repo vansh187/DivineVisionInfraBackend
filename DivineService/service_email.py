@@ -975,7 +975,7 @@ def _strip_tags_pairs(pairs):
 
 # --------------------------------------------------------- instalment emails
 
-_SUPPORT_LINE = "crm2@divinevisioninfra.com / +91-92549 72701"
+_SUPPORT_LINE = "sales1@divinevisioninfra.com / +91-92549 72701"
 
 
 def _payments_deeplink(login_url: str) -> str:

@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 COMPANY = {
     "name": os.getenv("DIVINE_COMPANY_NAME", "KCG Resorts Pvt. Ltd."),
     "project": os.getenv("DIVINE_PROJECT_NAME", "OPS Divine Greens"),
-    "email": os.getenv("DIVINE_COMPANY_EMAIL", "crm2@divinevisioninfra.com"),
+    "email": os.getenv("DIVINE_COMPANY_EMAIL", "sales1@divinevisioninfra.com"),
     "web": os.getenv("DIVINE_COMPANY_WEB", "www.divinevisioninfra.com"),
     "state": "Haryana",
     "state_code": "06",
