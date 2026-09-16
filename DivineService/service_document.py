@@ -270,10 +270,10 @@ class serviceDocument:
             raise RuntimeError("storage_sign_failed:no_url")
         return f"{self._supabase_url}/storage/v1{signed_url}"
 
-    def _download_from_storage(self, object_path: str) -> bytes:
+    def _download_from_storage(self, object_path: str, bucket: str = None) -> bytes:
         if not self._supabase_url or not self._service_key:
             raise RuntimeError("storage_not_configured")
-        download_url = f"{self._supabase_url}/storage/v1/object/{self._bucket}/{object_path}"
+        download_url = f"{self._supabase_url}/storage/v1/object/{bucket or self._bucket}/{object_path}"
         try:
             resp = requests.get(
                 download_url,
@@ -716,6 +716,28 @@ class serviceDocument:
         bucket = getattr(doc, "storage_bucket", None) or self._bucket
         signed_url = self._sign_url(doc.storage_path, bucket=bucket)
         return doc, signed_url, DEFAULT_SIGNED_URL_EXPIRY_SECONDS
+
+    def get_booking_application_bytes(self, payment_id: str):
+        """Fetches the raw bytes of the customer's signed booking-application PDF for a
+        given payment (the same file uploaded via upload_booking_application) - used to
+        mirror it into Zoho as a Contact attachment once the booking is KYC-approved. No
+        document_type filter: payment_id already uniquely scopes this to the one booking
+        application uploaded against that payment. Returns (None, None) when there's
+        nothing to attach yet rather than raising, since a missing/not-yet-uploaded
+        document is an expected state, not an error."""
+        try:
+            if not payment_id:
+                return None, None
+            doc = self._persistence.get_latest_by_payment_id(payment_id)
+            if not doc:
+                return None, None
+            bucket = getattr(doc, "storage_bucket", None) or self._bucket
+            file_bytes = self._download_from_storage(doc.storage_path, bucket=bucket)
+            file_name = f"{getattr(doc, 'document_type', 'booking_application')}-{getattr(doc, 'id', payment_id)}.pdf"
+            return file_bytes, file_name
+        except Exception as e:
+            logger.warning("get_booking_application_bytes_failed payment_id=%s error=%s", payment_id, e)
+            return None, None
 
     def admin_get_latest(self, document_type: str, owner_id: str):
         """Same lookup as get_latest(), but for an admin reviewing a CUSTOMER's

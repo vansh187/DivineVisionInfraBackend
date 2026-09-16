@@ -37,6 +37,10 @@ class persistenceDocument:
             'SELECT * FROM divine_documents WHERE owner_id = :owner_id AND document_type = :document_type '
             'ORDER BY created_date DESC LIMIT 1;'
         ))
+        queries.setdefault("get_latest_by_payment_id", (
+            'SELECT * FROM divine_documents WHERE payment_id = :payment_id '
+            'ORDER BY created_date DESC LIMIT 1;'
+        ))
         self._queries = queries
         self._engine = engine
 
@@ -99,6 +103,15 @@ class persistenceDocument:
         with self._session_factory() as db:
             query = self._queries.get("get_latest_by_owner_and_type")
             result = db.execute(text(query), {"owner_id": owner_id, "document_type": document_type})
+            row = result.mappings().first()
+            if not row:
+                return None
+            return RowWrapper(row)
+
+    def get_latest_by_payment_id(self, payment_id: str):
+        with self._session_factory() as db:
+            query = self._queries.get("get_latest_by_payment_id")
+            result = db.execute(text(query), {"payment_id": payment_id})
             row = result.mappings().first()
             if not row:
                 return None
