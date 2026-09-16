@@ -612,6 +612,51 @@ class servicePayment:
         except Exception:  # pragma: no cover - name is optional on the receipt
             return None
 
+    def _load_receipt_context(self, record, milestone):
+        """(booking, form_data) for the receipt PDF - Plot Number/Area/Address come
+        from the booking-application document, Project/Unit come from divine_bookings.
+        Never raises; either half is just blank on the receipt if unavailable.
+
+        The booking-application document's own payment_id is only ever the ORIGINAL
+        plot-booking payment's id, never an instalment's - so for an instalment
+        (milestone given), the document is found via milestone.booking_id (which is
+        actually the document's id, not divine_bookings.id - see
+        service_document.py's _create_payment_milestones) rather than record.id."""
+        try:
+            from Divinepersistence import persistenceDocument
+            doc_persistence = persistenceDocument()
+            if milestone is not None:
+                doc_id = getattr(milestone, "booking_id", None)
+                doc = doc_persistence.get_by_id(doc_id) if doc_id else None
+            else:
+                doc = doc_persistence.get_latest_by_payment_id(getattr(record, "id", None))
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning("payment.receipt_document_lookup_failed payment_id=%s error=%s",
+                           getattr(record, "id", None), e)
+            doc = None
+
+        form_data = getattr(doc, "form_data", None) if doc is not None else None
+        if isinstance(form_data, str):
+            try:
+                import json
+                form_data = json.loads(form_data)
+            except Exception:
+                form_data = None
+        if not isinstance(form_data, dict):
+            form_data = None
+
+        booking = None
+        try:
+            booking_payment_id = getattr(doc, "payment_id", None) if doc is not None else getattr(record, "id", None)
+            if booking_payment_id:
+                booking = self._booking_persistence.get_by_payment_id(booking_payment_id)
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning("payment.receipt_booking_lookup_failed payment_id=%s error=%s",
+                           getattr(record, "id", None), e)
+            booking = None
+
+        return booking, form_data
+
     def _send_installment_receipt(self, record, milestone) -> None:
         """Best-effort 'payment received' email with the receipt PDF attached.
         Never raises - a mail failure must not affect the settled payment."""
@@ -622,7 +667,9 @@ class servicePayment:
                 return
             from DivineService.service_payment_receipt import generate_receipt_pdf, receipt_filename
             from DivineService.service_email import serviceEmail, dispatch_installment_receipt_email
-            pdf = generate_receipt_pdf(record, milestone=milestone, customer=customer)
+            booking, form_data = self._load_receipt_context(record, milestone)
+            pdf = generate_receipt_pdf(record, milestone=milestone, customer=customer,
+                                       booking=booking, form_data=form_data)
             label = None
             if milestone is not None:
                 label = getattr(milestone, "label", None) if not isinstance(milestone, dict) else milestone.get("label")
@@ -658,7 +705,9 @@ class servicePayment:
                 milestone = svc.milestone_by_payment(record.owner_id, record.id)
 
         from DivineService.service_payment_receipt import generate_receipt_pdf, receipt_filename
-        pdf = generate_receipt_pdf(record, milestone=milestone, customer=self._load_customer(record.owner_id))
+        booking, form_data = self._load_receipt_context(record, milestone)
+        pdf = generate_receipt_pdf(record, milestone=milestone, customer=self._load_customer(record.owner_id),
+                                   booking=booking, form_data=form_data)
         return pdf, receipt_filename(record.id)
 
     def get(self, payment_id: str, requester_id: str):
