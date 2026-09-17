@@ -1,5 +1,5 @@
 import random
-from sqlalchemy import Column, String, DateTime, text
+from sqlalchemy import Column, String, DateTime, Boolean, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from datetime import datetime, timezone
@@ -13,6 +13,7 @@ class AdminModel(Base):
     employee_id = Column(String(32), unique=True, nullable=False)
     email = Column(String(255), unique=True, nullable=False)
     password_hash = Column(String(255), nullable=False)
+    email_verified = Column(Boolean, nullable=False, default=False)
     profile_photo_url = Column(String(1000))
     profile_photo_path = Column(String(500))
     profile_photo_bucket = Column(String(100))
@@ -27,12 +28,16 @@ class persistenceAdmin:
         self._session_factory = session_factory
         queries = load_queries("admin_queries.yaml")
         queries.setdefault("create_admin", (
-            'INSERT INTO divine_admin_users(id, full_name, employee_id, email, password_hash, created_by, created_date, last_updated_by, last_updated_date) '
-            'VALUES (:id, :full_name, :employee_id, :email, :password_hash, :created_by, :created_date, :last_updated_by, :last_updated_date) RETURNING *;'
+            'INSERT INTO divine_admin_users(id, full_name, employee_id, email, password_hash, email_verified, created_by, created_date, last_updated_by, last_updated_date) '
+            'VALUES (:id, :full_name, :employee_id, :email, :password_hash, false, :created_by, :created_date, :last_updated_by, :last_updated_date) RETURNING *;'
         ))
         queries.setdefault("get_by_email", 'SELECT * FROM divine_admin_users WHERE lower(email) = lower(:email) LIMIT 1;')
         queries.setdefault("get_by_employee_id", 'SELECT * FROM divine_admin_users WHERE lower(employee_id) = lower(:employee_id) LIMIT 1;')
         queries.setdefault("get_by_id", 'SELECT * FROM divine_admin_users WHERE id = :id LIMIT 1;')
+        queries.setdefault("mark_email_verified", (
+            'UPDATE divine_admin_users SET email_verified = true, last_updated_date = :last_updated_date '
+            'WHERE lower(email) = lower(:email) RETURNING *;'
+        ))
         queries.setdefault("get_profile_by_id", (
             'SELECT id, full_name, employee_id, email, profile_photo_url, profile_photo_path, '
             'profile_photo_bucket, created_by, created_date, last_updated_by, last_updated_date '
@@ -103,6 +108,20 @@ class persistenceAdmin:
             if not row:
                 return None
             return RowWrapper(row)
+
+    def mark_email_verified(self, email: str):
+        with self._session_factory() as db:
+            try:
+                query = self._queries.get("mark_email_verified")
+                result = db.execute(text(query), {
+                    "email": email, "last_updated_date": datetime.now(timezone.utc),
+                })
+                row = result.mappings().first()
+                db.commit()
+                return RowWrapper(row) if row else None
+            except Exception:
+                db.rollback()
+                raise
 
     def get_by_id(self, id: str):
         with self._session_factory() as db:

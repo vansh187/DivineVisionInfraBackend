@@ -93,6 +93,22 @@ class AdminCreateDTO(BaseModel):
     def full_name_must_not_be_blank(cls, v: str) -> str:
         return _require_non_blank(v, min_length=2)
 
+    @field_validator("email")
+    @classmethod
+    def email_must_be_company_domain(cls, v: str) -> str:
+        if not str(v).strip().lower().endswith("@divinevisioninfra.com"):
+            raise ValueError("email must be a divinevisioninfra.com address")
+        return v
+
+
+class AdminVerifySignupDTO(BaseModel):
+    email: EmailStr
+    otp: str = Field(..., min_length=4, max_length=10)
+
+
+class AdminResendSignupOtpDTO(BaseModel):
+    email: EmailStr
+
 
 class AdminLoginDTO(BaseModel):
     email: EmailStr

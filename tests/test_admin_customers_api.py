@@ -8,6 +8,7 @@ os.environ["ADMIN_JWT_SECRET_KEY"] = "admintestsecret"
 from Divinepersistence.persistence_db import PersistenceDB
 import Divinepersistence.persistence_admin  # noqa: F401 - registers AdminModel on Base.metadata
 from DivineAPI.main import app
+from tests.admin_signup_helpers import mint_admin_access_token, signup_and_verify_admin
 
 client = TestClient(app)
 
@@ -31,13 +32,12 @@ def setup_module(module):
         pass
     PersistenceDB().create_tables()
 
-    client.post("/admin/signup", json={
+    admin_email = "customers_admin@divinevisioninfra.com"
+    signup = signup_and_verify_admin(client, {
         "full_name": "Customers Admin", "employee_id": "DV7777",
-        "email": "customers_admin@example.com", "password": "strongpassword",
+        "email": admin_email, "password": "strongpassword",
     })
-    login = client.post("/admin/login", json={"email": "customers_admin@example.com", "password": "strongpassword"})
-    assert login.status_code == 200, login.text
-    _ADMIN_TOKEN = login.json()["access_token"]
+    _ADMIN_TOKEN = mint_admin_access_token(signup.json()["id"], admin_email)
 
 
 def _auth_headers():

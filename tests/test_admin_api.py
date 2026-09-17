@@ -11,6 +11,7 @@ os.environ["ADMIN_JWT_SECRET_KEY"] = "admintestsecret"
 from Divinepersistence.persistence_db import PersistenceDB
 import Divinepersistence.persistence_admin  # noqa: F401 - registers AdminModel on Base.metadata
 from DivineAPI.main import app
+from tests.admin_signup_helpers import CapturingOtpEmail, signup_and_verify_admin
 
 client = TestClient(app)
 
@@ -29,11 +30,10 @@ def test_admin_signup_login_and_refresh_happy_path():
     payload = {
         "full_name": "Arjun Mehta",
         "employee_id": "dv1024",
-        "email": "arjun@example.com",
+        "email": "arjun@divinevisioninfra.com",
         "password": "strongpassword",
     }
-    signup = client.post("/admin/signup", json=payload)
-    assert signup.status_code == 200, signup.text
+    signup = signup_and_verify_admin(client, payload)
     data = signup.json()
     assert data["id"].startswith("A") and len(data["id"]) == 6
     assert data["employee_id"] == "DV1024"  # normalized to uppercase
@@ -53,8 +53,42 @@ def test_admin_signup_login_and_refresh_happy_path():
     assert refreshed_data["expires_in"] == 30 * 60
 
 
+def test_admin_signup_rejects_non_company_domain():
+    payload = {
+        "full_name": "Outsider",
+        "employee_id": "DV9999",
+        "email": "outsider@gmail.com",
+        "password": "strongpassword",
+    }
+    r = client.post("/admin/signup", json=payload)
+    assert r.status_code == 422, r.text
+
+
+def test_admin_login_rejects_unverified_account():
+    import DivineAPI.admin_api as admin_api
+
+    payload = {
+        "full_name": "Pending Person",
+        "employee_id": "DV2048",
+        "email": "pending@divinevisioninfra.com",
+        "password": "strongpassword",
+    }
+    fake_email = CapturingOtpEmail()
+    original_email = admin_api._admin_service._email
+    admin_api._admin_service._email = fake_email
+    try:
+        signup = client.post("/admin/signup", json=payload)
+    finally:
+        admin_api._admin_service._email = original_email
+    assert signup.status_code == 200, signup.text
+
+    login = client.post("/admin/login", json={"email": payload["email"], "password": payload["password"]})
+    assert login.status_code == 403, login.text
+    assert login.json()["detail"] == "email_not_verified"
+
+
 def test_admin_profile_autopopulates_current_admin():
-    login = client.post("/admin/login", json={"email": "arjun@example.com", "password": "strongpassword"})
+    login = client.post("/admin/login", json={"email": "arjun@divinevisioninfra.com", "password": "strongpassword"})
     token = login.json()["access_token"]
 
     r = client.get("/admin/profile", headers={"Authorization": f"Bearer {token}"})
@@ -63,7 +97,7 @@ def test_admin_profile_autopopulates_current_admin():
     data = r.json()
     assert data["full_name"] == "Arjun Mehta"
     assert data["employee_id"] == "DV1024"
-    assert data["email"] == "arjun@example.com"
+    assert data["email"] == "arjun@divinevisioninfra.com"
     assert data["initials"] == "AM"
     assert data["phone"] is None
     assert data["avatar_url"] is None
@@ -72,7 +106,7 @@ def test_admin_profile_autopopulates_current_admin():
 def test_admin_profile_requires_admin_access_token():
     assert client.get("/admin/profile").status_code == 401
 
-    login = client.post("/admin/login", json={"email": "arjun@example.com", "password": "strongpassword"})
+    login = client.post("/admin/login", json={"email": "arjun@divinevisioninfra.com", "password": "strongpassword"})
     refresh_token = login.json()["refresh_token"]
     r = client.get("/admin/profile", headers={"Authorization": f"Bearer {refresh_token}"})
     assert r.status_code == 401, r.text
@@ -81,7 +115,7 @@ def test_admin_profile_requires_admin_access_token():
 def test_admin_profile_photo_upload_stores_public_url():
     import DivineAPI.admin_api as admin_api
 
-    login = client.post("/admin/login", json={"email": "arjun@example.com", "password": "strongpassword"})
+    login = client.post("/admin/login", json={"email": "arjun@divinevisioninfra.com", "password": "strongpassword"})
     token = login.json()["access_token"]
 
     admin_api._admin_service._supabase_url = "https://fake.supabase.co"
@@ -111,7 +145,7 @@ def test_admin_profile_photo_upload_stores_public_url():
 
 
 def test_admin_profile_photo_upload_rejects_invalid_image():
-    login = client.post("/admin/login", json={"email": "arjun@example.com", "password": "strongpassword"})
+    login = client.post("/admin/login", json={"email": "arjun@divinevisioninfra.com", "password": "strongpassword"})
     token = login.json()["access_token"]
 
     r = client.post(
@@ -128,7 +162,7 @@ def test_admin_signup_rejects_employee_id_not_starting_with_dv():
     payload = {
         "full_name": "Someone Else",
         "employee_id": "XX1024",
-        "email": "someone_else@example.com",
+        "email": "someone_else@divinevisioninfra.com",
         "password": "strongpassword",
     }
     r = client.post("/admin/signup", json=payload)
@@ -136,12 +170,12 @@ def test_admin_signup_rejects_employee_id_not_starting_with_dv():
 
 
 def test_admin_login_rejects_wrong_password():
-    r = client.post("/admin/login", json={"email": "arjun@example.com", "password": "wrong-password"})
+    r = client.post("/admin/login", json={"email": "arjun@divinevisioninfra.com", "password": "wrong-password"})
     assert r.status_code == 401, r.text
 
 
 def test_admin_refresh_rejects_an_access_token():
-    login = client.post("/admin/login", json={"email": "arjun@example.com", "password": "strongpassword"})
+    login = client.post("/admin/login", json={"email": "arjun@divinevisioninfra.com", "password": "strongpassword"})
     access_token = login.json()["access_token"]
 
     r = client.post("/admin/refresh", json={"refresh_token": access_token})
@@ -151,7 +185,7 @@ def test_admin_refresh_rejects_an_access_token():
 def test_admin_protected_route_rejects_a_refresh_token():
     from DivineService.auth import get_current_admin
 
-    login = client.post("/admin/login", json={"email": "arjun@example.com", "password": "strongpassword"})
+    login = client.post("/admin/login", json={"email": "arjun@divinevisioninfra.com", "password": "strongpassword"})
     refresh_token = login.json()["refresh_token"]
 
     with pytest.raises(HTTPException) as exc_info:

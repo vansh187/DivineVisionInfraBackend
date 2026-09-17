@@ -7,7 +7,7 @@ from .persistence_db import Base, SessionLocal, engine, RowWrapper, load_queries
 class PasswordResetOtpModel(Base):
     __tablename__ = "divine_password_reset_otp"
     id = Column(String(36), primary_key=True)
-    role = Column(String(10), nullable=False)
+    role = Column(String(32), nullable=False)
     email = Column(String(255), nullable=False)
     otp_hash = Column(String(255), nullable=False)
     attempts = Column(Integer, nullable=False, default=0)

@@ -12,11 +12,20 @@ from DivineDTO.models import AdminCreateDTO, AdminLoginDTO
 
 def _service():
     persistence = MagicMock()
-    return serviceAdmin(persistence, secret_key="testsecret"), persistence
+    email = MagicMock(enabled=True)
+    email.send_otp_email.return_value = True
+    otp_persistence = MagicMock()
+    otp_persistence.get_by_role_email.return_value = None
+    return serviceAdmin(persistence, secret_key="testsecret", otp_persistence=otp_persistence, email=email), persistence
 
 
 def _dto(**overrides):
-    values = dict(full_name="Arjun Mehta", employee_id="DV1024", email="arjun@example.com", password="strongpassword")
+    values = dict(
+        full_name="Arjun Mehta",
+        employee_id="DV1024",
+        email="arjun@divinevisioninfra.com",
+        password="strongpassword",
+    )
     values.update(overrides)
     return AdminCreateDTO(**values)
 
@@ -60,7 +69,9 @@ def test_signup_hashes_password_before_persisting():
     svc, persistence = _service()
     persistence.get_by_employee_id.return_value = None
     persistence.get_by_email.return_value = None
-    persistence.create_user.return_value = MagicMock(id="A00001")
+    persistence.create_user.return_value = MagicMock(
+        id="A00001", email="arjun@divinevisioninfra.com", full_name="Arjun Mehta",
+    )
     svc.signup(_dto(), created_by="1.2.3.4")
 
     args = persistence.create_user.call_args.args
@@ -79,7 +90,9 @@ def test_login_rejects_unknown_email():
 def test_login_rejects_wrong_password():
     svc, persistence = _service()
     real_hash = svc._hash_password("correct-password")
-    persistence.get_by_email.return_value = MagicMock(id="A00001", email="admin1@example.com", password_hash=real_hash)
+    persistence.get_by_email.return_value = MagicMock(
+        id="A00001", email="admin1@example.com", password_hash=real_hash, email_verified=True,
+    )
     with pytest.raises(ValueError):
         svc.login(AdminLoginDTO(email="admin1@example.com", password="wrong-password"))
 
@@ -87,7 +100,9 @@ def test_login_rejects_wrong_password():
 def test_login_returns_access_and_refresh_tokens():
     svc, persistence = _service()
     real_hash = svc._hash_password("correct-password")
-    persistence.get_by_email.return_value = MagicMock(id="A00001", email="admin1@example.com", password_hash=real_hash)
+    persistence.get_by_email.return_value = MagicMock(
+        id="A00001", email="admin1@example.com", password_hash=real_hash, email_verified=True,
+    )
     tokens = svc.login(AdminLoginDTO(email="admin1@example.com", password="correct-password"))
 
     assert set(tokens.keys()) == {"access_token", "refresh_token", "expires_in"}
@@ -107,7 +122,9 @@ def test_login_returns_access_and_refresh_tokens():
 def test_refresh_rejects_an_access_token():
     svc, persistence = _service()
     real_hash = svc._hash_password("correct-password")
-    persistence.get_by_email.return_value = MagicMock(id="A00001", email="admin1@example.com", password_hash=real_hash)
+    persistence.get_by_email.return_value = MagicMock(
+        id="A00001", email="admin1@example.com", password_hash=real_hash, email_verified=True,
+    )
     tokens = svc.login(AdminLoginDTO(email="admin1@example.com", password="correct-password"))
 
     with pytest.raises(ValueError):
@@ -117,7 +134,9 @@ def test_refresh_rejects_an_access_token():
 def test_refresh_rejects_a_token_for_a_deleted_admin():
     svc, persistence = _service()
     real_hash = svc._hash_password("correct-password")
-    persistence.get_by_email.return_value = MagicMock(id="A00001", email="admin1@example.com", password_hash=real_hash)
+    persistence.get_by_email.return_value = MagicMock(
+        id="A00001", email="admin1@example.com", password_hash=real_hash, email_verified=True,
+    )
     tokens = svc.login(AdminLoginDTO(email="admin1@example.com", password="correct-password"))
 
     persistence.get_by_id.return_value = None
@@ -128,7 +147,9 @@ def test_refresh_rejects_a_token_for_a_deleted_admin():
 def test_refresh_issues_a_new_access_token():
     svc, persistence = _service()
     real_hash = svc._hash_password("correct-password")
-    persistence.get_by_email.return_value = MagicMock(id="A00001", email="admin1@example.com", password_hash=real_hash)
+    persistence.get_by_email.return_value = MagicMock(
+        id="A00001", email="admin1@example.com", password_hash=real_hash, email_verified=True,
+    )
     tokens = svc.login(AdminLoginDTO(email="admin1@example.com", password="correct-password"))
 
     persistence.get_by_id.return_value = MagicMock(id="A00001", email="admin1@example.com")

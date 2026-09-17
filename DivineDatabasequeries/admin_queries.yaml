@@ -1,7 +1,7 @@
 # SQL queries for the admin API
 create_admin: |
-  INSERT INTO divine_admin_users(id, full_name, employee_id, email, password_hash, created_by, created_date, last_updated_by, last_updated_date)
-  VALUES (:id, :full_name, :employee_id, :email, :password_hash, :created_by, :created_date, :last_updated_by, :last_updated_date)
+  INSERT INTO divine_admin_users(id, full_name, employee_id, email, password_hash, email_verified, created_by, created_date, last_updated_by, last_updated_date)
+  VALUES (:id, :full_name, :employee_id, :email, :password_hash, false, :created_by, :created_date, :last_updated_by, :last_updated_date)
   RETURNING *;
 get_by_email: |
   SELECT * FROM divine_admin_users WHERE lower(email) = lower(:email) LIMIT 1;
@@ -9,6 +9,10 @@ get_by_employee_id: |
   SELECT * FROM divine_admin_users WHERE lower(employee_id) = lower(:employee_id) LIMIT 1;
 get_by_id: |
   SELECT * FROM divine_admin_users WHERE id = :id LIMIT 1;
+mark_email_verified: |
+  UPDATE divine_admin_users SET email_verified = true, last_updated_date = :last_updated_date
+  WHERE lower(email) = lower(:email)
+  RETURNING *;
 get_profile_by_id: |
   SELECT
     id,
