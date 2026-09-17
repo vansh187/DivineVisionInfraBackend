@@ -1,13 +1,15 @@
 import os
 import logging
+import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 from passlib.context import CryptContext
 import jwt
 import requests
 from dotenv import load_dotenv
-from Divinepersistence import persistenceAdmin
+from Divinepersistence import persistenceAdmin, persistencePasswordReset
 from DivineDTO.models import AdminCreateDTO, AdminLoginDTO
+from DivineService.service_email import serviceEmail
 
 load_dotenv()
 
@@ -21,10 +23,41 @@ DEFAULT_PROFILE_PHOTO_BUCKET = "admin-profile-photos"
 MAX_PROFILE_PHOTO_BYTES = 5 * 1024 * 1024
 PROFILE_PHOTO_CONTENT_TYPES = {"image/jpeg": "jpg", "image/png": "png"}
 
+# Reuses the existing password-reset OTP table (role, email) under its own role
+# value, so signup verification never shares state with an actual password
+# reset for the same email.
+SIGNUP_OTP_ROLE = "admin_signup"
+SIGNUP_OTP_LENGTH = 6
+SIGNUP_OTP_EXPIRY_MINUTES = 10
+SIGNUP_OTP_RESEND_COOLDOWN_SECONDS = 30
+SIGNUP_OTP_MAX_ATTEMPTS = 5
+SIGNUP_OTP_LOCKOUT_MINUTES = 15
+
+
+def _as_aware(value):
+    if value is None:
+        return None
+    try:
+        if isinstance(value, str):
+            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+    except Exception as e:  # pragma: no cover - defensive
+        logger.warning("admin_signup.timestamp_normalize_failed error=%s", e)
+        return None
+
 
 class serviceAdmin:
-    def __init__(self, persistence: persistenceAdmin = None, secret_key: str = None):
+    def __init__(self, persistence: persistenceAdmin = None, secret_key: str = None,
+                 otp_persistence: persistencePasswordReset = None, email: serviceEmail = None):
         self._persistence = persistence or persistenceAdmin()
+        self._otp_persistence = otp_persistence or persistencePasswordReset()
+        try:
+            self._email = email or serviceEmail()
+        except Exception as e:
+            logger.warning("admin_signup.email_service_init_failed error=%s", e)
+            self._email = None
         self._supabase_url = os.getenv("SUPABASE_URL")
         self._service_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
         self._profile_photo_bucket = os.getenv("SUPABASE_ADMIN_PROFILE_PHOTO_BUCKET", DEFAULT_PROFILE_PHOTO_BUCKET)
@@ -53,9 +86,12 @@ class serviceAdmin:
             return False
 
     def signup(self, dto: AdminCreateDTO, created_by: str = None):
-        """Creates an admin account, active immediately (no approval gate). Raises
-        ValueError("employee_id_taken") / ValueError("email_taken") on a duplicate -
-        the API layer maps both to 409."""
+        """Creates an admin account and emails a signup OTP to the divinevisioninfra.com
+        address given (DTO validation already rejects any other domain). The account
+        cannot log in until verify_signup() confirms the OTP. Raises
+        ValueError("employee_id_taken") / ValueError("email_taken") on a duplicate, or
+        ValueError("otp_email_failed") if the verification email could not be sent -
+        the API layer maps all three to an error response."""
         if self._persistence.get_by_employee_id(dto.employee_id):
             raise ValueError("employee_id_taken")
         if self._persistence.get_by_email(dto.email):
@@ -64,18 +100,120 @@ class serviceAdmin:
         user = self._persistence.create_user(
             dto.full_name, dto.employee_id, dto.email, hashed, created_by=created_by,
         )
+        self._send_signup_otp(user.email, user.full_name)
         return user
+
+    def resend_signup_otp(self, email: str) -> None:
+        """Re-sends the signup OTP for an existing, not-yet-verified account. Raises
+        ValueError("not_found") if there is no such pending account, or
+        ValueError("already_verified") if it was already confirmed."""
+        email = (email or "").strip().lower()
+        user = self._persistence.get_by_email(email)
+        if not user:
+            raise ValueError("not_found")
+        if getattr(user, "email_verified", False):
+            raise ValueError("already_verified")
+        self._send_signup_otp(user.email, user.full_name)
+
+    def verify_signup(self, email: str, otp: str) -> None:
+        """Verifies the signup OTP and activates the admin account. Raises
+        ValueError with one of: otp_not_requested / too_many_attempts / otp_expired /
+        invalid_otp / not_found - the API layer maps these to 400/429 responses."""
+        email = (email or "").strip().lower()
+        row = self._otp_persistence.get_by_role_email(SIGNUP_OTP_ROLE, email)
+        if row is None:
+            raise ValueError("otp_not_requested")
+
+        now = datetime.now(timezone.utc)
+        locked_until = _as_aware(getattr(row, "locked_until", None))
+        if locked_until and now < locked_until:
+            raise ValueError("too_many_attempts")
+
+        expires_at = _as_aware(getattr(row, "expires_at", None))
+        if not expires_at or now > expires_at:
+            raise ValueError("otp_expired")
+
+        if not self._verify_otp(otp, getattr(row, "otp_hash", None)):
+            self._register_signup_otp_failure(email)
+            raise ValueError("invalid_otp")
+
+        user = self._persistence.get_by_email(email)
+        if not user:
+            raise ValueError("not_found")
+
+        self._persistence.mark_email_verified(email)
+        try:
+            self._otp_persistence.delete(SIGNUP_OTP_ROLE, email)
+        except Exception as e:
+            logger.warning("admin_signup.otp_cleanup_failed error=%s", e)
 
     def login(self, dto: AdminLoginDTO) -> dict:
         """Returns {"access_token", "refresh_token", "expires_in"} on success, else
-        raises ValueError("invalid_credentials")."""
+        raises ValueError("invalid_credentials") or ValueError("email_not_verified")."""
         email = (dto.email or "").strip().lower()
         user = self._persistence.get_by_email(email)
         if not user:
             raise ValueError("invalid_credentials")
         if not self._verify_password(dto.password, user.password_hash):
             raise ValueError("invalid_credentials")
+        if not getattr(user, "email_verified", False):
+            raise ValueError("email_not_verified")
         return self._issue_tokens(user.id, user.email)
+
+    # ------------------------------------------------------------ signup OTP
+
+    def _generate_otp(self) -> str:
+        return f"{secrets.randbelow(10 ** SIGNUP_OTP_LENGTH):0{SIGNUP_OTP_LENGTH}d}"
+
+    def _hash_otp(self, otp: str) -> str:
+        return pwd_context.hash(otp)
+
+    def _verify_otp(self, otp: str, otp_hash: str) -> bool:
+        try:
+            return pwd_context.verify(otp or "", otp_hash or "")
+        except Exception as e:
+            logger.warning("admin_signup.otp_verify_failed error=%s", e)
+            return False
+
+    def _send_signup_otp(self, email: str, full_name: str = None) -> None:
+        now = datetime.now(timezone.utc)
+        existing = self._otp_persistence.get_by_role_email(SIGNUP_OTP_ROLE, email)
+        if existing is not None:
+            last_sent = _as_aware(getattr(existing, "last_sent_date", None))
+            if last_sent and (now - last_sent).total_seconds() < SIGNUP_OTP_RESEND_COOLDOWN_SECONDS:
+                raise ValueError("too_many_requests")
+
+        otp = self._generate_otp()
+        otp_hash = self._hash_otp(otp)
+        expires_at = now + timedelta(minutes=SIGNUP_OTP_EXPIRY_MINUTES)
+        self._otp_persistence.upsert_otp(SIGNUP_OTP_ROLE, email, otp_hash, expires_at, now)
+
+        sent = False
+        try:
+            if self._email and getattr(self._email, "enabled", False):
+                first_name = (full_name or "").split(" ")[0] if full_name else None
+                sent = bool(self._email.send_otp_email(
+                    email, otp, first_name=first_name, expires_minutes=SIGNUP_OTP_EXPIRY_MINUTES,
+                ))
+        except Exception as e:
+            logger.warning("admin_signup.otp_send_exception error=%s", e)
+            sent = False
+        if not sent:
+            raise ValueError("otp_email_failed")
+
+    def _register_signup_otp_failure(self, email: str) -> None:
+        try:
+            updated = self._otp_persistence.increment_attempts(SIGNUP_OTP_ROLE, email)
+        except Exception as e:
+            logger.warning("admin_signup.attempt_increment_failed error=%s", e)
+            return
+        attempts = getattr(updated, "attempts", None) if updated else None
+        if isinstance(attempts, int) and attempts >= SIGNUP_OTP_MAX_ATTEMPTS:
+            try:
+                locked_until = datetime.now(timezone.utc) + timedelta(minutes=SIGNUP_OTP_LOCKOUT_MINUTES)
+                self._otp_persistence.lock_until(SIGNUP_OTP_ROLE, email, locked_until)
+            except Exception as e:
+                logger.warning("admin_signup.lockout_failed error=%s", e)
 
     def profile(self, admin_id: str) -> dict:
         """Returns the current admin's profile fields for the admin panel.

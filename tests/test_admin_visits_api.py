@@ -12,6 +12,7 @@ from Divinepersistence.persistence_visit import persistenceVisit
 from Divinepersistence.persistence_broker import persistenceBroker
 import Divinepersistence.persistence_admin  # noqa: F401 - registers AdminModel on Base.metadata
 from DivineAPI.main import app
+from tests.admin_signup_helpers import mint_admin_access_token, signup_and_verify_admin
 
 client = TestClient(app)
 
@@ -36,13 +37,12 @@ def setup_module(module):
         pass
     PersistenceDB().create_tables()
 
-    client.post("/admin/signup", json={
+    admin_email = "visits_admin@divinevisioninfra.com"
+    signup = signup_and_verify_admin(client, {
         "full_name": "Visits Admin", "employee_id": "DV8899",
-        "email": "visits_admin@example.com", "password": "strongpassword",
+        "email": admin_email, "password": "strongpassword",
     })
-    login = client.post("/admin/login", json={"email": "visits_admin@example.com", "password": "strongpassword"})
-    assert login.status_code == 200, login.text
-    _ADMIN_TOKEN = login.json()["access_token"]
+    _ADMIN_TOKEN = mint_admin_access_token(signup.json()["id"], admin_email)
 
     # Broker and visit are inserted straight through the persistence layer
     # rather than POST /broker/signup + POST /visits: both endpoints share a

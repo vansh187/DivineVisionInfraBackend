@@ -7,6 +7,7 @@ from sqlalchemy.exc import IntegrityError
 
 from DivineDTO.models import (
     AdminCreateDTO, AdminLoginDTO, AdminOutDTO, AdminProfileDTO, AdminTokenDTO, AdminAccessTokenDTO, AdminRefreshDTO,
+    AdminVerifySignupDTO, AdminResendSignupOtpDTO,
     CustomerListResponseDTO, CustomerListItemDTO, CustomerCreateDTO, BrokerListResponseDTO,
     AdminVisitListResponseDTO, AdminVisitListItemDTO,
     ForgotPasswordDTO, ResetPasswordDTO, MessageDTO,
@@ -30,6 +31,10 @@ _admin_visits_service = serviceAdminVisits()
 
 @router.post("/signup", response_model=AdminOutDTO)
 def admin_signup(request: Request, dto: AdminCreateDTO):
+    """Creates the account and emails a signup OTP to the given address. The DTO
+    only accepts @divinevisioninfra.com addresses, and the account cannot log in
+    until POST /admin/verify-signup confirms the OTP - so an outsider who finds
+    this URL still cannot self-activate an admin account."""
     start = time.monotonic()
     try:
         client_ip = request.client.host if request.client else None
@@ -45,7 +50,8 @@ def admin_signup(request: Request, dto: AdminCreateDTO):
             last_updated_date=user.last_updated_date,
         )
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        status_code = 429 if str(e) == "too_many_requests" else 400
+        raise HTTPException(status_code=status_code, detail=str(e))
     except IntegrityError:
         raise HTTPException(status_code=409, detail="conflict")
     except Exception:
@@ -53,6 +59,38 @@ def admin_signup(request: Request, dto: AdminCreateDTO):
         raise HTTPException(status_code=500, detail="internal_error")
     finally:
         logger.debug("admin_signup_latency_ms=%.2f", (time.monotonic() - start) * 1000)
+
+
+@router.post("/verify-signup", response_model=MessageDTO)
+def admin_verify_signup(dto: AdminVerifySignupDTO):
+    start = time.monotonic()
+    try:
+        _admin_service.verify_signup(dto.email, dto.otp)
+        return MessageDTO(message="email_verified")
+    except ValueError as e:
+        status_code = 429 if str(e) == "too_many_attempts" else 400
+        raise HTTPException(status_code=status_code, detail=str(e))
+    except Exception:
+        logger.exception("admin_verify_signup_failed")
+        raise HTTPException(status_code=500, detail="internal_error")
+    finally:
+        logger.debug("admin_verify_signup_latency_ms=%.2f", (time.monotonic() - start) * 1000)
+
+
+@router.post("/resend-signup-otp", response_model=MessageDTO)
+def admin_resend_signup_otp(dto: AdminResendSignupOtpDTO):
+    start = time.monotonic()
+    try:
+        _admin_service.resend_signup_otp(dto.email)
+        return MessageDTO(message="otp_sent")
+    except ValueError as e:
+        status_code = 429 if str(e) == "too_many_requests" else 400
+        raise HTTPException(status_code=status_code, detail=str(e))
+    except Exception:
+        logger.exception("admin_resend_signup_otp_failed")
+        raise HTTPException(status_code=500, detail="internal_error")
+    finally:
+        logger.debug("admin_resend_signup_otp_latency_ms=%.2f", (time.monotonic() - start) * 1000)
 
 
 @router.post("/login", response_model=AdminTokenDTO)
@@ -65,7 +103,9 @@ def admin_login(dto: AdminLoginDTO):
             refresh_token=tokens["refresh_token"],
             expires_in=tokens["expires_in"],
         )
-    except ValueError:
+    except ValueError as e:
+        if str(e) == "email_not_verified":
+            raise HTTPException(status_code=403, detail="email_not_verified")
         raise HTTPException(status_code=401, detail="invalid_credentials")
     except Exception:
         logger.exception("admin_login_failed")
