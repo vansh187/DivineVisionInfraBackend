@@ -1,6 +1,6 @@
 import os
 import yaml
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker, declarative_base
 from dotenv import load_dotenv
 
@@ -22,6 +22,47 @@ class PersistenceDB:
 
     def create_tables(self):
         Base.metadata.create_all(bind=self.engine)
+        self.apply_lightweight_migrations()
+
+    def apply_lightweight_migrations(self):
+        """Apply tiny idempotent schema fixes that create_all() cannot handle.
+
+        This keeps deployed databases that already have older tables aligned with
+        additive model changes without requiring a separate migration command for
+        every deploy.
+        """
+        try:
+            with self.engine.begin() as conn:
+                dialect = self.engine.dialect.name
+                inspector = inspect(conn)
+                tables = set(inspector.get_table_names())
+                if "divine_admin_users" in tables:
+                    columns = {c["name"] for c in inspector.get_columns("divine_admin_users")}
+                    if "email_verified" not in columns:
+                        if dialect == "postgresql":
+                            conn.execute(text(
+                                "ALTER TABLE divine_admin_users "
+                                "ADD COLUMN IF NOT EXISTS email_verified boolean NOT NULL DEFAULT false;"
+                            ))
+                        else:
+                            conn.execute(text(
+                                "ALTER TABLE divine_admin_users "
+                                "ADD COLUMN email_verified boolean NOT NULL DEFAULT 0;"
+                            ))
+                        conn.execute(text(
+                            "UPDATE divine_admin_users SET email_verified = true "
+                            "WHERE email_verified = false;"
+                        ))
+
+                if dialect == "postgresql" and "divine_password_reset_otp" in tables:
+                    conn.execute(text(
+                        "ALTER TABLE divine_password_reset_otp "
+                        "ALTER COLUMN role TYPE varchar(32);"
+                    ))
+        except Exception:
+            # Keep health/startup behavior consistent: table creation is best effort
+            # in this app today, and request handlers still log concrete DB failures.
+            pass
 
     def test_connection(self) -> bool:
         """Attempt a simple connection to validate DB connectivity. Returns True on success."""
