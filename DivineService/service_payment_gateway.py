@@ -48,20 +48,14 @@ class servicePaymentGateway:
     _cached_token_expiry = 0.0
 
     def __init__(self):
-        # ZOHO_PAYMENTS_MODE picks which full credential set below is active - "sandbox"
-        # (default) or "live". Lets ops flip one env var instead of overwriting every
-        # ZOHO_PAYMENTS_* value when moving between the test-mode account and the real one.
-        mode = (os.getenv("ZOHO_PAYMENTS_MODE") or "sandbox").strip().lower()
-        prefix = "ZOHO_PAYMENTS_LIVE_" if mode == "live" else "ZOHO_PAYMENTS_SANDBOX_"
-
-        self._client_id = os.getenv(f"{prefix}CLIENT_ID")
-        self._client_secret = os.getenv(f"{prefix}CLIENT_SECRET")
-        self._refresh_token = os.getenv(f"{prefix}REFRESH_TOKEN")
-        self._account_id = os.getenv(f"{prefix}ACCOUNT_ID")
-        self._accounts_domain = os.getenv(f"{prefix}ACCOUNTS_DOMAIN", "accounts.zoho.in")
-        self._api_domain = os.getenv(f"{prefix}API_DOMAIN", "payments.zoho.in")
-        self._signing_key = os.getenv(f"{prefix}SIGNING_KEY")
-        self._webhook_secret = os.getenv(f"{prefix}WEBHOOK_SECRET")
+        self._client_id = os.getenv("ZOHO_PAYMENTS_CLIENT_ID")
+        self._client_secret = os.getenv("ZOHO_PAYMENTS_CLIENT_SECRET")
+        self._refresh_token = os.getenv("ZOHO_PAYMENTS_REFRESH_TOKEN")
+        self._account_id = os.getenv("ZOHO_PAYMENTS_ACCOUNT_ID")
+        self._accounts_domain = os.getenv("ZOHO_PAYMENTS_ACCOUNTS_DOMAIN", "accounts.zoho.in")
+        self._api_domain = os.getenv("ZOHO_PAYMENTS_API_DOMAIN", "payments.zoho.in")
+        self._signing_key = os.getenv("ZOHO_PAYMENTS_SIGNING_KEY")
+        self._webhook_secret = os.getenv("ZOHO_PAYMENTS_WEBHOOK_SECRET")
 
     # ---- Config -------------------------------------------------------------
     def configured(self) -> bool:
