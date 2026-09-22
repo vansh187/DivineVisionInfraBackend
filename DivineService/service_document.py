@@ -403,8 +403,8 @@ class serviceDocument:
         document_type: str,
         project_id: str,
         payment_id: str,
-        razorpay_order_id: str,
-        razorpay_payment_id: str,
+        zoho_payments_session_id: str,
+        zoho_payment_id: str,
         form_data_raw: str,
         owner_id: str,
         owner_role: str,
@@ -452,16 +452,17 @@ class serviceDocument:
             raise PermissionError("forbidden")
         if payment.status != _PAID_PAYMENT_STATUS:
             raise ValueError("payment_not_completed")
-        # Cross-check the Razorpay identifiers the client sent against what's actually on the
-        # payment record - including when the record has none (e.g. a cash payment, which is
-        # legitimately status="paid" with razorpay_order_id/razorpay_payment_id both NULL).
-        # Requiring an exact match even against None means a client can't attach an unverified,
-        # self-reported order/payment id to a cash payment's document by supplying one while the
-        # record has none - the client-supplied values are never trusted for storage either;
-        # only payment.razorpay_order_id / payment.razorpay_payment_id are persisted below.
-        if razorpay_order_id and razorpay_order_id != payment.razorpay_order_id:
+        # Cross-check the Zoho gateway identifiers the client sent against what's actually on
+        # the payment record - including when the record has none (e.g. a cash payment, which
+        # is legitimately status="paid" with zoho_payments_session_id/zoho_payment_id both
+        # NULL). Requiring an exact match even against None means a client can't attach an
+        # unverified, self-reported session/payment id to a cash payment's document by
+        # supplying one while the record has none - the client-supplied values are never
+        # trusted for storage either; only payment.zoho_payments_session_id /
+        # payment.zoho_payment_id are persisted below.
+        if zoho_payments_session_id and zoho_payments_session_id != getattr(payment, "zoho_payments_session_id", None):
             raise ValueError("payment_mismatch")
-        if razorpay_payment_id and razorpay_payment_id != payment.razorpay_payment_id:
+        if zoho_payment_id and zoho_payment_id != getattr(payment, "zoho_payment_id", None):
             raise ValueError("payment_mismatch")
 
         # The TOTAL plot amount is now required so a full payment schedule can be
@@ -506,10 +507,10 @@ class serviceDocument:
                 project_id=project_id,
                 payment_id=payment_id,
                 # Always the payment record's own values, never the client-supplied
-                # razorpay_order_id/razorpay_payment_id params - those were only used above to
-                # verify the caller's claim matches, not as a data source to persist.
-                razorpay_order_id=payment.razorpay_order_id,
-                razorpay_payment_id=payment.razorpay_payment_id,
+                # zoho_payments_session_id/zoho_payment_id params - those were only used above
+                # to verify the caller's claim matches, not as a data source to persist.
+                zoho_payments_session_id=getattr(payment, "zoho_payments_session_id", None),
+                zoho_payment_id=getattr(payment, "zoho_payment_id", None),
             )
         except Exception:
             self._delete_from_storage(object_path, bucket=self._booking_forms_bucket)

@@ -12,8 +12,8 @@ website needs to change.
 
 ## 1. Payment response now reflects a hold, not an immediate booking
 
-`POST /payments/verify`, the Razorpay webhook, and `POST /payments/cash` all return the
-same `PaymentOutDTO` shape as before, with **two changes**:
+`POST /payments/verify`, the Zoho Payments webhook, and `POST /payments/cash` all return
+the same `PaymentOutDTO` shape as before, with **two changes**:
 
 - `inventory_status` is now `"pending_kyc_review"` on success (previously `"booked"`).
   `"conflict"` (plot already taken) and `null` (non-booking payment) are unchanged.
@@ -29,10 +29,10 @@ same `PaymentOutDTO` shape as before, with **two changes**:
   "amount": 2450000,
   "currency": "INR",
   "status": "paid",
-  "method": "razorpay",
+  "method": "zoho",
   "verified": true,
-  "razorpay_order_id": "order_NQ...",
-  "razorpay_payment_id": "pay_QX...",
+  "zoho_payments_session_id": "1000000012345",
+  "zoho_payment_id": "pay_QX...",
   "created_date": "2026-09-14T18:10:00Z",
   "inventory_id": "b0e1f2a3-4c5d-6e7f-8a9b-0c1d2e3f4a5b",
   "inventory_status": "pending_kyc_review",
@@ -108,8 +108,8 @@ Authorization: Bearer <customer_access_token>
 
 ## 4. `POST /payments/cash` — new `method` + `utr_number` fields
 
-If your "enter UTR number" payment page posts here (as an alternative to the Razorpay
-checkout), two fields were added. Fully backward compatible — omit both and it behaves
+If your "enter UTR number" payment page posts here (as an alternative to the Zoho Payments
+hosted checkout), two fields were added. Fully backward compatible — omit both and it behaves
 exactly as before (cash).
 
 **Request**

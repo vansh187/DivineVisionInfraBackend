@@ -9,6 +9,7 @@ from .service_document import serviceDocument
 from .service_kyc import serviceKyc
 from .service_health import serviceHealth
 from .service_payment import servicePayment
+from .service_payment_gateway import servicePaymentGateway
 from .service_visit import serviceVisit
 from .service_market_trend import serviceMarketTrend
 from .service_broker_commission import serviceBrokerCommission
@@ -22,4 +23,4 @@ from .service_revenue import serviceRevenue
 from .service_refund import serviceRefund
 from .service_help_support import serviceHelpSupport
 
-__all__ = ["serviceCustomer", "serviceCustomerProfile", "serviceBroker", "serviceAdmin", "serviceAdminCustomers", "serviceAdminBrokers", "serviceAdminVisits", "serviceDocument", "serviceKyc", "serviceHealth", "servicePayment", "serviceVisit", "serviceMarketTrend", "serviceBrokerCommission", "serviceChatbot", "serviceZoho", "serviceInventory", "serviceEmail", "servicePasswordReset", "PasswordResetError", "serviceBookingKyc", "serviceRevenue", "serviceRefund", "serviceHelpSupport"]
+__all__ = ["serviceCustomer", "serviceCustomerProfile", "serviceBroker", "serviceAdmin", "serviceAdminCustomers", "serviceAdminBrokers", "serviceAdminVisits", "serviceDocument", "serviceKyc", "serviceHealth", "servicePayment", "servicePaymentGateway", "serviceVisit", "serviceMarketTrend", "serviceBrokerCommission", "serviceChatbot", "serviceZoho", "serviceInventory", "serviceEmail", "servicePasswordReset", "PasswordResetError", "serviceBookingKyc", "serviceRevenue", "serviceRefund", "serviceHelpSupport"]

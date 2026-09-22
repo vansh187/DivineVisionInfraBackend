@@ -1,4 +1,4 @@
-import base64
+﻿import base64
 import os
 import requests
 from unittest.mock import patch, MagicMock
@@ -45,7 +45,7 @@ def test_safe_path_segment_truncates_long_input():
 
 def test_pdf_safe_text_replaces_non_latin1_chars():
     # FPDF's core font can't render this - must not raise, must return something renderable
-    result = _pdf_safe_text("Amount: ₹500 — café")
+    result = _pdf_safe_text("Amount: â‚¹500 â€” cafÃ©")
     result.encode("latin-1")  # would raise if any non-latin1 char slipped through
 
 
@@ -53,7 +53,7 @@ def test_pdf_safe_text_replaces_non_latin1_chars():
 
 def test_render_pdf_handles_unicode_form_data_without_raising():
     svc, _ = _service()
-    pdf_bytes = svc._render_pdf("kyc", {"name": "José 你好", "note": "₹1,000"})
+    pdf_bytes = svc._render_pdf("kyc", {"name": "JosÃ© ä½ å¥½", "note": "â‚¹1,000"})
     assert isinstance(pdf_bytes, bytes)
     assert pdf_bytes.startswith(b"%PDF")
 
@@ -495,7 +495,7 @@ def _booking_service(payment=None, customer=None, email_enabled=False):
 def _paid_payment(**overrides):
     defaults = dict(
         id="pay1", owner_id="C00001", status="paid", amount=2000000, currency="INR",
-        razorpay_order_id="order_Rzp123", razorpay_payment_id="pay_Rzp456",
+        zoho_payments_session_id="session_Zoho123", zoho_payment_id="pay_Zoho456",
     )
     defaults.update(overrides)
     return MagicMock(**defaults)
@@ -586,7 +586,7 @@ def test_upload_booking_application_rejects_unpaid_payment():
         assert str(e) == "payment_not_completed"
 
 
-def test_upload_booking_application_rejects_mismatched_razorpay_order_id():
+def test_upload_booking_application_rejects_mismatched_zoho_payments_session_id():
     svc, _, _ = _booking_service(_paid_payment())
     try:
         svc.upload_booking_application(
@@ -600,11 +600,11 @@ def test_upload_booking_application_rejects_mismatched_razorpay_order_id():
 
 
 def test_upload_booking_application_rejects_client_supplied_razorpay_id_against_cash_payment():
-    # A cash payment is legitimately status="paid" with both razorpay ids NULL (see
-    # service_payment.record_cash_payment). A client sending a self-reported razorpay_order_id
+    # A cash payment is legitimately status="paid" with both zoho ids NULL (see
+    # service_payment.record_cash_payment). A client sending a self-reported zoho_payments_session_id
     # for such a payment must be rejected, not silently accepted and persisted, since nothing
     # verifies the client's claim against anything real in that case.
-    svc, _, _ = _booking_service(_paid_payment(razorpay_order_id=None, razorpay_payment_id=None))
+    svc, _, _ = _booking_service(_paid_payment(zoho_payments_session_id=None, zoho_payment_id=None))
     try:
         svc.upload_booking_application(
             _PDF_BYTES, "application/pdf", "project_booking_application", "proj1", "pay1",
@@ -619,7 +619,7 @@ def test_upload_booking_application_rejects_client_supplied_razorpay_id_against_
 @patch.object(serviceDocument, "_sign_url", return_value="url")
 @patch.object(serviceDocument, "_upload_to_storage")
 def test_upload_booking_application_succeeds_for_cash_payment_when_no_razorpay_ids_supplied(mock_upload, mock_sign):
-    svc, persistence, _ = _booking_service(_paid_payment(razorpay_order_id=None, razorpay_payment_id=None))
+    svc, persistence, _ = _booking_service(_paid_payment(zoho_payments_session_id=None, zoho_payment_id=None))
     persistence.create_document.return_value = MagicMock(id="doc1")
 
     svc.upload_booking_application(
@@ -629,8 +629,8 @@ def test_upload_booking_application_succeeds_for_cash_payment_when_no_razorpay_i
     )
 
     _, kwargs = persistence.create_document.call_args
-    assert kwargs["razorpay_order_id"] is None
-    assert kwargs["razorpay_payment_id"] is None
+    assert kwargs["zoho_payments_session_id"] is None
+    assert kwargs["zoho_payment_id"] is None
 
 
 @patch.object(serviceDocument, "_sign_url", return_value="https://fake.supabase.co/signed")
@@ -644,7 +644,7 @@ def test_upload_booking_application_happy_path_uses_booking_forms_bucket(mock_up
 
     doc, signed_url, expires_in, plan = svc.upload_booking_application(
         _PDF_BYTES, "application/pdf", "project_booking_application", "ops-divine-greens", "pay1",
-        "order_Rzp123", "pay_Rzp456", '{"applicantName": "Jane", "total_amount": 5000000}',
+        "session_Zoho123", "pay_Zoho456", '{"applicantName": "Jane", "total_amount": 5000000}',
         owner_id="C00001", owner_role="customer",
     )
 
@@ -661,8 +661,8 @@ def test_upload_booking_application_happy_path_uses_booking_forms_bucket(mock_up
     assert kwargs["payment_id"] == "pay1"
     # Persisted from the payment record itself, not the client-supplied form fields (those are
     # only used to verify the caller's claim - see the mismatch tests below).
-    assert kwargs["razorpay_order_id"] == "order_Rzp123"
-    assert kwargs["razorpay_payment_id"] == "pay_Rzp456"
+    assert kwargs["zoho_payments_session_id"] == "session_Zoho123"
+    assert kwargs["zoho_payment_id"] == "pay_Zoho456"
     fd = kwargs["form_data"]
     assert fd["applicantName"] == "Jane"
     # the derived payment schedule is merged into form_data
@@ -714,7 +714,7 @@ def test_booking_upload_sends_confirmation_email_to_customer(mock_upload, mock_s
 
     svc.upload_booking_application(
         _PDF_BYTES, "application/pdf", "project_booking_application", "ops-divine-greens", "pay1",
-        "order_Rzp123", "pay_Rzp456",
+        "session_Zoho123", "pay_Zoho456",
         '{"project_name": "Divine Greens", "plot_number": "B-14", "total_amount": 5000000}',
         owner_id="C00001", owner_role="customer",
     )

@@ -1,4 +1,4 @@
-"""Integration coverage for persistenceRevenue against a real (SQLite) database -
+﻿"""Integration coverage for persistenceRevenue against a real (SQLite) database -
 verifies the divine_payments/divine_bookings/divine_customer_users join, the
 revenue_status bucketing, and search/filter/pagination, independent of the
 mocked unit tests in test_service_revenue.py and the HTTP-level coverage in
@@ -74,11 +74,11 @@ def setup_module(module):
     # join depends on it for booking_id/project_name/unit_number.
     captured = payment_persistence.create_payment(
         id=str(uuid.uuid4()), owner_id=_CUSTOMER_A, owner_role="customer",
-        amount=3120000, currency="INR", status="created", method="razorpay",
+        amount=3120000, currency="INR", status="created", method="zoho",
         purpose="plot_booking", inventory_id=unit_captured,
     )
     payment_persistence.update_payment_status(
-        captured.id, status="paid", razorpay_payment_id="pay_captured", razorpay_signature="sig_captured",
+        captured.id, status="paid", zoho_payment_id="pay_captured", zoho_signature="sig_captured",
     )
     booking_persistence.create_booking(
         payment_id=captured.id, inventory_id=unit_captured, customer_id=_CUSTOMER_A,
@@ -96,11 +96,11 @@ def setup_module(module):
     # Refunded: a settled razorpay plot_booking payment whose refund has completed.
     refunded = payment_persistence.create_payment(
         id=str(uuid.uuid4()), owner_id=_CUSTOMER_B, owner_role="customer",
-        amount=2100000, currency="INR", status="created", method="razorpay",
+        amount=2100000, currency="INR", status="created", method="zoho",
         purpose="plot_booking", inventory_id=unit_refund,
     )
     payment_persistence.update_payment_status(
-        refunded.id, status="paid", razorpay_payment_id="pay_refunded", razorpay_signature="sig_refunded",
+        refunded.id, status="paid", zoho_payment_id="pay_refunded", zoho_signature="sig_refunded",
     )
     booking_persistence.create_booking(
         payment_id=refunded.id, inventory_id=unit_refund, customer_id=_CUSTOMER_B,
@@ -116,7 +116,7 @@ def setup_module(module):
         purpose="other",
     )
     payment_persistence.update_payment_status(
-        refund_pending.id, status="paid", razorpay_payment_id=None, razorpay_signature=None,
+        refund_pending.id, status="paid", zoho_payment_id=None, zoho_signature=None,
     )
     payment_persistence.update_refund_status(refund_pending.id, refund_status="pending", refund_amount=500000)
     _REFUND_PENDING_ID = refund_pending.id
@@ -131,7 +131,7 @@ def setup_module(module):
         amount=300000, currency="INR", status="created", method="cash", purpose="other",
     )
     payment_persistence.update_payment_status(
-        failed_refund.id, status="paid", razorpay_payment_id=None, razorpay_signature=None,
+        failed_refund.id, status="paid", zoho_payment_id=None, zoho_signature=None,
     )
     payment_persistence.update_refund_status(failed_refund.id, refund_status="failed", refund_amount=300000)
     _FAILED_REFUND_ID = failed_refund.id
@@ -139,7 +139,7 @@ def setup_module(module):
     # Never-settled payment - must NEVER show up in revenue at all.
     payment_persistence.create_payment(
         id=str(uuid.uuid4()), owner_id=_CUSTOMER_A, owner_role="customer",
-        amount=100000, currency="INR", status="created", method="razorpay", purpose="other",
+        amount=100000, currency="INR", status="created", method="zoho", purpose="other",
     )
 
 
@@ -168,7 +168,7 @@ def test_never_settled_payment_is_excluded():
     # any payment id that was never settled.
     unsettled = persistencePayment().create_payment(
         id=str(uuid.uuid4()), owner_id=_CUSTOMER_A, owner_role="customer",
-        amount=1, currency="INR", status="created", method="razorpay", purpose="other",
+        amount=1, currency="INR", status="created", method="zoho", purpose="other",
     )
     assert _persistence().get_transaction(unsettled.id) is None
     assert all(r.transaction_id != unsettled.id for r in rows)
@@ -271,11 +271,11 @@ def test_rebooked_plot_never_duplicates_an_installment_payment():
     # one for that plot.
     first_cycle_payment = payment_persistence.create_payment(
         id=str(uuid.uuid4()), owner_id=customer.id, owner_role="customer",
-        amount=1000000, currency="INR", status="created", method="razorpay",
+        amount=1000000, currency="INR", status="created", method="zoho",
         purpose="plot_booking", inventory_id=unit_id,
     )
     payment_persistence.update_payment_status(
-        first_cycle_payment.id, status="paid", razorpay_payment_id="pay_first", razorpay_signature="sig_first",
+        first_cycle_payment.id, status="paid", zoho_payment_id="pay_first", zoho_signature="sig_first",
     )
     booking_persistence.create_booking(
         payment_id=first_cycle_payment.id, inventory_id=unit_id, customer_id=customer.id,
@@ -286,11 +286,11 @@ def test_rebooked_plot_never_duplicates_an_installment_payment():
     # second divine_bookings row, same inventory_id + customer_id as the first.
     second_cycle_payment = payment_persistence.create_payment(
         id=str(uuid.uuid4()), owner_id=customer.id, owner_role="customer",
-        amount=1000000, currency="INR", status="created", method="razorpay",
+        amount=1000000, currency="INR", status="created", method="zoho",
         purpose="plot_booking", inventory_id=unit_id,
     )
     payment_persistence.update_payment_status(
-        second_cycle_payment.id, status="paid", razorpay_payment_id="pay_second", razorpay_signature="sig_second",
+        second_cycle_payment.id, status="paid", zoho_payment_id="pay_second", zoho_signature="sig_second",
     )
     booking_persistence.create_booking(
         payment_id=second_cycle_payment.id, inventory_id=unit_id, customer_id=customer.id,
@@ -301,11 +301,11 @@ def test_rebooked_plot_never_duplicates_an_installment_payment():
     # no divine_bookings row of its own, only matchable by inventory_id + customer_id.
     installment_payment = payment_persistence.create_payment(
         id=str(uuid.uuid4()), owner_id=customer.id, owner_role="customer",
-        amount=200000, currency="INR", status="created", method="razorpay",
+        amount=200000, currency="INR", status="created", method="zoho",
         purpose="installment", installment_no=1, inventory_id=unit_id,
     )
     payment_persistence.update_payment_status(
-        installment_payment.id, status="paid", razorpay_payment_id="pay_installment", razorpay_signature="sig_inst",
+        installment_payment.id, status="paid", zoho_payment_id="pay_installment", zoho_signature="sig_inst",
     )
 
     rows = _persistence().list_transactions(search=None, limit=1000, offset=0)

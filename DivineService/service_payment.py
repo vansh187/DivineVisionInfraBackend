@@ -4,9 +4,8 @@ import os
 import re
 import uuid
 from datetime import datetime, timezone
-import razorpay
-from razorpay.errors import SignatureVerificationError
 from Divinepersistence import persistencePayment, persistenceInventory, persistenceBooking
+from DivineService.service_payment_gateway import servicePaymentGateway
 
 logger = logging.getLogger(__name__)
 
@@ -18,21 +17,20 @@ BOOKING_PURPOSE = "plot_booking"
 INSTALLMENT_PURPOSE = "installment"
 
 # Only these events flip a payment's status - everything else (refund/dispute events,
-# order.paid, etc.) is out of scope for this feature and acknowledged without action.
-_WEBHOOK_EVENT_STATUS = {"payment.captured": "paid", "payment.failed": "failed"}
+# etc.) is out of scope for this feature and acknowledged without action.
+_WEBHOOK_EVENT_STATUS = {"payment.success": "paid", "payment.failed": "failed"}
 
 
 class servicePayment:
     def __init__(self, persistence: persistencePayment = None,
                  inventory_persistence: persistenceInventory = None,
                  booking_persistence: persistenceBooking = None,
-                 milestone_service=None):
+                 milestone_service=None, gateway: servicePaymentGateway = None):
         self._persistence = persistence or persistencePayment()
         self._inventory_persistence = inventory_persistence or persistenceInventory()
         self._booking_persistence = booking_persistence or persistenceBooking()
         self._milestone_service_override = milestone_service
-        self._key_id = os.getenv("RAZORPAY_KEY_ID")
-        self._key_secret = os.getenv("RAZORPAY_KEY_SECRET")
+        self._gateway = gateway or servicePaymentGateway()
 
     def _milestones(self):
         """Lazily built so a plain payment flow never imports the milestone stack,
@@ -60,9 +58,10 @@ class servicePayment:
         case for an untrustworthy flip is a temporary hold an admin later
         releases on reject, not a permanently lost unit):
 
-          * a Razorpay payment - the caller only reaches _apply_booking_to_inventory
-            after verify_payment / the webhook has confirmed the signature, so a
-            'paid' razorpay row is real; or
+          * a Zoho Payments payment (or a legacy Razorpay one, from before the Zoho
+            cutover) - the caller only reaches _apply_booking_to_inventory after
+            verify_payment / the webhook has confirmed the signature, so a 'paid'
+            row is real; or
           * a cash payment RECORDED BY A BROKER - staff logging cash they physically
             collected, same trust level as the receipt book; or
           * an rtgs_neft payment - self-reported by the customer with a UTR
@@ -75,9 +74,9 @@ class servicePayment:
         settles 'paid' straight from typed input, so honouring it here would let
         anyone lock arbitrary plots for a rupee. Those still create a payment
         row; a broker confirms the plot via POST /inventory/{id}/book."""
-        method = (getattr(record, "method", None) or "razorpay").lower()
+        method = (getattr(record, "method", None) or "zoho").lower()
         role = (getattr(record, "owner_role", None) or "").lower()
-        if method == "razorpay":
+        if method in ("zoho", "razorpay"):
             return True
         if method == "cash" and role == "broker":
             return True
@@ -325,11 +324,6 @@ class servicePayment:
                 pass
             return record
 
-    def _client(self) -> razorpay.Client:
-        if not self._key_id or not self._key_secret:
-            raise RuntimeError("payment_not_configured")
-        return razorpay.Client(auth=(self._key_id, self._key_secret))
-
     def _validate_amount(self, amount: float) -> None:
         if amount <= 0:
             raise ValueError("invalid_amount")
@@ -337,7 +331,7 @@ class servicePayment:
             raise ValueError("amount_too_large")
 
     def _persist_new_payment(self, owner_id: str, owner_role: str, amount: float, status: str,
-                              razorpay_order_id: str = None, method: str = "razorpay", notes: dict = None,
+                              zoho_payments_session_id: str = None, method: str = "zoho", notes: dict = None,
                               purpose: str = "other", inventory_id: str = None,
                               installment_no: int = None, due_date=None, utr_number: str = None):
         payment_id = str(uuid.uuid4())
@@ -348,7 +342,7 @@ class servicePayment:
             amount=amount,
             currency=DEFAULT_CURRENCY,
             status=status,
-            razorpay_order_id=razorpay_order_id,
+            zoho_payments_session_id=zoho_payments_session_id,
             method=method,
             notes=notes or {},
             purpose=purpose,
@@ -361,9 +355,11 @@ class servicePayment:
     def create_order(self, amount: float, owner_id: str, owner_role: str,
                      purpose: str = "other", inventory_id: str = None,
                      installment_no: int = None, due_date=None):
-        """Creates a Razorpay Order and a matching local record. The order is created with
-        payment NOT yet captured - amount only becomes "paid" once verify_payment() confirms
-        a valid signature from Razorpay, never from the client's own say-so."""
+        """Creates a Zoho Payments hosted-checkout session and a matching local
+        record. The session is created with payment NOT yet captured - amount only
+        becomes "paid" once verify_payment() confirms a valid signature on the
+        redirect Zoho sends the customer's browser back with (or the durable
+        webhook fallback), never from the client's own say-so."""
         self._validate_amount(amount)
         purpose = self._clean_purpose(purpose)
         inventory_id = (inventory_id or "").strip() or None
@@ -374,41 +370,54 @@ class servicePayment:
         if purpose == INSTALLMENT_PURPOSE:
             self._guard_installment(owner_id, installment_no, amount, due_date, inventory_id)
 
-        client = self._client()
-        amount_paise = int(round(amount * 100))
+        success_url = os.getenv("ZOHO_PAYMENTS_SUCCESS_URL")
+        failure_url = os.getenv("ZOHO_PAYMENTS_FAILURE_URL")
+        if not success_url or not failure_url:
+            raise RuntimeError("payment_redirect_urls_not_configured")
+
+        customer = self._load_customer(owner_id)
+        customer_name = None
+        customer_email = getattr(customer, "email", None) if customer else None
+        customer_phone = getattr(customer, "phone", None) if customer else None
+        if customer:
+            first = (getattr(customer, "first_name", None) or "").strip()
+            last = (getattr(customer, "last_name", None) or "").strip()
+            customer_name = f"{first} {last}".strip() or None
+
         try:
             logger.info(
-                "payment.razorpay.order_create_request_start owner_id=%s owner_role=%s purpose=%s "
-                "amount_paise=%s inventory_id=%s installment_no=%s",
-                owner_id, owner_role, purpose, amount_paise, inventory_id, installment_no,
+                "payment.zoho.session_create_request_start owner_id=%s owner_role=%s purpose=%s "
+                "amount=%s inventory_id=%s installment_no=%s",
+                owner_id, owner_role, purpose, amount, inventory_id, installment_no,
             )
-            order = client.order.create({
-                "amount": amount_paise,
-                "currency": DEFAULT_CURRENCY,
-                "payment_capture": 1,
-            })
+            session = self._gateway.create_payment_session(
+                amount=amount, currency=DEFAULT_CURRENCY,
+                description=f"Divine Vision Infra - {purpose}",
+                success_url=success_url, failure_url=failure_url,
+                name=customer_name, email=customer_email, phone=customer_phone,
+                udf1=owner_id, udf2=purpose,
+            )
             logger.info(
-                "payment.razorpay.order_create_request_done owner_id=%s purpose=%s razorpay_order_id=%s status=%s",
-                owner_id, purpose, order.get("id") if isinstance(order, dict) else None,
-                order.get("status") if isinstance(order, dict) else None,
+                "payment.zoho.session_create_request_done owner_id=%s purpose=%s "
+                "zoho_payments_session_id=%s",
+                owner_id, purpose, session.get("payments_session_id"),
             )
         except Exception as e:
-            detail = self._gateway_error_detail(e)
             logger.warning(
-                "payment.order.create_failed owner_id=%s purpose=%s amount=%s amount_paise=%s "
+                "payment.order.create_failed owner_id=%s purpose=%s amount=%s "
                 "inventory_id=%s gateway_error=%s",
-                owner_id, purpose, amount, amount_paise, inventory_id, e,
+                owner_id, purpose, amount, inventory_id, e,
                 exc_info=True,
             )
-            raise RuntimeError(f"payment_order_failed:{detail}")
+            raise RuntimeError(f"payment_order_failed:{e}")
 
         record = self._persist_new_payment(
             owner_id=owner_id, owner_role=owner_role, amount=amount,
-            status="created", razorpay_order_id=order["id"],
+            status="created", zoho_payments_session_id=session["payments_session_id"],
             purpose=purpose, inventory_id=inventory_id,
             installment_no=installment_no, due_date=due_date,
         )
-        return record, self._key_id
+        return record, session
 
     def _clean_installment_no(self, value):
         if value in (None, ""):
@@ -448,7 +457,7 @@ class servicePayment:
         (self-reporting money they've sent/handed over) and brokers (logging cash
         collected on a visit) - it's an unverified, self-reported record either
         way, same trust model as someone writing it in a physical receipt book,
-        not a cryptographically confirmed transaction like the Razorpay flow.
+        not a cryptographically confirmed transaction like the Zoho Payments flow.
         Raises ValueError("invalid_method") / ValueError("utr_number_required")."""
         self._validate_amount(amount)
         purpose = self._clean_purpose(purpose)
@@ -467,7 +476,7 @@ class servicePayment:
         note = (note or "").strip()
         record = self._persist_new_payment(
             owner_id=owner_id, owner_role=owner_role, amount=amount, status="paid",
-            razorpay_order_id=None, method=clean_method, notes={"note": note} if note else {},
+            zoho_payments_session_id=None, method=clean_method, notes={"note": note} if note else {},
             purpose=purpose, inventory_id=inventory_id,
             installment_no=installment_no, due_date=due_date, utr_number=clean_utr,
         )
@@ -477,35 +486,54 @@ class servicePayment:
         # _push_booking_contact_to_zoho).
         return self._settle_by_purpose(record)
 
-    def verify_payment(self, razorpay_order_id: str, razorpay_payment_id: str, razorpay_signature: str, owner_id: str):
-        """Verifies the payment signature Razorpay's checkout hands back to the client -
-        the ONLY trustworthy confirmation that a payment actually succeeded. Never trust a
-        client claiming success without this check; the signature is an HMAC over
-        order_id|payment_id keyed with our account's key_secret, which only Razorpay and we
-        know, so a forged "success" can't produce a valid signature."""
-        record = self._persistence.get_by_razorpay_order_id(razorpay_order_id)
+    def verify_payment(self, payments_session_id: str, payment_id: str, payment_status: str,
+                       amount: str, signature: str, owner_id: str,
+                       udf1: str = None, udf2: str = None, udf3: str = None,
+                       udf4: str = None, udf5: str = None):
+        """Verifies the redirect Zoho's hosted checkout sends the customer's browser
+        back with - the frontend forwards those query params here unchanged. Never
+        trust a client claiming success without this check: the signature is an
+        HMAC over the redirect fields keyed with our account's signing key, which
+        only Zoho and we know, so a forged "success" can't produce a valid one.
+
+        As a second layer beyond a bare signature check, a verified 'succeeded'
+        redirect is also cross-checked against a live retrieve_payment_session call
+        before being trusted - if Zoho's own records say the session did NOT
+        succeed, that overrides the redirect regardless of a matching signature. If
+        that live check itself fails (network hiccup, gateway hiccup), the
+        signature-verified result is trusted anyway - the webhook is the durable
+        fallback confirmation either way, so a transient lookup failure here must
+        not turn a real payment into a false 'failed'."""
+        record = self._persistence.get_by_zoho_session_id(payments_session_id)
         if not record:
             raise ValueError("not_found")
         if record.owner_id != owner_id:
             raise PermissionError("forbidden")
 
-        client = self._client()
-        try:
-            client.utility.verify_payment_signature({
-                "razorpay_order_id": razorpay_order_id,
-                "razorpay_payment_id": razorpay_payment_id,
-                "razorpay_signature": razorpay_signature,
-            })
-            verified = True
-        except SignatureVerificationError:
+        verified = self._gateway.verify_redirect_signature(
+            payments_session_id=payments_session_id, payment_session_status=payment_status,
+            payment_id=payment_id, payment_status=payment_status, amount=amount,
+            signature=signature, udf1=udf1, udf2=udf2, udf3=udf3, udf4=udf4, udf5=udf5,
+        )
+        if verified and (payment_status or "").lower() != "succeeded":
             verified = False
+        if verified:
+            try:
+                session = self._gateway.retrieve_payment_session(payments_session_id)
+                if (session.get("status") or "").lower() != "succeeded":
+                    verified = False
+            except RuntimeError as e:
+                logger.warning(
+                    "payment.zoho.verify_session_recheck_failed payments_session_id=%s error=%s",
+                    payments_session_id, e,
+                )
 
         status = "paid" if verified else "failed"
         updated = self._persistence.update_payment_status(
             id=record.id,
             status=status,
-            razorpay_payment_id=razorpay_payment_id,
-            razorpay_signature=razorpay_signature,
+            zoho_payment_id=payment_id,
+            zoho_signature=signature,
         )
         # update_payment_status doesn't carry purpose/inventory_id/installment fields
         # forward on every backend - copy them from the record we already loaded so
@@ -523,30 +551,29 @@ class servicePayment:
             self._settle_by_purpose(updated)
         return updated, verified
 
-    def handle_webhook(self, raw_body: bytes, signature: str) -> str:
-        """Verifies and processes a Razorpay webhook delivery - the durable,
+    def handle_webhook(self, raw_body: bytes, signature_header: str) -> str:
+        """Verifies and processes a Zoho Payments webhook delivery - the durable,
         server-to-server confirmation of payment status that doesn't depend on the
-        client's browser staying open long enough to call verify_payment(). Razorpay
+        client's browser staying open long enough to call verify_payment(). Zoho
         retries on any non-2xx response, so "nothing to do here" cases (an event type
-        this feature doesn't track, an unrecognized payload shape, an order we have no
-        record of, a payment already settled) return a status string instead of raising
-        - those are normal deliveries, not errors, and raising would just make Razorpay
-        retry a webhook that would never succeed. Only signature verification and
-        configuration problems raise, since those genuinely need the caller's attention."""
-        secret = os.getenv("RAZORPAY_WEBHOOK_SECRET")
-        if not secret:
+        this feature doesn't track, an unrecognized payload shape, a session we have
+        no record of, a payment already settled) return a status string instead of
+        raising - those are normal deliveries, not errors, and raising would just
+        make Zoho retry a webhook that would never succeed. Only signature
+        verification and configuration problems raise, since those genuinely need
+        the caller's attention."""
+        try:
+            verified = self._gateway.verify_webhook_signature(raw_body, signature_header)
+        except RuntimeError:
             raise RuntimeError("payment_webhook_not_configured")
+        if not verified:
+            logger.info("payment.webhook.response result=invalid_signature")
+            raise ValueError("invalid_webhook_signature")
 
         try:
             body_text = raw_body.decode("utf-8")
         except UnicodeDecodeError as e:
             raise ValueError("invalid_webhook_body") from e
-
-        try:
-            razorpay.Utility().verify_webhook_signature(body_text, signature or "", secret)
-        except SignatureVerificationError as e:
-            logger.info("payment.webhook.response result=invalid_signature")
-            raise ValueError("invalid_webhook_signature") from e
 
         try:
             event = json.loads(body_text)
@@ -559,22 +586,19 @@ class servicePayment:
             logger.info("payment.webhook.response event=%s result=ignored_event", event_type)
             return f"ignored_event:{event_type}"
 
-        try:
-            payment_entity = event["payload"]["payment"]["entity"]
-            order_id = payment_entity["order_id"]
-            payment_id = payment_entity["id"]
-        except (KeyError, TypeError):
+        session_id, payment_id = self._extract_webhook_payment(event)
+        if not session_id or not payment_id:
             logger.info("payment.webhook.response event=%s result=ignored_malformed_payload", event_type)
             return "ignored_malformed_payload"
 
-        record = self._persistence.get_by_razorpay_order_id(order_id)
+        record = self._persistence.get_by_zoho_session_id(session_id)
         if not record:
             logger.info("payment.webhook.response event=%s result=ignored_unknown_order", event_type)
             return "ignored_unknown_order"
         if record.status == "paid":
             # Already settled - a later "failed" event (out-of-order delivery, or a
-            # duplicate retry after we already processed "captured") must not clobber a
-            # captured payment back to failed. But a "captured" retry IS the chance to
+            # duplicate retry after we already processed "success") must not clobber a
+            # settled payment back to failed. But a "success" retry IS the chance to
             # finish a plot lock that a transient error dropped during /payments/verify
             # (book_unit is idempotent for the same payment id, so a re-run on an
             # already-booked unit is a harmless no-op).
@@ -587,7 +611,7 @@ class servicePayment:
             return "ignored_already_settled"
 
         self._persistence.update_payment_status(
-            id=record.id, status=new_status, razorpay_payment_id=payment_id, razorpay_signature=None,
+            id=record.id, status=new_status, zoho_payment_id=payment_id, zoho_signature=None,
         )
         if new_status == "paid":
             # Durable fallback: if the browser closed before /payments/verify ran, the
@@ -599,6 +623,35 @@ class servicePayment:
             event_type, record.id, new_status,
         )
         return f"processed:{new_status}"
+
+    @staticmethod
+    def _extract_webhook_payment(event: dict):
+        """(payments_session_id, payment_id) from a Zoho Payments webhook payload.
+        The exact JSON shape wasn't available in Zoho's condensed public docs at
+        implementation time, so this defensively tries several plausible nesting
+        shapes (payload.payment / data.payment / a bare top-level payment object)
+        rather than assuming one - confirm this against a real sandbox webhook
+        delivery before go-live and simplify to the one real shape then. Never
+        raises; returns (None, None) on anything unrecognized."""
+        if not isinstance(event, dict):
+            return None, None
+        candidates = []
+        for path in (("payload", "payment"), ("data", "payment"), ("payment",)):
+            node = event
+            for key in path:
+                if isinstance(node, dict) and key in node:
+                    node = node[key]
+                else:
+                    node = None
+                    break
+            if isinstance(node, dict):
+                candidates.append(node)
+        for entity in candidates:
+            session_id = entity.get("payments_session_id") or entity.get("session_id")
+            payment_id = entity.get("payment_id") or entity.get("id")
+            if session_id and payment_id:
+                return session_id, payment_id
+        return None, None
 
     def _settle_by_purpose(self, record):
         if (getattr(record, "purpose", None) or "other") == INSTALLMENT_PURPOSE:
@@ -719,25 +772,31 @@ class servicePayment:
         return record
 
     # A refund's gateway call gets one immediate extra attempt before falling back
-    # to 'pending' - most Razorpay/network hiccups (a timeout, a transient 5xx) are
+    # to 'pending' - most Zoho/network hiccups (a timeout, a transient 5xx) are
     # gone on the very next try, so this alone clears the large majority of what
     # would otherwise become a stuck refund needing an admin's manual retry.
-    _RAZORPAY_REFUND_ATTEMPTS = 2
+    _ZOHO_REFUND_ATTEMPTS = 2
+    # Methods with no live gateway to call for a refund: cash/rtgs_neft never had
+    # one, and 'razorpay' (any payment made before the Zoho Payments cutover) no
+    # longer does either - that gateway's credentials/package were removed, so a
+    # legacy Razorpay refund is now handled exactly like a manual cash refund
+    # (admin confirms the payout themselves via mark_collected).
+    _MANUAL_REFUND_METHODS = ("cash", "rtgs_neft", "razorpay")
 
     def initiate_refund(self, payment_id: str, reason: str = None):
         """Starts a refund for a KYC-rejected/cancelled booking payment (called by
         serviceBookingKyc.reject/cancel, never directly from a router). Branches
         by HOW the money arrived:
 
-          * razorpay - calls Razorpay's real refund API (via _attempt_razorpay_refund,
+          * zoho - calls Zoho Payments' real refund API (via _attempt_zoho_refund,
             with a built-in one-retry). A gateway failure on both attempts still
             leaves the payment refund_status='pending' (not 'failed') so it's never
-            silently lost - see retry_razorpay_refund() for the admin-triggered path
+            silently lost - see retry_zoho_refund() for the admin-triggered path
             that resumes it from there without needing DB access.
-          * cash / rtgs_neft - no gateway to call. Settles refund_status='pending'
-            with a human-readable instruction note (collect from office / manual
-            NEFT-RTGS by the business, both within 5-7 days) for the admin/business
-            team to action and later mark 'completed' themselves.
+          * cash / rtgs_neft / razorpay (legacy, gateway retired) - no gateway to
+            call. Settles refund_status='pending' with a human-readable instruction
+            note for the admin/business team to action and later mark 'completed'
+            themselves.
 
         Raises ValueError('not_found') / ValueError('payment_not_paid') /
         ValueError('refund_already_initiated'). Never leaves the payment in an
@@ -751,16 +810,20 @@ class servicePayment:
         if existing_refund_status not in ("none", "failed"):
             raise ValueError("refund_already_initiated")
 
-        method = (getattr(record, "method", None) or "razorpay").lower()
+        method = (getattr(record, "method", None) or "zoho").lower()
         amount = getattr(record, "amount", None)
         now = datetime.now(timezone.utc)
 
-        if method == "razorpay":
-            return self._attempt_razorpay_refund(record, reason)
+        if method == "zoho":
+            return self._attempt_zoho_refund(record, reason)
 
-        # cash / rtgs_neft - no gateway involved, purely a bookkeeping/notification entry.
+        # cash / rtgs_neft / legacy razorpay - no gateway involved, purely a
+        # bookkeeping/notification entry.
         if method == "cash":
             note = "Refund approved - please collect the cash refund from our office within 5-7 business days."
+        elif method == "razorpay":
+            note = ("Refund approved - this payment was made via our previous payment partner; "
+                    "the refund is being processed manually by our team within 5-7 business days.")
         else:
             note = ("Refund approved - a manual bank transfer (NEFT/RTGS) will be initiated by our "
                     "team within 5-7 business days.")
@@ -771,29 +834,29 @@ class servicePayment:
             refund_initiated_date=now, refund_note=note,
         )
 
-    def _attempt_razorpay_refund(self, record, reason: str = None):
-        """The actual Razorpay gateway call, shared by initiate_refund (first
-        attempt) and retry_razorpay_refund (a later, admin-triggered attempt) so
-        the two can never drift out of sync on what "success" means. Retries the
+    def _attempt_zoho_refund(self, record, reason: str = None):
+        """The actual Zoho Payments gateway call, shared by initiate_refund (first
+        attempt) and retry_zoho_refund (a later, admin-triggered attempt) so the
+        two can never drift out of sync on what "success" means. Retries the
         gateway call once on any exception (network blip, timeout, transient 5xx)
         before giving up - real money, so a single lost round-trip must not be the
         difference between an automatic refund and a manual one.
 
         This always requests the FULL captured amount (never a partial), which is
-        what makes the retry-on-exception safe against Razorpay's response being
-        lost after a request that actually succeeded server-side: Razorpay itself
-        refuses to refund more than a payment's still-refundable balance, so a
-        second call for the same full amount after a real first success comes back
-        as a definite gateway error (over-refund), not a silent duplicate charge -
-        it settles 'pending' for a human to reconcile, exactly like any other
-        failed attempt, rather than actually refunding the customer twice.
+        what makes the retry-on-exception safe against Zoho's response being lost
+        after a request that actually succeeded server-side: Zoho itself refuses
+        to refund more than a payment's still-refundable balance, so a second call
+        for the same full amount after a real first success comes back as a
+        definite gateway error (over-refund), not a silent duplicate charge - it
+        settles 'pending' for a human to reconcile, exactly like any other failed
+        attempt, rather than actually refunding the customer twice.
 
         Never raises - every path ends in a persisted refund_status."""
         payment_id = record.id
         amount = getattr(record, "amount", None)
         now = datetime.now(timezone.utc)
-        razorpay_payment_id = getattr(record, "razorpay_payment_id", None)
-        if not razorpay_payment_id:
+        zoho_payment_id = getattr(record, "zoho_payment_id", None)
+        if not zoho_payment_id:
             # Never actually charged (e.g. a booking cancelled before the gateway
             # payment settled) - nothing to refund at the gateway.
             return self._persistence.update_refund_status(
@@ -804,57 +867,56 @@ class servicePayment:
 
         last_error = None
         refund = None
-        client = None
-        # Only the gateway call (and the client/amount setup immediately before
-        # it - no network I/O, but still wrapped so a corrupt amount or a client
-        # construction error can never escape this "never raises" method) is
-        # retried here. Persisting the result (below, outside this loop) is
-        # deliberately NOT inside this try/except: if the gateway call actually
-        # succeeds but the DB write to record that then fails, that must never be
-        # mistaken for a failed gateway call and trigger a second real refund -
-        # it's a persistence problem, not a refund problem, and is left to
-        # propagate to the caller's own safety net (serviceBookingKyc.cancel/reject
-        # already log-and-continue on any initiate_refund exception) rather than
-        # silently relabelled 'pending'.
-        for attempt in range(1, self._RAZORPAY_REFUND_ATTEMPTS + 1):
+        # Only the gateway call is retried here. Persisting the result (below,
+        # outside this loop) is deliberately NOT inside this try/except: if the
+        # gateway call actually succeeds but the DB write to record that then
+        # fails, that must never be mistaken for a failed gateway call and
+        # trigger a second real refund - it's a persistence problem, not a
+        # refund problem, and is left to propagate to the caller's own safety net
+        # (serviceBookingKyc.cancel/reject already log-and-continue on any
+        # initiate_refund exception) rather than silently relabelled 'pending'.
+        for attempt in range(1, self._ZOHO_REFUND_ATTEMPTS + 1):
             try:
-                if client is None:
-                    client = self._client()
-                amount_paise = int(round(float(amount) * 100)) if amount is not None else None
-                refund_kwargs = {"amount": amount_paise} if amount_paise else {}
                 logger.info(
-                    "payment.razorpay.refund_request_start payment_id=%s razorpay_payment_id=%s "
-                    "amount_paise=%s attempt=%s",
-                    payment_id, razorpay_payment_id, amount_paise, attempt,
+                    "payment.zoho.refund_request_start payment_id=%s zoho_payment_id=%s attempt=%s",
+                    payment_id, zoho_payment_id, attempt,
                 )
-                refund = client.payment.refund(razorpay_payment_id, refund_kwargs)
+                refund = self._gateway.create_refund(
+                    payment_id=zoho_payment_id, amount=amount,
+                    reason="requested_by_customer", type_="initiated_by_merchant",
+                    description=(reason or "").strip() or None,
+                )
                 break
             except Exception as e:
                 last_error = e
                 logger.warning(
-                    "payment.refund.razorpay_attempt_failed payment_id=%s attempt=%s error=%s",
-                    payment_id, attempt, e, exc_info=(attempt == self._RAZORPAY_REFUND_ATTEMPTS),
+                    "payment.refund.zoho_attempt_failed payment_id=%s attempt=%s error=%s",
+                    payment_id, attempt, e, exc_info=(attempt == self._ZOHO_REFUND_ATTEMPTS),
                 )
 
         if refund is not None:
-            refund_id = refund.get("id") if isinstance(refund, dict) else None
-            gateway_status = refund.get("status") if isinstance(refund, dict) else None
+            refund_id = refund.get("refund_id")
+            gateway_status = refund.get("status")
             logger.info(
-                "payment.razorpay.refund_request_done payment_id=%s razorpay_payment_id=%s "
-                "razorpay_refund_id=%s status=%s",
-                payment_id, razorpay_payment_id, refund_id, gateway_status,
+                "payment.zoho.refund_request_done payment_id=%s zoho_payment_id=%s "
+                "zoho_refund_id=%s status=%s",
+                payment_id, zoho_payment_id, refund_id, gateway_status,
             )
-            # A successful (non-raising) gateway call means Razorpay has accepted
-            # and recorded the refund - settles 'completed' immediately (Razorpay
-            # refunds settle same-day for online payments, and this codebase has
-            # no refund webhook to later advance a finer-grained 'processing'
-            # state, so persisting anything less final here would be a refund
-            # with no path to ever reach 'completed').
+            # A successful (non-raising) gateway call means Zoho has accepted and
+            # recorded the refund - settles 'completed' immediately (this codebase
+            # has no refund webhook to later advance a finer-grained 'processing'
+            # state, so persisting anything less final here would be a refund with
+            # no path to ever reach 'completed'; the gateway's own status string is
+            # kept in the note for admin visibility).
+            note = (reason or "").strip() or None
+            if gateway_status and gateway_status != "succeeded":
+                status_note = f"Zoho refund status: {gateway_status}."
+                note = f"{status_note} {note}" if note else status_note
             return self._persistence.update_refund_status(
                 id=payment_id, refund_status="completed",
-                refund_amount=amount, razorpay_refund_id=refund_id,
+                refund_amount=amount, zoho_refund_id=refund_id,
                 refund_initiated_date=now, refund_completed_date=now,
-                refund_note=(reason or "").strip() or None,
+                refund_note=note,
             )
 
         detail = self._gateway_error_detail(last_error)
@@ -864,37 +926,48 @@ class servicePayment:
             refund_note=f"Automatic refund failed ({detail}) - needs manual retry.",
         )
 
-    def retry_razorpay_refund(self, payment_id: str, reason: str = None):
-        """Admin-triggered resumption of a Razorpay refund stuck at
+    def retry_zoho_refund(self, payment_id: str, reason: str = None):
+        """Admin-triggered resumption of a Zoho refund stuck at
         refund_status='pending' after both of initiate_refund's own attempts
-        failed at the gateway - the ONLY path that can move a Razorpay refund
-        forward from there, since initiate_refund's own guard deliberately blocks
-        a second call once any refund is 'pending' (a cash/rtgs_neft 'pending' is
-        a legitimate steady state awaiting manual payout, not a failure, so that
-        guard must stay blanket there). Narrowly scoped so it can never trigger a
-        duplicate gateway refund: only runs when the payment is razorpay, still
-        'pending', and has no razorpay_refund_id yet (proof the previous attempts
-        never actually reached the gateway successfully) - and that check-and-claim
-        happens as ONE atomic DB compare-and-swap (persistence.claim_refund_retry),
-        not a plain read followed by a separate write, so two concurrent retries
-        (an admin double-click, or two admins racing the same stuck payment) can
-        never both pass and both call the gateway - only the one whose claim
-        actually lands proceeds; the other is refused outright. Raises
-        ValueError('not_found') / ValueError('payment_not_paid') /
-        ValueError('not_a_razorpay_refund') / ValueError('refund_not_retryable')."""
+        failed at the gateway - the ONLY path that can move a Zoho refund forward
+        from there, since initiate_refund's own guard deliberately blocks a second
+        call once any refund is 'pending' (a cash/rtgs_neft/legacy-razorpay
+        'pending' is a legitimate steady state awaiting manual payout, not a
+        failure, so that guard must stay blanket there). Narrowly scoped so it can
+        never trigger a duplicate gateway refund: only runs when the payment is
+        zoho, still 'pending', and has no zoho_refund_id yet (proof the previous
+        attempts never actually reached the gateway successfully) - and that
+        check-and-claim happens as ONE atomic DB compare-and-swap
+        (persistence.claim_refund_retry), not a plain read followed by a separate
+        write, so two concurrent retries (an admin double-click, or two admins
+        racing the same stuck payment) can never both pass and both call the
+        gateway - only the one whose claim actually lands proceeds; the other is
+        refused outright.
+
+        A legacy 'razorpay' payment can never be retried here - that gateway's
+        credentials/package were removed at cutover, so any attempt would just be
+        a doomed call; it raises a distinct 'razorpay_gateway_retired' instead,
+        directing the admin to mark_collected (the same manual-payout confirmation
+        cash/rtgs_neft already use) rather than a confusing gateway-auth failure.
+
+        Raises ValueError('not_found') / ValueError('payment_not_paid') /
+        ValueError('razorpay_gateway_retired') / ValueError('not_a_zoho_refund') /
+        ValueError('refund_not_retryable')."""
         record = self._persistence.get_by_id(payment_id)
         if not record:
             raise ValueError("not_found")
         if (getattr(record, "status", None) or "") != "paid":
             raise ValueError("payment_not_paid")
-        method = (getattr(record, "method", None) or "razorpay").lower()
-        if method != "razorpay":
-            raise ValueError("not_a_razorpay_refund")
+        method = (getattr(record, "method", None) or "zoho").lower()
+        if method == "razorpay":
+            raise ValueError("razorpay_gateway_retired")
+        if method != "zoho":
+            raise ValueError("not_a_zoho_refund")
         claimed = self._persistence.claim_refund_retry(id=payment_id)
         if claimed is None:
             # The claim's WHERE clause is the single source of truth for
-            # eligibility (pending + no razorpay_refund_id) - a None here means
-            # not eligible for any reason (already resolved, already has a
-            # razorpay_refund_id, or a concurrent retry claimed it first).
+            # eligibility (pending + no zoho_refund_id) - a None here means not
+            # eligible for any reason (already resolved, already has a
+            # zoho_refund_id, or a concurrent retry claimed it first).
             raise ValueError("refund_not_retryable")
-        return self._attempt_razorpay_refund(claimed, reason)
+        return self._attempt_zoho_refund(claimed, reason)

@@ -53,14 +53,22 @@ Auth: customer bearer token.
 }
 ```
 
-### Response 200 — unchanged shape
+### Response 200 — same purpose/installment fields, gateway fields changed for Zoho Payments
 ```jsonc
 {
-  "payment_id": "b7e2c1a0-...", "razorpay_order_id": "order_NQ...",
-  "razorpay_key_id": "rzp_test_xxx", "amount": 443576, "amount_paise": 44357600,
-  "currency": "INR", "status": "created"
+  "payment_id": "b7e2c1a0-...",
+  "zoho_payments_session_id": "1000000012345",
+  // Full hosted-checkout URL to redirect the customer's browser to - a
+  // full-page redirect (NOT an embedded JS checkout modal like Razorpay's).
+  "checkout_url": "https://payments.zoho.in/hostedcheckout/8f3a9b2c...",
+  "access_key": "8f3a9b2c...",
+  "amount": 443576, "currency": "INR", "status": "created"
 }
 ```
+`amount_paise` no longer exists - Zoho Payments takes a decimal amount, not paise.
+There is no `razorpay_key_id` equivalent either: instead of an embedded JS checkout
+modal, redirect the customer's browser to `checkout_url` (Zoho's hosted checkout,
+a full-page redirect).
 
 ### Guard-rail errors — `400 { "detail": "<code>" }` (before the order is created)
 | code | when |
@@ -78,9 +86,23 @@ The **same** checks re-run at settle time (order + settle can be minutes apart).
 
 ## 3. `POST /payments/verify` / `POST /payments/cash` — settle & mark paid
 
-`/verify` body unchanged. `/cash` takes the same three new fields as §2 in its body.
+`/cash` takes the same three new fields as §2 in its body.
 
-On a valid Razorpay signature (or a broker/customer cash record) the milestone is
+`/verify`'s body changed with the Zoho Payments cutover: it now takes the exact
+query-string fields Zoho's hosted checkout appends when redirecting the customer's
+browser back to `success_url`/`failure_url` — the frontend forwards these unchanged:
+```jsonc
+{
+  "payments_session_id": "1000000012345",
+  "payment_id": "pay_NQ...",
+  "payment_status": "success",
+  "amount": "443576.00",
+  "signature": "…",
+  "udf1": "…", "udf2": "…", "udf3": "…", "udf4": "…", "udf5": "…"  // optional
+}
+```
+
+On a valid Zoho redirect signature (or a broker/customer cash record) the milestone is
 flipped to `paid` (`paid_on`, `paid_payment_id`), `amount_received` is recomputed,
 and sibling statuses refreshed — in the same step that settles the payment.
 
@@ -88,8 +110,8 @@ and sibling statuses refreshed — in the same step that settles the payment.
 ```jsonc
 {
   "id": "b7e2c1a0-...", "owner_id": "C00007", "owner_role": "customer",
-  "amount": 443576, "currency": "INR", "status": "paid", "method": "razorpay",
-  "verified": true, "razorpay_order_id": "order_NQ...", "razorpay_payment_id": "pay_NQ...",
+  "amount": 443576, "currency": "INR", "status": "paid", "method": "zoho",
+  "verified": true, "zoho_payments_session_id": "1000000012345", "zoho_payment_id": "pay_NQ...",
   "created_date": "2025-02-20T09:12:44Z",
 
   "purpose": "installment",        // NEW echo

@@ -47,7 +47,7 @@ def list_revenue_transactions(
     page_size: int = Query(20, ge=1, le=100),
     search: Optional[str] = Query(None, max_length=200, description="Matches booking id, customer name, or project name"),
     status: Optional[Literal["captured", "cash_recorded", "refund_pending", "refunded"]] = Query(None),
-    method: Optional[Literal["razorpay", "cash", "rtgs_neft"]] = Query(None),
+    method: Optional[Literal["zoho", "cash", "rtgs_neft", "razorpay"]] = Query(None),
     date_from: Optional[str] = Query(None, pattern=_DATE_PATTERN, description="YYYY-MM-DD, inclusive"),
     date_to: Optional[str] = Query(None, pattern=_DATE_PATTERN, description="YYYY-MM-DD, inclusive"),
     current_admin: dict = Depends(get_current_admin),

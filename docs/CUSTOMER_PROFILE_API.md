@@ -197,9 +197,9 @@ is absent, fall back to your local 10 / 15 / 25 / 25 / 25 split of
 | `amount_received` | integer? | Whole rupees. Confirmed payments to date. For a customer with a single booking this is their full paid balance; with multiple bookings it is scoped to **this booking's own** payment + paid milestones, never another plot's. |
 | `payment_id` | string? | Original plot-booking payment id linked to the booking document. |
 | `booking_payment_amount` | integer? | Original plot-booking payment amount in whole rupees. |
-| `payment_method` | string? | e.g. `razorpay` / `cash`. |
-| `razorpay_order_id` | string? | Present for Razorpay-backed booking payments. |
-| `razorpay_payment_id` | string? | Present after Razorpay settlement. |
+| `payment_method` | string? | e.g. `zoho` / `cash` / `rtgs_neft` / `razorpay` (legacy, pre-cutover payments only). |
+| `zoho_payments_session_id` | string? | Present for Zoho Payments-backed booking payments. Both `zoho_*` fields are absent for `cash`/`rtgs_neft` payments and for a legacy `razorpay` (pre-cutover) payment. |
+| `zoho_payment_id` | string? | Present after Zoho Payments settlement. |
 | `payment_created_date` | string? | ISO `YYYY-MM-DD` date of the linked booking payment. |
 | `payment_schedule` | array? | Absent unless present on the booking form — then fall back to the local split. |
 

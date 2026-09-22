@@ -171,8 +171,8 @@ def generate_receipt_pdf(payment, milestone=None, customer=None, issued_on=None,
 
 def _render(payment, milestone, customer, issued_on, booking, form_data: dict) -> bytes:
     amount = _num(_get(payment, "amount")) or 0
-    method = str(_get(payment, "method", default="razorpay")).lower()
-    method_label = {"cash": "Cash", "razorpay": "Online (Razorpay)",
+    method = str(_get(payment, "method", default="zoho")).lower()
+    method_label = {"cash": "Cash", "zoho": "Online (Zoho Payments)", "razorpay": "Online (Razorpay)",
                      "rtgs_neft": "RTGS / NEFT"}.get(method, method.replace("_", " ").title() or "-")
     paid_on = issued_on or _get(payment, "paid_on", "created_date") or date.today()
 

@@ -81,9 +81,9 @@ document checklist, and the full decision-history timeline.
   "unit_number": "A-112",
   "amount": 2450000,
   "payment_id": "b7e2f1a3-...",
-  "payment_method": "razorpay",
+  "payment_method": "zoho",
   "payment_status": "paid",
-  "razorpay_payment_id": "pay_QX...",
+  "gateway_payment_id": "pay_QX...",
   "utr_number": null,
   "documents": [
     { "document_type": "aadhaar_front", "label": "Aadhaar Card - Front", "uploaded": true,
@@ -115,6 +115,9 @@ Field notes:
   `pan_card`, `applicant_photo`, `cancelled_cheque`. `uploaded: false` means the customer
   hasn't uploaded that document yet — show it as missing, not as an error. `preview_url` is
   a short-lived (1 hour) signed URL; re-fetch this endpoint to refresh it, don't cache it.
+- **`gateway_payment_id`** — the `zoho_payment_id` for a payment made via Zoho Payments
+  (`payment_method: "zoho"`), or the legacy `razorpay_payment_id` for a payment made
+  before the Zoho Payments cutover (`payment_method: "razorpay"`) — never both.
 - **`utr_number`** — only populated when `payment_method` is `"rtgs_neft"`; `null`
   otherwise.
 - **`decision_history`** — grows by one entry every time the booking is created or
@@ -158,9 +161,9 @@ match the booking's current version exactly.
 | **Cancel** | Admin cancels the booking outright (e.g. customer asked to cancel) — allowed both while still `pending_kyc_review` **and** once already `booked` (post-approval). Releases/unbooks the plot, starts a refund (see below), and **always** emails the customer with refund instructions, recorded as a distinct `cancelled` action in the timeline so it's distinguishable from a KYC rejection. |
 
 ### Refund behavior on Reject/Cancel (automatic, nothing the frontend needs to send)
-- **Paid via Razorpay (online):** a real refund is triggered through Razorpay's API
-  immediately, and the customer is emailed that it's on its way to their original payment
-  method.
+- **Paid via Zoho Payments (online):** a real refund is triggered through Zoho's Payments
+  API immediately, and the customer is emailed that it's on its way to their original
+  payment method.
 - **Paid via cash:** no gateway involved — the customer is emailed to collect the cash
   refund from the project's site office within 5–7 working days. The office address in the
   email is project-specific: OPS Divine Greens customers are pointed to the OPS Divine
@@ -168,11 +171,15 @@ match the booking's current version exactly.
 - **Paid via RTGS/NEFT (UTR):** no gateway involved — the admin processes the transfer
   manually, and the customer is emailed that the refund will be credited within 5–7 working
   days.
+- **Paid via legacy Razorpay (pre-cutover):** that gateway's credentials were retired at
+  the Zoho Payments cutover, so there's no automatic gateway call anymore — it's refunded
+  the same manual way as cash/RTGS-NEFT, and the customer is emailed accordingly.
 
-A refund-notification email is sent to the customer in every case above — a Razorpay,
-cash, or RTGS/NEFT payment all result in an email, even if the automatic refund/gateway
-call itself fails (that failure is logged for manual follow-up, never surfaced as an error
-on this endpoint — the booking decision and plot release have already succeeded).
+A refund-notification email is sent to the customer in every case above — a Zoho, cash,
+RTGS/NEFT, or legacy Razorpay payment all result in an email, even if the automatic
+refund/gateway call itself fails (that failure is logged for manual follow-up, never
+surfaced as an error on this endpoint — the booking decision and plot release have
+already succeeded).
 
 ### Errors (all three endpoints)
 | Status | `detail` | Meaning |

@@ -360,8 +360,8 @@ class serviceCustomerProfile:
                 record.get("booking_payment_amount")
             )
             booking.payment_method = self._text(record.get("payment_method"))
-            booking.razorpay_order_id = self._text(record.get("razorpay_order_id"))
-            booking.razorpay_payment_id = self._text(record.get("razorpay_payment_id"))
+            booking.zoho_payments_session_id = self._text(record.get("zoho_payments_session_id"))
+            booking.zoho_payment_id = self._text(record.get("zoho_payment_id"))
             booking.payment_created_date = self._date_only(record.get("payment_created_date"))
             booking.payment_schedule = self._build_payment_schedule(form)
             if not booking.payment_schedule and booking.total_consideration:

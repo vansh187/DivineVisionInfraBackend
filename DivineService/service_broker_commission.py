@@ -1,12 +1,11 @@
 import math
-import os
 import uuid
-import razorpay
 import logging
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from sqlalchemy.exc import IntegrityError
 from Divinepersistence import persistenceBrokerCommission
+from DivineService.service_payment_gateway import servicePaymentGateway
 
 
 ALLOWED_COMMISSION_STATUSES = ("pending", "paid", "rejected")
@@ -16,20 +15,9 @@ logger = logging.getLogger(__name__)
 
 
 class serviceBrokerCommission:
-    def __init__(self, persistence: persistenceBrokerCommission = None):
+    def __init__(self, persistence: persistenceBrokerCommission = None, gateway: servicePaymentGateway = None):
         self._persistence = persistence or persistenceBrokerCommission()
-        self._key_id = os.getenv("RAZORPAY_KEY_ID")
-        self._key_secret = os.getenv("RAZORPAY_KEY_SECRET")
-
-    def _client(self):
-        try:
-            if not self._key_id or not self._key_secret:
-                raise RuntimeError("payment_not_configured")
-            return razorpay.Client(auth=(self._key_id, self._key_secret))
-        except RuntimeError:
-            raise
-        except Exception as e:
-            raise RuntimeError("payment_client_failed") from e
+        self._gateway = gateway or servicePaymentGateway()
 
     def _clean_text(self, value, field_name: str, required: bool, max_length: int):
         try:
@@ -122,7 +110,7 @@ class serviceBrokerCommission:
     def create_commission(self, brokerId: str, serialNumber: str, unitAddress: str,
                           commissionAmount, transactionMode: str, customerName: str = None,
                           township: str = None, saleValue=None, source: str = "broker",
-                          razorpay_order_id: str = None):
+                          zoho_payments_session_id: str = None):
         try:
             broker_id = self._clean_text(brokerId, "brokerId", True, 80)
             serial_number = self._clean_text(serialNumber, "serialNumber", True, 100)
@@ -153,7 +141,7 @@ class serviceBrokerCommission:
                 commission_amount=float(commission_amount),
                 status=status,
                 transaction_mode=mode,
-                razorpay_order_id=razorpay_order_id,
+                zoho_payments_session_id=zoho_payments_session_id,
                 created_at=now,
                 paid_at=paid_at,
                 rejected_at=None,
@@ -185,43 +173,41 @@ class serviceBrokerCommission:
         except Exception as e:
             raise RuntimeError("commission_create_failed") from e
 
-    def initiate_admin_razorpay_commission(self, brokerId: str, serialNumber: str, unitAddress: str,
-                                           commissionAmount, transactionMode: str, customerName: str = None,
-                                           township: str = None, saleValue=None):
+    def initiate_admin_commission_payment(self, brokerId: str, serialNumber: str, unitAddress: str,
+                                          commissionAmount, transactionMode: str, customerName: str = None,
+                                          township: str = None, saleValue=None,
+                                          success_url: str = None, failure_url: str = None):
         try:
             amount = self._money(commissionAmount, "commissionAmount", True)
             mode = self._clean_text(transactionMode, "transactionMode", True, 20).lower()
             if mode != "booking":
                 raise ValueError("admin_transactionMode_must_be_booking")
+            if not success_url or not failure_url:
+                raise RuntimeError("payment_redirect_urls_not_configured")
 
-            amount_paise = int(round(float(amount) * 100))
             try:
                 logger.info(
-                    "broker_commission.razorpay.order_create_request_start broker_id=%s amount_paise=%s",
-                    brokerId, amount_paise,
+                    "broker_commission.zoho.session_create_request_start broker_id=%s amount=%s",
+                    brokerId, amount,
                 )
-                order = self._client().order.create({
-                    "amount": amount_paise,
-                    "currency": "INR",
-                    "payment_capture": 1,
-                    "notes": {
-                        "brokerId": self._clean_text(brokerId, "brokerId", True, 80),
-                        "serialNumber": self._clean_text(serialNumber, "serialNumber", True, 100),
-                        "purpose": "broker_commission",
-                    },
-                })
+                session = self._gateway.create_payment_session(
+                    amount=amount, currency="INR",
+                    description=f"Divine Vision Infra - broker commission {serialNumber}",
+                    success_url=success_url, failure_url=failure_url,
+                    udf1=self._clean_text(brokerId, "brokerId", True, 80),
+                    udf2=self._clean_text(serialNumber, "serialNumber", True, 100),
+                )
                 logger.info(
-                    "broker_commission.razorpay.order_create_request_done broker_id=%s razorpay_order_id=%s status=%s",
-                    brokerId,
-                    order.get("id") if isinstance(order, dict) else None,
-                    order.get("status") if isinstance(order, dict) else None,
+                    "broker_commission.zoho.session_create_request_done broker_id=%s "
+                    "zoho_payments_session_id=%s",
+                    brokerId, session.get("payments_session_id"),
                 )
             except RuntimeError:
                 raise
             except Exception as e:
                 logger.warning(
-                    "broker_commission.razorpay.order_create_request_failed broker_id=%s amount_paise=%s error=%s",
-                    brokerId, amount_paise, e, exc_info=True,
+                    "broker_commission.zoho.session_create_request_failed broker_id=%s amount=%s error=%s",
+                    brokerId, amount, e, exc_info=True,
                 )
                 raise RuntimeError(f"payment_order_failed:{type(e).__name__}") from e
 
@@ -235,13 +221,13 @@ class serviceBrokerCommission:
                 commissionAmount=commissionAmount,
                 transactionMode=transactionMode,
                 source="admin",
-                razorpay_order_id=order["id"],
+                zoho_payments_session_id=session["payments_session_id"],
             )
             return commission, {
-                "razorpayOrderId": order["id"],
-                "razorpayKeyId": self._key_id,
+                "zohoPaymentsSessionId": session["payments_session_id"],
+                "zohoAccessKey": session["access_key"],
+                "zohoCheckoutUrl": session["checkout_url"],
                 "amount": float(amount),
-                "amountPaise": amount_paise,
                 "currency": "INR",
                 "status": "created",
             }

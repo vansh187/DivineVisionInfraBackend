@@ -1,4 +1,4 @@
-import os
+﻿import os
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -131,9 +131,9 @@ def test_booking_derived_from_document_form_data_and_payments():
             "inventory_id": "inv-204",
             "payment_id": "pay-204",
             "booking_payment_amount": 177431,
-            "payment_method": "razorpay",
-            "razorpay_order_id": "order_204",
-            "razorpay_payment_id": "rzp_204",
+            "payment_method": "zoho",
+            "zoho_payments_session_id": "session_204",
+            "zoho_payment_id": "zoho_204",
             "payment_created_date": datetime(2025, 1, 10, 12, 30, tzinfo=timezone.utc),
             "form_data": form, "created_date": datetime(2025, 1, 10, tzinfo=timezone.utc),
         },
@@ -155,9 +155,9 @@ def test_booking_derived_from_document_form_data_and_payments():
     assert b.amount_received == 700000
     assert b.payment_id == "pay-204"
     assert b.booking_payment_amount == 177431
-    assert b.payment_method == "razorpay"
-    assert b.razorpay_order_id == "order_204"
-    assert b.razorpay_payment_id == "rzp_204"
+    assert b.payment_method == "zoho"
+    assert b.zoho_payments_session_id == "session_204"
+    assert b.zoho_payment_id == "zoho_204"
     assert b.payment_created_date == "2025-01-10"
     assert b.payment_schedule[0].label == "On Booking"
     assert b.payment_schedule[0].amount == 177431

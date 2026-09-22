@@ -1,7 +1,7 @@
 """End-to-end functional coverage for POST /admin/payments/{payment_id}/refund/retry
 over real HTTP through TestClient against a real (SQLite) database - complements
 the mocked unit tests in test_service_payment_refund.py. Exercises: the
-admin-only auth boundary, and that a Razorpay refund genuinely stuck at
+admin-only auth boundary, and that a Zoho refund genuinely stuck at
 refund_status='pending' (both of initiate_refund's own gateway attempts having
 already failed) can be recovered through this endpoint without any direct DB
 access."""
@@ -19,7 +19,7 @@ os.environ["ADMIN_JWT_SECRET_KEY"] = "admintestsecret"
 from Divinepersistence.persistence_db import PersistenceDB
 from Divinepersistence.persistence_customer import persistenceCustomer
 from Divinepersistence.persistence_payment import persistencePayment
-from DivineService.service_payment import servicePayment
+from DivineService.service_payment_gateway import servicePaymentGateway
 from DivineAPI.main import app
 
 client = TestClient(app)
@@ -63,19 +63,19 @@ def _customer_headers():
     return {"Authorization": f"Bearer {token}"}
 
 
-def _make_stuck_razorpay_refund(amount=500000):
-    """A 'paid' Razorpay payment whose refund already failed at the gateway once
+def _make_stuck_zoho_refund(amount=500000):
+    """A 'paid' Zoho payment whose refund already failed at the gateway once
     (both of initiate_refund's own attempts) and is now stranded at
     refund_status='pending' - the exact state the retry endpoint exists for."""
     payments = persistencePayment()
     record = payments.create_payment(
         id=str(uuid.uuid4()), owner_id=_CUSTOMER_ID, owner_role="customer", amount=amount,
-        currency="INR", status="created", razorpay_order_id=f"order_{uuid.uuid4().hex[:12]}",
-        method="razorpay",
+        currency="INR", status="created", zoho_payments_session_id=f"session_{uuid.uuid4().hex[:12]}",
+        method="zoho",
     )
     payments.update_payment_status(
-        id=record.id, status="paid", razorpay_payment_id=f"rzp_pay_{uuid.uuid4().hex[:12]}",
-        razorpay_signature=None,
+        id=record.id, status="paid", zoho_payment_id=f"zoho_pay_{uuid.uuid4().hex[:12]}",
+        zoho_signature=None,
     )
     payments.update_refund_status(
         id=record.id, refund_status="pending", refund_amount=amount,
@@ -85,8 +85,29 @@ def _make_stuck_razorpay_refund(amount=500000):
     return payments.get_by_id(record.id)
 
 
+def _make_stuck_legacy_razorpay_refund(amount=400000):
+    """A pre-cutover razorpay payment stuck at refund_status='pending' - unlike
+    a live 'zoho' refund, this can never be retried through the gateway again
+    (credentials/package retired at cutover)."""
+    payments = persistencePayment()
+    record = payments.create_payment(
+        id=str(uuid.uuid4()), owner_id=_CUSTOMER_ID, owner_role="customer", amount=amount,
+        currency="INR", status="created", method="razorpay",
+    )
+    payments.seed_legacy_razorpay_fields(
+        record.id, razorpay_order_id=f"order_{uuid.uuid4().hex[:12]}",
+        razorpay_payment_id=f"pay_{uuid.uuid4().hex[:12]}",
+    )
+    payments.update_payment_status(id=record.id, status="paid", zoho_payment_id=None, zoho_signature=None)
+    payments.update_refund_status(
+        id=record.id, refund_status="pending", refund_amount=amount,
+        refund_initiated_date=datetime.now(timezone.utc), refund_note="gateway timeout",
+    )
+    return payments.get_by_id(record.id)
+
+
 def test_retry_refund_rejects_non_admin_token():
-    stuck = _make_stuck_razorpay_refund()
+    stuck = _make_stuck_zoho_refund()
     r = client.post(f"/admin/payments/{stuck.id}/refund/retry", headers=_customer_headers())
     assert r.status_code == 401, r.text
 
@@ -98,15 +119,15 @@ def test_retry_refund_returns_404_for_unknown_payment():
 
 
 def test_retry_refund_happy_path_recovers_a_stuck_refund():
-    stuck = _make_stuck_razorpay_refund(amount=750000)
-    with patch.object(servicePayment, "_client") as mock_client:
-        mock_client.return_value.payment.refund.return_value = {"id": "rfnd_e2e_1", "status": "processed"}
+    stuck = _make_stuck_zoho_refund(amount=750000)
+    with patch.object(servicePaymentGateway, "create_refund") as mock_create_refund:
+        mock_create_refund.return_value = {"refund_id": "rfnd_e2e_1", "status": "succeeded"}
         r = client.post(f"/admin/payments/{stuck.id}/refund/retry", headers=_admin_headers())
 
     assert r.status_code == 200, r.text
     data = r.json()
     assert data["refund_status"] == "completed"
-    assert data["razorpay_refund_id"] == "rfnd_e2e_1"
+    assert data["zoho_refund_id"] == "rfnd_e2e_1"
     assert data["refund_amount"] == 750000
 
     persisted = persistencePayment().get_by_id(stuck.id)
@@ -114,9 +135,9 @@ def test_retry_refund_happy_path_recovers_a_stuck_refund():
 
 
 def test_retry_refund_on_a_non_pending_payment_returns_409():
-    stuck = _make_stuck_razorpay_refund()
-    with patch.object(servicePayment, "_client") as mock_client:
-        mock_client.return_value.payment.refund.return_value = {"id": "rfnd_e2e_2", "status": "processed"}
+    stuck = _make_stuck_zoho_refund()
+    with patch.object(servicePaymentGateway, "create_refund") as mock_create_refund:
+        mock_create_refund.return_value = {"refund_id": "rfnd_e2e_2", "status": "succeeded"}
         first = client.post(f"/admin/payments/{stuck.id}/refund/retry", headers=_admin_headers())
     assert first.status_code == 200, first.text
 
@@ -131,8 +152,8 @@ def test_claim_refund_retry_is_atomic_against_a_concurrent_claim():
     """Direct persistence-level proof of the concurrency fix: once one caller's
     claim_refund_retry lands, a second claim on the same row (simulating a
     double-click or two admins racing) must find nothing to claim - never both
-    succeed and never both be allowed to call the Razorpay gateway."""
-    stuck = _make_stuck_razorpay_refund()
+    succeed and never both be allowed to call the Zoho gateway."""
+    stuck = _make_stuck_zoho_refund()
     payments = persistencePayment()
 
     first = payments.claim_refund_retry(id=stuck.id)
@@ -155,4 +176,11 @@ def test_retry_refund_on_a_cash_payment_returns_409():
     )
     r = client.post(f"/admin/payments/{record.id}/refund/retry", headers=_admin_headers())
     assert r.status_code == 409, r.text
-    assert r.json()["detail"] == "not_a_razorpay_refund"
+    assert r.json()["detail"] == "not_a_zoho_refund"
+
+
+def test_retry_refund_on_a_legacy_razorpay_payment_returns_409_gateway_retired():
+    stuck = _make_stuck_legacy_razorpay_refund()
+    r = client.post(f"/admin/payments/{stuck.id}/refund/retry", headers=_admin_headers())
+    assert r.status_code == 409, r.text
+    assert r.json()["detail"] == "razorpay_gateway_retired"

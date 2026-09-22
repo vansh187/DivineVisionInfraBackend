@@ -24,7 +24,7 @@ client = TestClient(app)
 # --------------------------------------------------------------------------- #
 # servicePayment: booking flip on settle                                       #
 # --------------------------------------------------------------------------- #
-def _pay_service():
+def _pay_service(gateway=None):
     payments = MagicMock()
     inventory = MagicMock()
     booking = MagicMock()
@@ -33,15 +33,14 @@ def _pay_service():
     # auto-created attribute rather than a real string) for record.booking_id
     # assertions to mean anything.
     booking.create_booking.return_value = SimpleNamespace(id="BKG-2026-000001")
-    svc = servicePayment(payments, inventory, booking)
-    svc._key_id, svc._key_secret = "rzp_test_fake", "fake_secret"
+    svc = servicePayment(payments, inventory, booking, gateway=gateway or MagicMock())
     return svc, payments, inventory, booking
 
 
 def _row(**kw):
     base = {"id": "pay1", "owner_id": "C00001", "owner_role": "customer", "amount": 500000,
-            "currency": "INR", "status": "paid", "method": "razorpay", "purpose": "other",
-            "inventory_id": None, "razorpay_order_id": None, "razorpay_payment_id": None}
+            "currency": "INR", "status": "paid", "method": "zoho", "purpose": "other",
+            "inventory_id": None, "zoho_payments_session_id": None, "zoho_payment_id": None}
     base.update(kw)
     return SimpleNamespace(**base)
 
@@ -147,17 +146,18 @@ def test_invalid_purpose_is_rejected():
             assert str(e) == "invalid_purpose"
 
 
-@patch.object(servicePayment, "_client")
-def test_verify_payment_holds_unit_for_kyc_review_on_valid_signature(mock_client):
-    mock_client.return_value.utility.verify_payment_signature.return_value = True
-    svc, payments, inventory, booking = _pay_service()
-    payments.get_by_razorpay_order_id.return_value = _row(
-        status="created", purpose="plot_booking", inventory_id="INV-9", razorpay_order_id="order_x")
+def test_verify_payment_holds_unit_for_kyc_review_on_valid_signature():
+    gw = MagicMock()
+    gw.verify_redirect_signature.return_value = True
+    gw.retrieve_payment_session.return_value = {"status": "succeeded"}
+    svc, payments, inventory, booking = _pay_service(gateway=gw)
+    payments.get_by_zoho_session_id.return_value = _row(
+        status="created", purpose="plot_booking", inventory_id="INV-9", zoho_payments_session_id="session_x")
     payments.update_payment_status.return_value = _row(
-        status="paid", purpose="plot_booking", inventory_id="INV-9", razorpay_order_id="order_x")
+        status="paid", purpose="plot_booking", inventory_id="INV-9", zoho_payments_session_id="session_x")
     inventory.hold_for_kyc_review.return_value = _row(id="INV-9", status="pending_kyc_review")
 
-    updated, verified = svc.verify_payment("order_x", "pay_x", "sig_x", owner_id="C00001")
+    updated, verified = svc.verify_payment("session_x", "pay_x", "succeeded", "5000.00", "sig_x", owner_id="C00001")
 
     assert verified is True
     inventory.hold_for_kyc_review.assert_called_once_with(id="INV-9", payment_id="pay1", customer_id="C00001")
@@ -165,36 +165,34 @@ def test_verify_payment_holds_unit_for_kyc_review_on_valid_signature(mock_client
     assert updated.booking_id == "BKG-2026-000001"
 
 
-@patch.object(servicePayment, "_client")
-def test_verify_payment_failed_signature_does_not_flip(mock_client):
-    from razorpay.errors import SignatureVerificationError
-    mock_client.return_value.utility.verify_payment_signature.side_effect = SignatureVerificationError("bad")
-    svc, payments, inventory, booking = _pay_service()
-    payments.get_by_razorpay_order_id.return_value = _row(
-        status="created", purpose="plot_booking", inventory_id="INV-9", razorpay_order_id="order_x")
+def test_verify_payment_failed_signature_does_not_flip():
+    gw = MagicMock()
+    gw.verify_redirect_signature.return_value = False
+    svc, payments, inventory, booking = _pay_service(gateway=gw)
+    payments.get_by_zoho_session_id.return_value = _row(
+        status="created", purpose="plot_booking", inventory_id="INV-9", zoho_payments_session_id="session_x")
     payments.update_payment_status.return_value = _row(
-        status="failed", purpose="plot_booking", inventory_id="INV-9", razorpay_order_id="order_x")
+        status="failed", purpose="plot_booking", inventory_id="INV-9", zoho_payments_session_id="session_x")
 
-    _, verified = svc.verify_payment("order_x", "pay_x", "sig_x", owner_id="C00001")
+    _, verified = svc.verify_payment("session_x", "pay_x", "succeeded", "5000.00", "sig_x", owner_id="C00001")
 
     assert verified is False
     inventory.hold_for_kyc_review.assert_not_called()
 
 
-@patch("DivineService.service_payment.razorpay.Utility")
-def test_webhook_retries_flip_for_a_booking_that_settled_without_locking(mock_utility, monkeypatch):
+def test_webhook_retries_flip_for_a_booking_that_settled_without_locking():
     """verify_payment settled the payment but a transient error left the plot unheld.
     The captured webhook must still finish the hold, not bail at 'already settled'."""
-    monkeypatch.setenv("RAZORPAY_WEBHOOK_SECRET", "whsec_fake")
-    mock_utility.return_value.verify_webhook_signature.return_value = True
-    svc, payments, inventory, booking = _pay_service()
-    payments.get_by_razorpay_order_id.return_value = _row(
-        id="pay1", status="paid", method="razorpay", purpose="plot_booking",
-        inventory_id="INV-9", razorpay_order_id="order_x")
+    gw = MagicMock()
+    gw.verify_webhook_signature.return_value = True
+    svc, payments, inventory, booking = _pay_service(gateway=gw)
+    payments.get_by_zoho_session_id.return_value = _row(
+        id="pay1", status="paid", method="zoho", purpose="plot_booking",
+        inventory_id="INV-9", zoho_payments_session_id="session_x")
     inventory.hold_for_kyc_review.return_value = _row(id="INV-9", status="pending_kyc_review")
 
-    body = ('{"event":"payment.captured","payload":{"payment":{"entity":'
-            '{"id":"pay_x","order_id":"order_x"}}}}')
+    body = ('{"event":"payment.success","payload":{"payment":'
+            '{"payment_id":"pay_x","payments_session_id":"session_x"}}}')
     result = svc.handle_webhook(body.encode(), "sig")
 
     assert result == "ignored_already_settled"

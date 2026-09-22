@@ -42,18 +42,23 @@ optional; omit them for any non-booking payment.
 }
 ```
 
-### Response 200 — unchanged
+### Response 200 — gateway fields changed for Zoho Payments
 ```jsonc
 {
   "payment_id": "b7e2...",
-  "razorpay_order_id": "order_NQ...",
-  "razorpay_key_id": "rzp_test_xxx",
+  "zoho_payments_session_id": "1000000012345",
+  // Full hosted-checkout URL to redirect the customer's browser to - a
+  // full-page redirect (NOT an embedded JS checkout modal like Razorpay's).
+  "checkout_url": "https://payments.zoho.in/hostedcheckout/8f3a9b2c...",
+  "access_key": "8f3a9b2c...",
   "amount": 500000,
-  "amount_paise": 50000000,
   "currency": "INR",
   "status": "created"
 }
 ```
+`amount_paise` no longer exists - Zoho Payments takes a decimal amount, not paise.
+There is no `razorpay_key_id` equivalent: redirect the customer's browser to
+`checkout_url` instead of opening an embedded JS checkout modal.
 
 Errors:
 - `400 {"detail":"invalid_purpose"}` — `purpose` not `plot_booking` / `other`.
@@ -66,9 +71,12 @@ Errors:
 
 ## 3. `POST /payments/verify`  — response gains 3 fields
 
-Body unchanged (`razorpay_order_id`, `razorpay_payment_id`, `razorpay_signature`).
-On a **valid signature** the backend settles the payment **and** flips the linked
-plot to `booked` in the same step.
+Body changed with the Zoho Payments cutover: it now takes the exact query-string
+fields Zoho's hosted checkout appends when redirecting the customer's browser back
+to `success_url`/`failure_url` - the frontend forwards these unchanged:
+`payments_session_id`, `payment_id`, `payment_status`, `amount`, `signature`, and
+optional `udf1`..`udf5`. On a **valid signature** the backend settles the payment
+**and** flips the linked plot to `booked` in the same step.
 
 ### Response 200 — success (plot locked)
 ```jsonc
@@ -79,10 +87,10 @@ plot to `booked` in the same step.
   "amount": 500000,
   "currency": "INR",
   "status": "paid",
-  "method": "razorpay",
+  "method": "zoho",
   "verified": true,
-  "razorpay_order_id": "order_NQ...",
-  "razorpay_payment_id": "pay_NQ...",
+  "zoho_payments_session_id": "1000000012345",
+  "zoho_payment_id": "pay_NQ...",
   "created_date": "2026-09-07T10:34:12Z",
 
   "inventory_id": "b0e1f2a3-...",     // NEW — echo of the linked unit
@@ -133,7 +141,7 @@ Same `PaymentOut` shape as §3 — includes `inventory_id`, `inventory_status`,
 physically collected). A **customer's** own cash entry still creates the payment
 row but returns `inventory_status: null` and does **not** lock the plot — an
 unverified self-report can't remove a unit from the pool. Staff then confirm it
-with `POST /inventory/{id}/book` (§6), or the customer pays via Razorpay (§2–3),
+with `POST /inventory/{id}/book` (§6), or the customer pays via Zoho Payments (§2–3),
 which locks it immediately.
 
 ---
@@ -153,9 +161,12 @@ file:                <signed PDF>
 document_type:       project_booking_application
 project_id:          ops-divine-greens
 payment_id:          b7e2...
-inventory_id:        b0e1f2a3-4c5d-6e7f-8a9b-0c1d2e3f4a5b     <-- NEW (optional but send it)
-razorpay_order_id:   order_NQ...        (online payments only)
-razorpay_payment_id: pay_NQ...          (online payments only)
+inventory_id:               b0e1f2a3-4c5d-6e7f-8a9b-0c1d2e3f4a5b  <-- NEW (optional but send it)
+zoho_payments_session_id:   session_NQ...   (online payments only - renamed from
+zoho_payment_id:            pay_NQ...       razorpay_order_id/razorpay_payment_id at the
+                                             Zoho Payments cutover; echo-only, see note
+                                             above, so send the values you have or omit
+                                             both - it's a harmless no-op either way)
 form_data:           {...JSON...}       (must still include the TOTAL plot amount)
 ```
 
@@ -228,7 +239,8 @@ webhook (or the document safety-net) is always safe to call.
 1. Booking payment → send `purpose: "plot_booking"` + `inventory_id` on
    `POST /payments/create-order` **and** `POST /payments/cash`.
 2. `POST /payments/create-order` may now return `409 unit_not_available` → the plot
-   was taken before checkout started; refresh the list, don't open Razorpay.
+   was taken before checkout started; refresh the list, don't redirect to Zoho's
+   hosted checkout.
 3. After `POST /payments/verify` / `/cash`: read `inventory_status`.
    - `"booked"` → proceed as normal.
    - `"conflict"` → payment succeeded but plot was taken; show the re-assign/refund

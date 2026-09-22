@@ -30,7 +30,7 @@ def list_refunds(
     ),
     status: Optional[Literal["processing", "completed", "failed", "cash_refund_pending", "cash_collected",
                              "bank_transfer_pending", "bank_transfer_completed"]] = Query(None),
-    method: Optional[Literal["razorpay", "cash", "rtgs_neft"]] = Query(None),
+    method: Optional[Literal["zoho", "cash", "rtgs_neft", "razorpay"]] = Query(None),
     current_admin: dict = Depends(get_current_admin),
 ):
     """Real-time refund tracking for the admin panel's Refunds tab. Admin-only.
@@ -68,13 +68,14 @@ def get_refund(payment_id: str, current_admin: dict = Depends(get_current_admin)
 
 @router.post("/{payment_id}/retry", response_model=RefundDetailDTO)
 def retry_refund(payment_id: str, current_admin: dict = Depends(get_current_admin)):
-    """Resumes a Razorpay refund stuck at 'processing' (display status) after
-    both of its automatic gateway attempts failed - see
-    servicePayment.retry_razorpay_refund for the atomic claim that makes this
-    double-click safe. Admin-only."""
+    """Resumes a Zoho refund stuck at 'processing' (display status) after both
+    of its automatic gateway attempts failed - see
+    servicePayment.retry_zoho_refund for the atomic claim that makes this
+    double-click safe. A legacy razorpay refund can't be retried here (that
+    gateway was retired at cutover) - use mark-collected instead. Admin-only."""
     start = time.monotonic()
     try:
-        _payment_service.retry_razorpay_refund(payment_id, reason=None)
+        _payment_service.retry_zoho_refund(payment_id, reason=None)
         return _refund_service.get_refund(payment_id)
     except ValueError as e:
         code = str(e)

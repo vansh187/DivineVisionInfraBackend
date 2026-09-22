@@ -34,7 +34,7 @@ class persistenceCustomerProfile:
         "profile_get_booking_application": (
             "SELECT d.id, d.project_id, d.payment_id, d.form_data, d.created_date, "
             "p.inventory_id, p.amount AS booking_payment_amount, p.method AS payment_method, "
-            "p.razorpay_order_id, p.razorpay_payment_id, p.created_date AS payment_created_date "
+            "p.zoho_payments_session_id, p.zoho_payment_id, p.created_date AS payment_created_date "
             "FROM divine_documents d "
             "LEFT JOIN divine_payments p ON p.id = d.payment_id "
             "AND p.owner_id = d.owner_id AND p.owner_role = d.owner_role "
@@ -47,7 +47,7 @@ class persistenceCustomerProfile:
         "profile_list_booking_applications": (
             "SELECT d.id, d.project_id, d.payment_id, d.form_data, d.created_date, "
             "p.inventory_id, p.amount AS booking_payment_amount, p.method AS payment_method, "
-            "p.razorpay_order_id, p.razorpay_payment_id, p.created_date AS payment_created_date "
+            "p.zoho_payments_session_id, p.zoho_payment_id, p.created_date AS payment_created_date "
             "FROM divine_documents d "
             "LEFT JOIN divine_payments p ON p.id = d.payment_id "
             "AND p.owner_id = d.owner_id AND p.owner_role = d.owner_role "
@@ -205,8 +205,8 @@ class persistenceCustomerProfile:
             "payment_id": row.get("payment_id"),
             "booking_payment_amount": row.get("booking_payment_amount"),
             "payment_method": row.get("payment_method"),
-            "razorpay_order_id": row.get("razorpay_order_id"),
-            "razorpay_payment_id": row.get("razorpay_payment_id"),
+            "zoho_payments_session_id": row.get("zoho_payments_session_id"),
+            "zoho_payment_id": row.get("zoho_payment_id"),
             "payment_created_date": row.get("payment_created_date"),
             "form_data": self._as_dict(row.get("form_data")),
             "created_date": row.get("created_date"),

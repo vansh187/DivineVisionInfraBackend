@@ -116,13 +116,13 @@ def _seed_plot(cid, *, unit, total, inventory_id, days_ago=120, created_offset_m
     with engine.begin() as c:
         c.execute(text(
             "INSERT INTO divine_payments(id, owner_id, owner_role, amount, currency, status, "
-            "method, purpose, inventory_id, razorpay_order_id, razorpay_payment_id, "
+            "method, purpose, inventory_id, zoho_payments_session_id, zoho_payment_id, "
             "created_date, last_updated_date) VALUES "
-            "(:id, :o, 'customer', :amt, 'INR', :st, 'razorpay', 'plot_booking', :inv, "
-            ":order_id, :rzp_id, :n, :n)"),
+            "(:id, :o, 'customer', :amt, 'INR', :st, 'zoho', 'plot_booking', :inv, "
+            ":session_id, :zoho_id, :n, :n)"),
             {"id": payment_id, "o": cid, "amt": booking_amount, "inv": inventory_id,
-             "st": payment_status, "order_id": f"order-{payment_id}",
-             "rzp_id": f"rzp-{payment_id}", "n": created})
+             "st": payment_status, "session_id": f"session-{payment_id}",
+             "zoho_id": f"zoho-{payment_id}", "n": created})
         c.execute(text(
             "INSERT INTO divine_documents(id, owner_id, owner_role, document_type, form_data, "
             "storage_path, status, storage_bucket, project_id, payment_id, created_date, "
@@ -153,16 +153,15 @@ def _seed_document(cid, document_type, storage_path=None):
 def _pay_service():
     booking = MagicMock()
     booking.create_booking.return_value = SimpleNamespace(id="BKG-2026-000001")
-    svc = servicePayment(MagicMock(), MagicMock(), booking)
-    svc._key_id, svc._key_secret = "rzp_test_fake", "fake_secret"
+    svc = servicePayment(MagicMock(), MagicMock(), booking, gateway=MagicMock())
     return svc
 
 
 def _pay_row(**kw):
     base = {"id": "pay1", "owner_id": "C81000", "owner_role": "customer", "amount": 500000,
-            "currency": "INR", "status": "paid", "method": "razorpay", "purpose": "other",
+            "currency": "INR", "status": "paid", "method": "zoho", "purpose": "other",
             "inventory_id": None, "installment_no": None, "due_date": None,
-            "razorpay_order_id": None, "razorpay_payment_id": None}
+            "zoho_payments_session_id": None, "zoho_payment_id": None}
     base.update(kw)
     return SimpleNamespace(**base)
 
@@ -192,9 +191,9 @@ def test_profile_lists_every_plot_and_scopes_amounts_per_plot():
     assert by_unit["A-1"].inventory_id == "INV-A"
     assert by_unit["A-1"].payment_id == a.payment_id
     assert by_unit["A-1"].booking_payment_amount == 500_000
-    assert by_unit["A-1"].payment_method == "razorpay"
-    assert by_unit["A-1"].razorpay_order_id == f"order-{a.payment_id}"
-    assert by_unit["A-1"].razorpay_payment_id == f"rzp-{a.payment_id}"
+    assert by_unit["A-1"].payment_method == "zoho"
+    assert by_unit["A-1"].zoho_payments_session_id == f"session-{a.payment_id}"
+    assert by_unit["A-1"].zoho_payment_id == f"zoho-{a.payment_id}"
     assert by_unit["A-1"].payment_created_date is not None
     assert by_unit["A-1"].total_consideration == 5_000_000
     assert by_unit["B-2"].total_consideration == 8_000_000
@@ -369,7 +368,7 @@ def test_verify_installment_settlement_marks_only_the_named_plots_milestone():
 
     record = SimpleNamespace(
         id="pay-verify-b", owner_id=cid, owner_role="customer", amount=8_000_000 * 15 // 100,
-        currency="INR", status="paid", method="razorpay", purpose="installment",
+        currency="INR", status="paid", method="zoho", purpose="installment",
         inventory_id="INV-B", installment_no=2, due_date=None, installment_status=None,
     )
     svc = _pay_service()

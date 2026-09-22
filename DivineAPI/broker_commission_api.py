@@ -1,3 +1,4 @@
+import os
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.exc import IntegrityError
 
@@ -30,7 +31,7 @@ def _create_commission(dto: BrokerCommissionCreateDTO, source: str, current_user
     try:
         if source == "admin":
             _require_admin(current_user)
-            commission, payment = _commission_service.initiate_admin_razorpay_commission(
+            commission, payment = _commission_service.initiate_admin_commission_payment(
                 brokerId=dto.brokerId,
                 serialNumber=dto.serialNumber,
                 unitAddress=dto.unitAddress,
@@ -39,6 +40,8 @@ def _create_commission(dto: BrokerCommissionCreateDTO, source: str, current_user
                 saleValue=dto.saleValue,
                 commissionAmount=dto.commissionAmount,
                 transactionMode=dto.transactionMode,
+                success_url=os.getenv("ZOHO_PAYMENTS_SUCCESS_URL"),
+                failure_url=os.getenv("ZOHO_PAYMENTS_FAILURE_URL"),
             )
             return {"success": True, "commission": commission, "payment": payment}
         else:

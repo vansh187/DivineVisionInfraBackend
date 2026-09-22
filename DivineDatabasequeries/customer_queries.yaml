@@ -31,8 +31,8 @@ profile_get_booking_application: |
          p.inventory_id,
          p.amount AS booking_payment_amount,
          p.method AS payment_method,
-         p.razorpay_order_id,
-         p.razorpay_payment_id,
+         p.zoho_payments_session_id,
+         p.zoho_payment_id,
          p.created_date AS payment_created_date
   FROM divine_documents d
   LEFT JOIN divine_payments p
@@ -49,8 +49,8 @@ profile_list_booking_applications: |
          p.inventory_id,
          p.amount AS booking_payment_amount,
          p.method AS payment_method,
-         p.razorpay_order_id,
-         p.razorpay_payment_id,
+         p.zoho_payments_session_id,
+         p.zoho_payment_id,
          p.created_date AS payment_created_date
   FROM divine_documents d
   LEFT JOIN divine_payments p
