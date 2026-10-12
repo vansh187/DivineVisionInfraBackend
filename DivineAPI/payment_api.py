@@ -28,11 +28,12 @@ def _to_payment_out(record, verified: bool = None) -> PaymentOutDTO:
         status=record.status,
         # Defensive default: if this row (or the whole table, in a not-yet-migrated
         # environment) predates the method column, don't 500 on a plain read - every
-        # payment before this feature existed went through Razorpay, so that's correct.
-        method=getattr(record, "method", "razorpay"),
+        # payment before the Zoho Payments cutover went through Razorpay, but any new
+        # payment always has a method set explicitly, so 'zoho' is the correct default.
+        method=getattr(record, "method", "zoho"),
         verified=record.status == "paid" if verified is None else verified,
-        razorpay_order_id=record.razorpay_order_id,
-        razorpay_payment_id=record.razorpay_payment_id,
+        zoho_payments_session_id=getattr(record, "zoho_payments_session_id", None),
+        zoho_payment_id=getattr(record, "zoho_payment_id", None),
         created_date=record.created_date,
         # Booking linkage. inventory_id is a stored column; inventory_status /
         # inventory_conflict_reason are transient, set by the service only on the
@@ -52,17 +53,17 @@ def _to_payment_out(record, verified: bool = None) -> PaymentOutDTO:
 @router.post("/create-order", response_model=PaymentOrderOutDTO)
 def create_order(dto: PaymentOrderRequestDTO, current_user: dict = Depends(get_current_user)):
     try:
-        record, key_id = _payment_service.create_order(
+        record, session = _payment_service.create_order(
             dto.amount, owner_id=current_user["sub"], owner_role=current_user["role"],
             purpose=dto.purpose, inventory_id=dto.inventory_id,
             installment_no=dto.installment_no, due_date=dto.due_date,
         )
         return PaymentOrderOutDTO(
             payment_id=record.id,
-            razorpay_order_id=record.razorpay_order_id,
-            razorpay_key_id=key_id,
+            zoho_payments_session_id=record.zoho_payments_session_id,
+            checkout_url=session["checkout_url"],
+            access_key=session["access_key"],
             amount=float(record.amount),
-            amount_paise=int(round(float(record.amount) * 100)),
             currency=record.currency,
             status=record.status,
         )
@@ -73,9 +74,13 @@ def create_order(dto: PaymentOrderRequestDTO, current_user: dict = Depends(get_c
     except IntegrityError:
         raise HTTPException(status_code=409, detail="conflict")
     except RuntimeError as e:
-        if str(e).startswith("payment_order_failed:BadRequestError"):
-            raise HTTPException(status_code=400, detail=str(e))
-        raise HTTPException(status_code=502, detail=str(e))
+        # A 4xx from Zoho (bad request - e.g. a malformed amount/currency) is our
+        # own bug, not a gateway outage; anything else (auth failure, 5xx, network)
+        # is a genuine upstream problem, surfaced as 502.
+        detail = str(e)
+        if "status_400" in detail or "status_422" in detail:
+            raise HTTPException(status_code=400, detail=detail)
+        raise HTTPException(status_code=502, detail=detail)
     except Exception:
         raise HTTPException(status_code=500, detail="internal_error")
 
@@ -84,8 +89,9 @@ def create_order(dto: PaymentOrderRequestDTO, current_user: dict = Depends(get_c
 def verify_payment(dto: PaymentVerifyRequestDTO, current_user: dict = Depends(get_current_user)):
     try:
         record, verified = _payment_service.verify_payment(
-            dto.razorpay_order_id, dto.razorpay_payment_id, dto.razorpay_signature,
+            dto.payments_session_id, dto.payment_id, dto.payment_status, dto.amount, dto.signature,
             owner_id=current_user["sub"],
+            udf1=dto.udf1, udf2=dto.udf2, udf3=dto.udf3, udf4=dto.udf4, udf5=dto.udf5,
         )
         return _to_payment_out(record, verified)
     except ValueError:
@@ -119,16 +125,17 @@ def record_cash_payment(dto: PaymentCashRequestDTO, current_user: dict = Depends
 
 
 @router.post("/webhook")
-async def razorpay_webhook(request: Request):
-    # No auth dependency - Razorpay calls this server-to-server with no user JWT.
-    # Authenticity comes entirely from the X-Razorpay-Signature HMAC, verified inside
-    # handle_webhook against RAZORPAY_WEBHOOK_SECRET. async def (unlike the KYC/photo
-    # routes) is fine here: the only work is reading the body and a fast local HMAC
-    # check, not CPU-heavy or blocking enough to need threadpool offload.
+async def zoho_payments_webhook(request: Request):
+    # No auth dependency - Zoho calls this server-to-server with no user JWT.
+    # Authenticity comes entirely from the X-Zoho-Webhook-Signature HMAC, verified
+    # inside handle_webhook against ZOHO_PAYMENTS_WEBHOOK_SECRET. async def (unlike
+    # the KYC/photo routes) is fine here: the only work is reading the body and a
+    # fast local HMAC check, not CPU-heavy or blocking enough to need threadpool
+    # offload.
     try:
         raw_body = await request.body()
-        signature = request.headers.get("x-razorpay-signature", "")
-        result = _payment_service.handle_webhook(raw_body, signature)
+        signature_header = request.headers.get("x-zoho-webhook-signature", "")
+        result = _payment_service.handle_webhook(raw_body, signature_header)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except RuntimeError as e:

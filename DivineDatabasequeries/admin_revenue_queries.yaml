@@ -10,7 +10,7 @@
 #   refunded       - refund_status = 'completed'
 #   refund_pending - refund_status = 'pending' or 'processing'
 #   cash_recorded  - method = 'cash' (and no refund in flight)
-#   captured       - anything else settled (razorpay/rtgs_neft, no refund)
+#   captured       - anything else settled (zoho/rtgs_neft/legacy razorpay, no refund)
 #
 # ONE payment maps to AT MOST ONE booking - never more, and this is deliberate,
 # not incidental. b.payment_id has a UNIQUE constraint, so the direct match is
@@ -129,6 +129,7 @@ get_transaction_by_id: |
     p.refund_status AS refund_status,
     p.owner_id AS customer_id,
     p.created_date AS created_date,
+    p.zoho_payment_id AS zoho_payment_id,
     p.razorpay_payment_id AS razorpay_payment_id,
     p.utr_number AS utr_number,
     b.id AS booking_id,

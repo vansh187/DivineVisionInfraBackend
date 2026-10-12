@@ -5,8 +5,8 @@ Frontend integration reference for admin-only refund workflows:
 1. `POST /admin/bookings/{booking_id}/cancel` - cancel a booking, release the plot, start a refund, and email the customer.
 2. `GET /admin/refunds` - list refund information for the admin panel.
 3. `GET /admin/refunds/{payment_id}` - show one refund's latest status and references.
-4. `POST /admin/refunds/{payment_id}/retry` - retry a Razorpay refund stuck in processing.
-5. `POST /admin/refunds/{payment_id}/mark-collected` - mark a cash/RTGS/NEFT refund as paid out.
+4. `POST /admin/refunds/{payment_id}/retry` - retry a Zoho Payments refund stuck in processing.
+5. `POST /admin/refunds/{payment_id}/mark-collected` - mark a cash/RTGS/NEFT/legacy-Razorpay refund as paid out.
 
 All endpoints require an admin JWT: `Authorization: Bearer <admin_jwt>`. A non-admin or missing token gets `401`.
 
@@ -58,9 +58,10 @@ Refund behavior by payment method:
 
 | `payment_method` | What happens |
 |---|---|
-| `razorpay` | Real refund is triggered through Razorpay immediately. If gateway retry attempts fail, the payment stays retryable from the Refunds tab. |
+| `zoho` | Real refund is triggered through Zoho Payments immediately. If gateway retry attempts fail, the payment stays retryable from the Refunds tab. |
 | `cash` | No gateway call. The customer is told where to collect the cash refund. Admin later confirms payout with `mark-collected`. |
 | `rtgs_neft` | No gateway call. Business pays manually by bank transfer. Admin later confirms payout with `mark-collected`. |
+| `razorpay` (legacy, pre-cutover) | That gateway's credentials were retired at the Zoho Payments cutover - no automatic gateway call. Admin confirms payout with `mark-collected`, same as cash/RTGS-NEFT. |
 
 ### Errors
 
@@ -78,7 +79,7 @@ Refund behavior by payment method:
 ## 2. List Refunds
 
 ```http
-GET /admin/refunds?page=1&page_size=20&search=Verma&status=processing&method=razorpay
+GET /admin/refunds?page=1&page_size=20&search=Verma&status=processing&method=zoho
 Authorization: Bearer <admin_jwt>
 ```
 
@@ -90,7 +91,9 @@ Query params:
 | `page_size` | int | Default `20`, min `1`, max `100` |
 | `search` | string | Matches payment id, booking id, project, unit, or customer name |
 | `status` | enum | `processing`, `completed`, `failed`, `cash_refund_pending`, `cash_collected`, `bank_transfer_pending`, `bank_transfer_completed` |
-| `method` | enum | `razorpay`, `cash`, `rtgs_neft` |
+| `method` | enum | `zoho`, `cash`, `rtgs_neft`, `razorpay` (legacy, pre-cutover payments only) |
+
+Note: a legacy `razorpay` refund displays under `bank_transfer_pending` / `bank_transfer_completed` (same manual-payout bucket as `rtgs_neft`), not `processing` - that gateway's credentials were retired at the Zoho Payments cutover.
 
 ### Response - 200 OK
 
@@ -144,10 +147,10 @@ Authorization: Bearer <admin_jwt>
   "unit_number": "C-9",
   "amount": 900000,
   "currency": "INR",
-  "method": "razorpay",
+  "method": "zoho",
   "status": "processing",
-  "razorpay_payment_id": "pay_abc123",
-  "razorpay_refund_id": null,
+  "gateway_payment_id": "pay_abc123",
+  "zoho_refund_id": null,
   "utr_number": null,
   "refund_note": "Automatic refund failed (gateway timeout) - needs manual retry.",
   "refund_initiated_date": "2026-09-16T11:05:00Z",
@@ -156,11 +159,13 @@ Authorization: Bearer <admin_jwt>
 }
 ```
 
+`gateway_payment_id` holds the `zoho_payment_id` for a `method: "zoho"` payment, or the legacy `razorpay_payment_id` for a pre-cutover `method: "razorpay"` payment - never both.
+
 Unknown payments and payments with no refund return `404 not_found`.
 
 ---
 
-## 4. Retry Razorpay Refund
+## 4. Retry Zoho Refund
 
 ```http
 POST /admin/refunds/{payment_id}/retry
@@ -169,14 +174,16 @@ Authorization: Bearer <admin_jwt>
 
 Use only when:
 
-- `method === "razorpay"`
+- `method === "zoho"`
 - `status === "processing"`
+
+Do not use this for `method === "razorpay"` - that gateway's credentials were retired at the Zoho Payments cutover, so a legacy Razorpay refund can never be retried automatically; use `mark-collected` (§5) for those instead.
 
 The retry is double-click safe. A concurrent or repeated retry is refused rather than double-refunding.
 
 ### Response - 200 OK
 
-Returns the same shape as `GET /admin/refunds/{payment_id}` with the latest status. If Razorpay succeeds, `status` becomes `completed` and `razorpay_refund_id` is populated. If Razorpay fails again, the response can still be `200` with `status: "processing"` and an updated `refund_note`.
+Returns the same shape as `GET /admin/refunds/{payment_id}` with the latest status. If Zoho succeeds, `status` becomes `completed` and `zoho_refund_id` is populated. If Zoho fails again, the response can still be `200` with `status: "processing"` and an updated `refund_note`.
 
 ### Errors
 
@@ -185,7 +192,8 @@ Returns the same shape as `GET /admin/refunds/{payment_id}` with the latest stat
 | 401 | - | Missing/invalid/non-admin token |
 | 404 | `not_found` | Unknown payment id |
 | 409 | `payment_not_paid` | Payment was never captured |
-| 409 | `not_a_razorpay_refund` | Cash/RTGS/NEFT refunds are manual |
+| 409 | `not_a_zoho_refund` | Cash/RTGS/NEFT refunds are manual |
+| 409 | `razorpay_gateway_retired` | Legacy Razorpay payment - no live gateway credentials anymore; use `mark-collected` instead |
 | 409 | `refund_not_retryable` | Not currently pending/retryable |
 | 500 | `internal_error` | Safe to retry |
 
@@ -199,7 +207,7 @@ Content-Type: application/json
 Authorization: Bearer <admin_jwt>
 ```
 
-Use for `cash` and `rtgs_neft` refunds once the business has actually paid the customer.
+Use for `cash`, `rtgs_neft`, and legacy `razorpay` refunds once the business has actually paid the customer.
 
 ### Request
 
@@ -223,7 +231,7 @@ Returns the latest refund detail. `cash_refund_pending` becomes `cash_collected`
 |---|---|---|
 | 401 | - | Missing/invalid/non-admin token |
 | 404 | `not_found` | Unknown payment id |
-| 409 | `not_a_manual_refund` | Razorpay refunds cannot be manually collected |
+| 409 | `not_a_manual_refund` | Zoho refunds cannot be manually collected (use `retry` instead) |
 | 409 | `refund_not_pending` | Already completed, failed, or no refund is pending |
 | 422 | - | Invalid request body |
 | 500 | `internal_error` | Safe to retry |

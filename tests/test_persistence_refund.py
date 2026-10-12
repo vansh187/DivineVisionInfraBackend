@@ -1,4 +1,4 @@
-"""Integration coverage for persistenceRefund against a real SQLite database."""
+﻿"""Integration coverage for persistenceRefund against a real SQLite database."""
 import os
 import uuid
 
@@ -14,19 +14,20 @@ from Divinepersistence.persistence_refund import persistenceRefund
 
 _CUSTOMER_A = None
 _CUSTOMER_B = None
-_RAZORPAY_PENDING_ID = None
-_RAZORPAY_COMPLETED_ID = None
-_RAZORPAY_FAILED_ID = None
+_ZOHO_PENDING_ID = None
+_ZOHO_COMPLETED_ID = None
+_ZOHO_FAILED_ID = None
 _CASH_PENDING_ID = None
 _CASH_COLLECTED_ID = None
 _BANK_PENDING_ID = None
 _BANK_COMPLETED_ID = None
+_LEGACY_RAZORPAY_ID = None
 
 
 def setup_module(module):
-    global _CUSTOMER_A, _CUSTOMER_B, _RAZORPAY_PENDING_ID, _RAZORPAY_COMPLETED_ID
-    global _RAZORPAY_FAILED_ID, _CASH_PENDING_ID, _CASH_COLLECTED_ID
-    global _BANK_PENDING_ID, _BANK_COMPLETED_ID
+    global _CUSTOMER_A, _CUSTOMER_B, _ZOHO_PENDING_ID, _ZOHO_COMPLETED_ID
+    global _ZOHO_FAILED_ID, _CASH_PENDING_ID, _CASH_COLLECTED_ID
+    global _BANK_PENDING_ID, _BANK_COMPLETED_ID, _LEGACY_RAZORPAY_ID
 
     db_file = os.path.join(os.getcwd(), "test_db.sqlite")
     try:
@@ -56,36 +57,36 @@ def setup_module(module):
     payments = persistencePayment()
     bookings = persistenceBooking()
 
-    razorpay_pending = payments.create_payment(
+    zoho_pending = payments.create_payment(
         id=str(uuid.uuid4()), owner_id=_CUSTOMER_A, owner_role="customer",
-        amount=100000, currency="INR", status="created", method="razorpay",
+        amount=100000, currency="INR", status="created", method="zoho",
         purpose="plot_booking", inventory_id=unit_id,
     )
-    payments.update_payment_status(razorpay_pending.id, "paid", "pay_pending", "sig")
+    payments.update_payment_status(zoho_pending.id, "paid", "pay_pending", "sig")
     bookings.create_booking(
-        payment_id=razorpay_pending.id, inventory_id=unit_id, customer_id=_CUSTOMER_A,
+        payment_id=zoho_pending.id, inventory_id=unit_id, customer_id=_CUSTOMER_A,
         project_name="Refund QA Orchard", unit_number="R-01", amount=100000,
     )
-    payments.update_refund_status(razorpay_pending.id, "pending", refund_amount=100000, refund_note="gateway timeout")
-    _RAZORPAY_PENDING_ID = razorpay_pending.id
+    payments.update_refund_status(zoho_pending.id, "pending", refund_amount=100000, refund_note="gateway timeout")
+    _ZOHO_PENDING_ID = zoho_pending.id
 
-    razorpay_completed = payments.create_payment(
+    zoho_completed = payments.create_payment(
         id=str(uuid.uuid4()), owner_id=_CUSTOMER_A, owner_role="customer",
-        amount=200000, currency="INR", status="created", method="razorpay", purpose="other",
+        amount=200000, currency="INR", status="created", method="zoho", purpose="other",
     )
-    payments.update_payment_status(razorpay_completed.id, "paid", "pay_completed", "sig")
+    payments.update_payment_status(zoho_completed.id, "paid", "pay_completed", "sig")
     payments.update_refund_status(
-        razorpay_completed.id, "completed", refund_amount=200000, razorpay_refund_id="rfnd_ok",
+        zoho_completed.id, "completed", refund_amount=200000, zoho_refund_id="rfnd_ok",
     )
-    _RAZORPAY_COMPLETED_ID = razorpay_completed.id
+    _ZOHO_COMPLETED_ID = zoho_completed.id
 
-    razorpay_failed = payments.create_payment(
+    zoho_failed = payments.create_payment(
         id=str(uuid.uuid4()), owner_id=_CUSTOMER_B, owner_role="customer",
-        amount=300000, currency="INR", status="created", method="razorpay", purpose="other",
+        amount=300000, currency="INR", status="created", method="zoho", purpose="other",
     )
-    payments.update_payment_status(razorpay_failed.id, "paid", "pay_failed", "sig")
-    payments.update_refund_status(razorpay_failed.id, "failed", refund_amount=300000)
-    _RAZORPAY_FAILED_ID = razorpay_failed.id
+    payments.update_payment_status(zoho_failed.id, "paid", "pay_failed", "sig")
+    payments.update_refund_status(zoho_failed.id, "failed", refund_amount=300000)
+    _ZOHO_FAILED_ID = zoho_failed.id
 
     cash_pending = payments.create_payment(
         id=str(uuid.uuid4()), owner_id=_CUSTOMER_B, owner_role="customer",
@@ -119,8 +120,24 @@ def setup_module(module):
 
     payments.create_payment(
         id=str(uuid.uuid4()), owner_id=_CUSTOMER_A, owner_role="customer",
-        amount=800000, currency="INR", status="paid", method="razorpay", purpose="other",
+        amount=800000, currency="INR", status="paid", method="zoho", purpose="other",
     )
+
+    # A pre-cutover payment that went through the (now-retired) Razorpay gateway -
+    # its refund must now behave like a manual method (bank_transfer_* bucket),
+    # never the live 'zoho' processing/completed/failed bucket, since there is no
+    # gateway left to call for it. Seeded with seed_legacy_razorpay_fields, the
+    # only place in the app allowed to write a razorpay_* value post-cutover.
+    legacy_razorpay = payments.create_payment(
+        id=str(uuid.uuid4()), owner_id=_CUSTOMER_A, owner_role="customer",
+        amount=900000, currency="INR", status="created", method="razorpay", purpose="other",
+    )
+    payments.seed_legacy_razorpay_fields(
+        legacy_razorpay.id, razorpay_order_id="order_legacy", razorpay_payment_id="pay_legacy",
+    )
+    payments.update_payment_status(legacy_razorpay.id, "paid", None, None)
+    payments.update_refund_status(legacy_razorpay.id, "pending", refund_amount=900000)
+    _LEGACY_RAZORPAY_ID = legacy_razorpay.id
 
 
 def _persistence():
@@ -134,9 +151,9 @@ def _rows_by_id(rows):
 def test_refunded_fixtures_are_returned_with_display_statuses():
     rows = _rows_by_id(_persistence().list_refunds(limit=1000, offset=0))
 
-    assert rows[_RAZORPAY_PENDING_ID].display_status == "processing"
-    assert rows[_RAZORPAY_COMPLETED_ID].display_status == "completed"
-    assert rows[_RAZORPAY_FAILED_ID].display_status == "failed"
+    assert rows[_ZOHO_PENDING_ID].display_status == "processing"
+    assert rows[_ZOHO_COMPLETED_ID].display_status == "completed"
+    assert rows[_ZOHO_FAILED_ID].display_status == "failed"
     assert rows[_CASH_PENDING_ID].display_status == "cash_refund_pending"
     assert rows[_CASH_COLLECTED_ID].display_status == "cash_collected"
     assert rows[_BANK_PENDING_ID].display_status == "bank_transfer_pending"
@@ -165,11 +182,11 @@ def test_filter_by_method():
 
 def test_search_matches_project_and_customer():
     project_rows = _persistence().list_refunds(search="Refund QA Orchard", limit=1000, offset=0)
-    assert {r.id for r in project_rows} == {_RAZORPAY_PENDING_ID}
+    assert {r.id for r in project_rows} == {_ZOHO_PENDING_ID}
 
     customer_rows = _persistence().list_refunds(search="Kabir Rao", limit=1000, offset=0)
     ids = {r.id for r in customer_rows}
-    assert _RAZORPAY_FAILED_ID in ids
+    assert _ZOHO_FAILED_ID in ids
     assert _CASH_PENDING_ID in ids
 
 
@@ -179,7 +196,7 @@ def test_search_is_wildcard_safe_for_underscore():
 
 
 def test_get_refund_by_id_returns_detail_fields():
-    row = _persistence().get_refund(_RAZORPAY_PENDING_ID)
+    row = _persistence().get_refund(_ZOHO_PENDING_ID)
     assert row is not None
     assert row.display_status == "processing"
     assert row.project_name == "Refund QA Orchard"
@@ -198,6 +215,16 @@ def test_get_refund_returns_none_for_unknown_or_non_refund_payment():
     assert _persistence().get_refund(no_refund.id) is None
 
 
+def test_legacy_razorpay_refund_uses_manual_bucket_not_gateway_bucket():
+    """A pre-cutover razorpay payment's refund must bucket like a manual
+    (bank-transfer-style) refund, not the live 'zoho' processing/completed/
+    failed bucket - there's no gateway left to call for it."""
+    row = _persistence().get_refund(_LEGACY_RAZORPAY_ID)
+    assert row is not None
+    assert row.display_status == "bank_transfer_pending"
+    assert row.method == "razorpay"
+
+
 def test_pagination_has_total_count():
     page1 = _persistence().list_refunds(limit=2, offset=0)
     page2 = _persistence().list_refunds(limit=2, offset=2)
@@ -205,4 +232,4 @@ def test_pagination_has_total_count():
     assert len(page1) == 2
     assert len(page2) == 2
     assert {r.id for r in page1}.isdisjoint({r.id for r in page2})
-    assert int(page1[0].total_count) >= 7
+    assert int(page1[0].total_count) >= 8

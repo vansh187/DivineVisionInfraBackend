@@ -51,7 +51,7 @@ def test_create_paid_commission_sets_backend_generated_values():
     assert kwargs["broker_id"] == "brk_123"
     assert kwargs["status"] == "paid"
     assert kwargs["transaction_mode"] == "cash"
-    assert kwargs["razorpay_order_id"] is None
+    assert kwargs["zoho_payments_session_id"] is None
     assert kwargs["paid_at"] == kwargs["created_at"]
     assert kwargs["rejected_at"] is None
     assert result["commissionAmount"] == 45000.0
@@ -74,59 +74,86 @@ def test_create_paid_commission_rejects_broker_booking_mode():
         assert str(e) == "transactionMode_must_be_cash"
 
 
-@patch("DivineService.service_broker_commission.razorpay.Client")
-def test_initiate_admin_razorpay_commission_uses_pending_booking_mode(mock_client_cls):
-    mock_client = MagicMock()
-    mock_client.order.create.return_value = {"id": "order_commission_123"}
-    mock_client_cls.return_value = mock_client
-    svc, persistence = _service()
-    svc._key_id = "rzp_test_key"
-    svc._key_secret = "rzp_test_secret"
+def test_initiate_admin_commission_payment_uses_pending_booking_mode():
+    gateway = MagicMock()
+    gateway.create_payment_session.return_value = {
+        "payments_session_id": "session_commission_123", "access_key": "key_commission_123",
+        "checkout_url": "https://payments.zoho.in/hostedcheckout/key_commission_123",
+        "amount": "45000.00", "currency": "INR",
+    }
+    persistence = MagicMock()
+    svc = serviceBrokerCommission(persistence, gateway=gateway)
     persistence.create_commission.return_value = _record(status="pending", transaction_mode="booking", paid_at=None)
 
-    commission, payment = svc.initiate_admin_razorpay_commission(
+    commission, payment = svc.initiate_admin_commission_payment(
         brokerId="brk_123",
         serialNumber="SN-1001",
         unitAddress="Plot 42",
         commissionAmount=45000,
         transactionMode="booking",
+        success_url="https://fe.example.com/success",
+        failure_url="https://fe.example.com/failure",
     )
 
     _, kwargs = persistence.create_commission.call_args
     assert kwargs["status"] == "pending"
     assert kwargs["transaction_mode"] == "booking"
-    assert kwargs["razorpay_order_id"] == "order_commission_123"
+    assert kwargs["zoho_payments_session_id"] == "session_commission_123"
     assert kwargs["paid_at"] is None
     assert commission["status"] == "pending"
     assert commission["transactionMode"] == "booking"
-    assert payment["razorpayOrderId"] == "order_commission_123"
-    assert payment["razorpayKeyId"] == "rzp_test_key"
-    assert payment["amountPaise"] == 4500000
+    assert payment["zohoPaymentsSessionId"] == "session_commission_123"
+    assert payment["zohoAccessKey"] == "key_commission_123"
+    # The critical, highest-risk assertion in this whole migration: the gateway
+    # must receive a decimal amount, never Razorpay's amount*100 paise convention.
+    _, session_kwargs = gateway.create_payment_session.call_args
+    assert session_kwargs["amount"] == 45000
 
 
-def test_initiate_admin_razorpay_commission_rejects_cash_mode():
+def test_initiate_admin_commission_payment_rejects_cash_mode():
     svc, _ = _service()
 
     try:
-        svc.initiate_admin_razorpay_commission(
+        svc.initiate_admin_commission_payment(
             brokerId="brk_123",
             serialNumber="SN-1001",
             unitAddress="Plot 42",
             commissionAmount=45000,
             transactionMode="cash",
+            success_url="https://fe.example.com/success",
+            failure_url="https://fe.example.com/failure",
         )
         assert False, "expected ValueError"
     except ValueError as e:
         assert str(e) == "admin_transactionMode_must_be_booking"
 
 
-def test_initiate_admin_razorpay_commission_requires_gateway_config():
-    svc, _ = _service()
-    svc._key_id = None
-    svc._key_secret = None
+def test_initiate_admin_commission_payment_requires_gateway_config():
+    gateway = MagicMock()
+    gateway.create_payment_session.side_effect = RuntimeError("payment_not_configured")
+    persistence = MagicMock()
+    svc = serviceBrokerCommission(persistence, gateway=gateway)
 
     try:
-        svc.initiate_admin_razorpay_commission(
+        svc.initiate_admin_commission_payment(
+            brokerId="brk_123",
+            serialNumber="SN-1001",
+            unitAddress="Plot 42",
+            commissionAmount=45000,
+            transactionMode="booking",
+            success_url="https://fe.example.com/success",
+            failure_url="https://fe.example.com/failure",
+        )
+        assert False, "expected RuntimeError"
+    except RuntimeError as e:
+        assert str(e) == "payment_not_configured"
+
+
+def test_initiate_admin_commission_payment_requires_redirect_urls():
+    svc, _ = _service()
+
+    try:
+        svc.initiate_admin_commission_payment(
             brokerId="brk_123",
             serialNumber="SN-1001",
             unitAddress="Plot 42",
@@ -135,7 +162,7 @@ def test_initiate_admin_razorpay_commission_requires_gateway_config():
         )
         assert False, "expected RuntimeError"
     except RuntimeError as e:
-        assert str(e) == "payment_not_configured"
+        assert str(e) == "payment_redirect_urls_not_configured"
 
 
 def test_create_paid_commission_rejects_missing_required_fields():

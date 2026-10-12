@@ -33,21 +33,29 @@ class PaymentModel(Base):
     # false via db_init.sql / the migration - flag_manual_review always sets it.
     needs_manual_review = Column(Boolean, default=False)
     manual_review_reason = Column(String(60))
+    # razorpay_* columns are kept for every payment made before the Zoho Payments
+    # cutover - never written to for a new payment again, but still read for
+    # historical rows (receipts, admin refund/revenue screens). zoho_* are the
+    # live gateway columns for every new payment (method='zoho').
     razorpay_order_id = Column(String(64), nullable=True, index=True)
     razorpay_payment_id = Column(String(64))
     razorpay_signature = Column(String(255))
+    zoho_payments_session_id = Column(String(64), nullable=True, index=True)
+    zoho_payment_id = Column(String(64))
+    zoho_signature = Column(String(255))
     # Customer-entered bank reference number for an "rtgs_neft" payment (collected on
     # the payment-method entry screen) - there's no gateway transaction id for those,
-    # this is the equivalent of razorpay_payment_id for that method.
+    # this is the equivalent of zoho_payment_id for that method.
     utr_number = Column(String(50))
     # Refund bookkeeping - see DivineService/service_payment.py::initiate_refund.
     # 'none' | 'pending' | 'processing' | 'completed' | 'failed'. 'pending'/'processing'
-    # cover both an in-flight Razorpay refund and a cash/rtgs_neft refund the business
-    # still owes manually; 'completed' is set by the admin once a manual refund is
-    # actually paid out (Razorpay refunds are auto-completed by the gateway).
+    # cover both an in-flight Zoho refund and a cash/rtgs_neft/legacy-razorpay refund
+    # the business still owes manually; 'completed' is set by the admin once a manual
+    # refund is actually paid out (Zoho refunds are auto-completed by the gateway).
     refund_status = Column(String(20), nullable=False, default="none", server_default="none")
     refund_amount = Column(Numeric(12, 2))
     razorpay_refund_id = Column(String(64))
+    zoho_refund_id = Column(String(64))
     refund_initiated_date = Column(DateTime)
     refund_completed_date = Column(DateTime)
     refund_note = Column(Text)
@@ -61,14 +69,14 @@ class persistencePayment:
         self._session_factory = session_factory
         queries = load_queries("payment_queries.yaml")
         queries.setdefault("create_payment", (
-            'INSERT INTO divine_payments(id, owner_id, owner_role, amount, currency, status, method, purpose, inventory_id, installment_no, due_date, razorpay_order_id, utr_number, notes, created_date, last_updated_date) '
-            'VALUES (:id, :owner_id, :owner_role, :amount, :currency, :status, :method, :purpose, :inventory_id, :installment_no, :due_date, :razorpay_order_id, :utr_number, :notes, :created_date, :last_updated_date) RETURNING *;'
+            'INSERT INTO divine_payments(id, owner_id, owner_role, amount, currency, status, method, purpose, inventory_id, installment_no, due_date, zoho_payments_session_id, utr_number, notes, created_date, last_updated_date) '
+            'VALUES (:id, :owner_id, :owner_role, :amount, :currency, :status, :method, :purpose, :inventory_id, :installment_no, :due_date, :zoho_payments_session_id, :utr_number, :notes, :created_date, :last_updated_date) RETURNING *;'
         ))
         queries.setdefault("get_by_id", 'SELECT * FROM divine_payments WHERE id = :id LIMIT 1;')
-        queries.setdefault("get_by_razorpay_order_id", 'SELECT * FROM divine_payments WHERE razorpay_order_id = :razorpay_order_id LIMIT 1;')
+        queries.setdefault("get_by_zoho_session_id", 'SELECT * FROM divine_payments WHERE zoho_payments_session_id = :zoho_payments_session_id LIMIT 1;')
         queries.setdefault("update_payment_status", (
-            'UPDATE divine_payments SET status = :status, razorpay_payment_id = :razorpay_payment_id, '
-            'razorpay_signature = :razorpay_signature, last_updated_date = :last_updated_date '
+            'UPDATE divine_payments SET status = :status, zoho_payment_id = :zoho_payment_id, '
+            'zoho_signature = :zoho_signature, last_updated_date = :last_updated_date '
             'WHERE id = :id RETURNING *;'
         ))
         queries.setdefault("flag_manual_review", (
@@ -77,7 +85,7 @@ class persistencePayment:
         ))
         queries.setdefault("update_refund_status", (
             'UPDATE divine_payments SET refund_status = :refund_status, refund_amount = :refund_amount, '
-            'razorpay_refund_id = :razorpay_refund_id, refund_initiated_date = :refund_initiated_date, '
+            'zoho_refund_id = :zoho_refund_id, refund_initiated_date = :refund_initiated_date, '
             'refund_completed_date = :refund_completed_date, refund_note = :refund_note, '
             'last_updated_date = :last_updated_date '
             'WHERE id = :id RETURNING *;'
@@ -85,7 +93,7 @@ class persistencePayment:
         self._queries = queries
         self._engine = engine
 
-    def create_payment(self, id: str, owner_id: str, owner_role: str, amount, currency: str, status: str, razorpay_order_id: str = None, method: str = "razorpay", notes: dict = None, purpose: str = "other", inventory_id: str = None, installment_no: int = None, due_date=None, utr_number: str = None) -> PaymentModel:
+    def create_payment(self, id: str, owner_id: str, owner_role: str, amount, currency: str, status: str, zoho_payments_session_id: str = None, method: str = "zoho", notes: dict = None, purpose: str = "other", inventory_id: str = None, installment_no: int = None, due_date=None, utr_number: str = None) -> PaymentModel:
         with self._session_factory() as db:
             try:
                 now = datetime.now(timezone.utc)
@@ -102,7 +110,7 @@ class persistencePayment:
                     "inventory_id": inventory_id,
                     "installment_no": installment_no,
                     "due_date": due_date,
-                    "razorpay_order_id": razorpay_order_id,
+                    "zoho_payments_session_id": zoho_payments_session_id,
                     "utr_number": utr_number,
                     "notes": json.dumps(notes or {}),
                     "created_date": now,
@@ -135,7 +143,7 @@ class persistencePayment:
                 raise
 
     def update_refund_status(self, id: str, refund_status: str, refund_amount=None,
-                             razorpay_refund_id: str = None, refund_initiated_date=None,
+                             zoho_refund_id: str = None, refund_initiated_date=None,
                              refund_completed_date=None, refund_note: str = None) -> PaymentModel:
         with self._session_factory() as db:
             try:
@@ -144,7 +152,7 @@ class persistencePayment:
                     "id": id,
                     "refund_status": refund_status,
                     "refund_amount": refund_amount,
-                    "razorpay_refund_id": razorpay_refund_id,
+                    "zoho_refund_id": zoho_refund_id,
                     "refund_initiated_date": refund_initiated_date,
                     "refund_completed_date": refund_completed_date,
                     "refund_note": refund_note,
@@ -159,8 +167,8 @@ class persistencePayment:
                 raise
 
     def claim_refund_retry(self, id: str) -> PaymentModel:
-        """Atomic compare-and-swap: 'pending' -> 'processing', only for a razorpay
-        refund with no razorpay_refund_id yet. Returns the row on success, None if
+        """Atomic compare-and-swap: 'pending' -> 'processing', only for a zoho
+        refund with no zoho_refund_id yet. Returns the row on success, None if
         the claim lost (already claimed by a concurrent retry, already resolved,
         or not eligible) - see claim_refund_retry in payment_queries.yaml."""
         with self._session_factory() as db:
@@ -179,9 +187,11 @@ class persistencePayment:
 
     def mark_manual_refund_collected(self, id: str, note: str = None) -> PaymentModel:
         """Atomic compare-and-swap: 'pending'/'processing' -> 'completed', only for
-        a cash/rtgs_neft refund - see mark_refund_collected in payment_queries.yaml.
-        Returns None if not eligible (razorpay, already completed, or no refund in
-        flight)."""
+        a cash/rtgs_neft/legacy-razorpay refund (razorpay's own gateway was retired
+        at cutover, so any of its refunds are now settled manually, same as
+        cash/rtgs_neft) - see mark_refund_collected in payment_queries.yaml. Returns
+        None if not eligible (a live 'zoho' refund, already completed, or no refund
+        in flight)."""
         with self._session_factory() as db:
             try:
                 query = self._queries.get("mark_refund_collected")
@@ -198,6 +208,38 @@ class persistencePayment:
                 db.rollback()
                 raise
 
+    def seed_legacy_razorpay_fields(self, id: str, razorpay_order_id: str = None,
+                                    razorpay_payment_id: str = None, razorpay_signature: str = None,
+                                    razorpay_refund_id: str = None) -> PaymentModel:
+        """NOT used by any live application code path - the Razorpay gateway was
+        retired at the Zoho Payments cutover, so nothing here writes a new
+        razorpay_* value ever again. This exists only for tests that need to
+        seed a realistic pre-cutover 'razorpay' row (to exercise the legacy-data
+        display/refund paths still in service_refund.py/service_revenue.py/etc.)
+        and for a one-off manual data-backfill script, should one ever be
+        needed. A plain UPDATE, not a query-file entry - deliberately kept out
+        of the normal create/update methods above so a reviewer scanning them
+        for "what can the app write" never has to mentally exclude this."""
+        with self._session_factory() as db:
+            try:
+                result = db.execute(text(
+                    "UPDATE divine_payments SET razorpay_order_id = :razorpay_order_id, "
+                    "razorpay_payment_id = :razorpay_payment_id, razorpay_signature = :razorpay_signature, "
+                    "razorpay_refund_id = :razorpay_refund_id, last_updated_date = :last_updated_date "
+                    "WHERE id = :id RETURNING *;"
+                ), {
+                    "id": id, "razorpay_order_id": razorpay_order_id,
+                    "razorpay_payment_id": razorpay_payment_id, "razorpay_signature": razorpay_signature,
+                    "razorpay_refund_id": razorpay_refund_id,
+                    "last_updated_date": datetime.now(timezone.utc),
+                })
+                row = result.mappings().first()
+                db.commit()
+                return RowWrapper(row) if row else None
+            except Exception:
+                db.rollback()
+                raise
+
     def get_by_id(self, id: str):
         with self._session_factory() as db:
             query = self._queries.get("get_by_id")
@@ -207,24 +249,24 @@ class persistencePayment:
                 return None
             return RowWrapper(row)
 
-    def get_by_razorpay_order_id(self, razorpay_order_id: str):
+    def get_by_zoho_session_id(self, zoho_payments_session_id: str):
         with self._session_factory() as db:
-            query = self._queries.get("get_by_razorpay_order_id")
-            result = db.execute(text(query), {"razorpay_order_id": razorpay_order_id})
+            query = self._queries.get("get_by_zoho_session_id")
+            result = db.execute(text(query), {"zoho_payments_session_id": zoho_payments_session_id})
             row = result.mappings().first()
             if not row:
                 return None
             return RowWrapper(row)
 
-    def update_payment_status(self, id: str, status: str, razorpay_payment_id: str, razorpay_signature: str) -> PaymentModel:
+    def update_payment_status(self, id: str, status: str, zoho_payment_id: str, zoho_signature: str) -> PaymentModel:
         with self._session_factory() as db:
             try:
                 query = self._queries.get("update_payment_status")
                 params = {
                     "id": id,
                     "status": status,
-                    "razorpay_payment_id": razorpay_payment_id,
-                    "razorpay_signature": razorpay_signature,
+                    "zoho_payment_id": zoho_payment_id,
+                    "zoho_signature": zoho_signature,
                     "last_updated_date": datetime.now(timezone.utc),
                 }
                 result = db.execute(text(query), params)

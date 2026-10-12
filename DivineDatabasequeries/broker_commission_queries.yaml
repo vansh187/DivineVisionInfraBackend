@@ -2,11 +2,11 @@
 create_commission: |
   INSERT INTO divine_broker_commissions(
     id, broker_id, serial_number, unit_address, customer_name, township, sale_value,
-    commission_amount, status, transaction_mode, razorpay_order_id, created_at, paid_at, rejected_at, last_updated_at
+    commission_amount, status, transaction_mode, zoho_payments_session_id, created_at, paid_at, rejected_at, last_updated_at
   )
   VALUES (
     :id, :broker_id, :serial_number, :unit_address, :customer_name, :township, :sale_value,
-    :commission_amount, :status, :transaction_mode, :razorpay_order_id, :created_at, :paid_at, :rejected_at, :last_updated_at
+    :commission_amount, :status, :transaction_mode, :zoho_payments_session_id, :created_at, :paid_at, :rejected_at, :last_updated_at
   )
   RETURNING *;
 list_by_broker: |

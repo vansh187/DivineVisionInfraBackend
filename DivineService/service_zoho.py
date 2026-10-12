@@ -562,7 +562,7 @@ class serviceZoho:
                               booking_amount=None, booking_status: str = None, kyc_status: str = None) -> bool:
         """Syncs a customer into the Zoho CRM Contacts module the moment their FIRST
         plot booking is confirmed (payment settled AND the unit actually flipped to
-        'booked' - Razorpay or a trusted cash/RTGS/cheque booking alike). Per the
+        'booked' - Zoho Payments or a trusted cash/RTGS/cheque booking alike). Per the
         client, only the booking itself lands in Contacts - later instalments on that
         same plot do not push again (signups and chatbot activity still land in Leads,
         untouched - see push_lead / push_customer_signup / push_broker_signup). Upserts

@@ -15,7 +15,10 @@ class BrokerCommissionModel(Base):
     commission_amount = Column(Numeric(14, 2), nullable=False)
     status = Column(String(20), nullable=False, default="paid")
     transaction_mode = Column(String(20), nullable=False)
+    # razorpay_order_id is kept read-only for commissions created before the Zoho
+    # Payments cutover; zoho_payments_session_id is used for every new one.
     razorpay_order_id = Column(String(64), index=True)
+    zoho_payments_session_id = Column(String(64), index=True)
     created_at = Column(DateTime, nullable=False)
     paid_at = Column(DateTime)
     rejected_at = Column(DateTime)
@@ -29,10 +32,10 @@ class persistenceBrokerCommission:
         queries.setdefault("create_commission", (
             "INSERT INTO divine_broker_commissions("
             "id, broker_id, serial_number, unit_address, customer_name, township, sale_value, "
-            "commission_amount, status, transaction_mode, razorpay_order_id, created_at, paid_at, rejected_at, last_updated_at"
+            "commission_amount, status, transaction_mode, zoho_payments_session_id, created_at, paid_at, rejected_at, last_updated_at"
             ") VALUES ("
             ":id, :broker_id, :serial_number, :unit_address, :customer_name, :township, :sale_value, "
-            ":commission_amount, :status, :transaction_mode, :razorpay_order_id, :created_at, :paid_at, :rejected_at, :last_updated_at"
+            ":commission_amount, :status, :transaction_mode, :zoho_payments_session_id, :created_at, :paid_at, :rejected_at, :last_updated_at"
             ") RETURNING *;"
         ))
         queries.setdefault("list_by_broker", (

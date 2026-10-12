@@ -7,15 +7,16 @@ from fastapi.testclient import TestClient
 
 os.environ["DATABASE_URL"] = "sqlite:///./test_db.sqlite"
 os.environ["JWT_SECRET_KEY"] = "testsecret"
+os.environ["ZOHO_PAYMENTS_SUCCESS_URL"] = "https://www.divinevisioninfra.com/customer/payments/success"
+os.environ["ZOHO_PAYMENTS_FAILURE_URL"] = "https://www.divinevisioninfra.com/customer/payments/failure"
 
 from Divinepersistence.persistence_db import PersistenceDB
 from DivineService.service_broker_commission import serviceBrokerCommission
+from DivineService.service_payment_gateway import servicePaymentGateway
 from DivineAPI import broker_commission_api
 from DivineAPI.main import app
 
 client = TestClient(app)
-broker_commission_api._commission_service._key_id = "rzp_test_commission_key"
-broker_commission_api._commission_service._key_secret = "rzp_test_commission_secret"
 
 
 def _token(role="broker", sub="brk_123"):
@@ -91,11 +92,13 @@ def test_broker_create_rejects_booking_transaction_mode():
     assert r.json()["detail"] == "transactionMode_must_be_cash"
 
 
-@patch.object(serviceBrokerCommission, "_client")
-def test_admin_payment_endpoint_initiates_razorpay_booking_commission_for_display(mock_client_method):
-    mock_client = MagicMock()
-    mock_client.order.create.return_value = {"id": "order_admin_commission_1"}
-    mock_client_method.return_value = mock_client
+@patch.object(servicePaymentGateway, "create_payment_session")
+def test_admin_payment_endpoint_initiates_zoho_booking_commission_for_display(mock_create_session):
+    mock_create_session.return_value = {
+        "payments_session_id": "session_admin_commission_1", "access_key": "key_admin_commission_1",
+        "checkout_url": "https://payments.zoho.in/hostedcheckout/key_admin_commission_1",
+        "amount": "5000.00", "currency": "INR",
+    }
 
     r = client.post(
         "/api/admin/commission-payments",
@@ -107,8 +110,12 @@ def test_admin_payment_endpoint_initiates_razorpay_booking_commission_for_displa
     assert r.json()["commission"]["status"] == "pending"
     assert r.json()["commission"]["transactionMode"] == "booking"
     assert r.json()["commission"]["paidAt"] is None
-    assert r.json()["payment"]["razorpayOrderId"] == "order_admin_commission_1"
-    assert r.json()["payment"]["razorpayKeyId"] == "rzp_test_commission_key"
+    assert r.json()["payment"]["zohoPaymentsSessionId"] == "session_admin_commission_1"
+    assert r.json()["payment"]["zohoAccessKey"] == "key_admin_commission_1"
+    # The critical, highest-risk assertion in this whole migration: the gateway
+    # must receive a decimal amount, never Razorpay's amount*100 paise convention.
+    _, call_kwargs = mock_create_session.call_args
+    assert call_kwargs["amount"] == 5000
 
     listed = client.get(
         "/api/broker/commissions?brokerId=brk_admin",

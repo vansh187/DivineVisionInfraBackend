@@ -1,4 +1,4 @@
-"""End-to-end functional coverage for the admin Revenue tab
+﻿"""End-to-end functional coverage for the admin Revenue tab
 (GET /admin/revenue/summary, /admin/revenue/transactions,
 /admin/revenue/transactions/{id}) over real HTTP through TestClient against a
 real (SQLite) database - complements the mocked unit tests in
@@ -83,11 +83,11 @@ def setup_module(module):
 
     captured = payment_persistence.create_payment(
         id=str(uuid.uuid4()), owner_id=_CUSTOMER_A, owner_role="customer",
-        amount=3120000, currency="INR", status="created", method="razorpay",
+        amount=3120000, currency="INR", status="created", method="zoho",
         purpose="plot_booking", inventory_id=unit_captured,
     )
     payment_persistence.update_payment_status(
-        captured.id, status="paid", razorpay_payment_id="pay_captured", razorpay_signature="sig_captured",
+        captured.id, status="paid", zoho_payment_id="pay_captured", zoho_signature="sig_captured",
     )
     booking_persistence.create_booking(
         payment_id=captured.id, inventory_id=unit_captured, customer_id=_CUSTOMER_A,
@@ -102,11 +102,11 @@ def setup_module(module):
 
     refunded = payment_persistence.create_payment(
         id=str(uuid.uuid4()), owner_id=_CUSTOMER_B, owner_role="customer",
-        amount=2100000, currency="INR", status="created", method="razorpay",
+        amount=2100000, currency="INR", status="created", method="zoho",
         purpose="plot_booking", inventory_id=unit_refund,
     )
     payment_persistence.update_payment_status(
-        refunded.id, status="paid", razorpay_payment_id="pay_refunded", razorpay_signature="sig_refunded",
+        refunded.id, status="paid", zoho_payment_id="pay_refunded", zoho_signature="sig_refunded",
     )
     booking_persistence.create_booking(
         payment_id=refunded.id, inventory_id=unit_refund, customer_id=_CUSTOMER_B,
@@ -121,7 +121,7 @@ def setup_module(module):
         purpose="other",
     )
     payment_persistence.update_payment_status(
-        refund_pending.id, status="paid", razorpay_payment_id=None, razorpay_signature=None,
+        refund_pending.id, status="paid", zoho_payment_id=None, zoho_signature=None,
     )
     payment_persistence.update_refund_status(refund_pending.id, refund_status="pending", refund_amount=500000)
     _REFUND_PENDING_ID = refund_pending.id
@@ -129,7 +129,7 @@ def setup_module(module):
     # Never settled - must never appear in any response from this API.
     payment_persistence.create_payment(
         id=str(uuid.uuid4()), owner_id=_CUSTOMER_A, owner_role="customer",
-        amount=100000, currency="INR", status="created", method="razorpay", purpose="other",
+        amount=100000, currency="INR", status="created", method="zoho", purpose="other",
     )
 
 
@@ -291,7 +291,7 @@ def test_get_transaction_detail():
     body = r.json()
     assert body["transaction_id"] == _CAPTURED_ID
     assert body["status"] == "captured"
-    assert body["razorpay_payment_id"] == "pay_captured"
+    assert body["gateway_payment_id"] == "pay_captured"
 
 
 def test_get_transaction_detail_not_found_for_unknown_id():
@@ -304,7 +304,7 @@ def test_get_transaction_detail_not_found_for_unsettled_payment():
     not leak its existence or amount."""
     unsettled = persistencePayment().create_payment(
         id=str(uuid.uuid4()), owner_id=_CUSTOMER_A, owner_role="customer",
-        amount=250000, currency="INR", status="created", method="razorpay", purpose="other",
+        amount=250000, currency="INR", status="created", method="zoho", purpose="other",
     )
     r = client.get(f"/admin/revenue/transactions/{unsettled.id}", headers=_admin_headers())
     assert r.status_code == 404, r.text

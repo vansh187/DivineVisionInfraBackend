@@ -10,7 +10,7 @@ production at the real Zoho CRM account instead.
 
 Per the client, signups and chatbot activity land in **Leads**. The one exception is
 a customer's FIRST confirmed plot booking - the payment settles paid AND the unit
-actually flips to 'booked' after admin KYC approval - made either via Razorpay or
+actually flips to 'booked' after admin KYC approval - made either via Zoho Payments or
 recorded manually as cash/RTGS/cheque. That lands in **Contacts** instead. See
 [`service_booking_kyc.py`](../DivineService/service_booking_kyc.py) `approve()`,
 which calls [`service_payment.py`](../DivineService/service_payment.py)
@@ -22,7 +22,7 @@ which calls [`service_payment.py`](../DivineService/service_payment.py)
 | Broker signup (with email or phone) | **Leads** | `POST /broker/signup` |
 | Chatbot callback request | **Leads** | Visitor completes "call me back" (name + phone) |
 | Chatbot email capture | **Leads** | Visitor gives an email in chat |
-| Plot booking confirmed (payment settled + admin KYC approval flips unit to `booked`) - Razorpay or cash/RTGS/cheque | **Contacts** | `POST /admin/bookings/{booking_id}/approve` |
+| Plot booking confirmed (payment settled + admin KYC approval flips unit to `booked`) - Zoho Payments or cash/RTGS/cheque | **Contacts** | `POST /admin/bookings/{booking_id}/approve` |
 
 A later instalment payment on that same already-booked plot does **not** push again -
 only the original booking event lands in Contacts.

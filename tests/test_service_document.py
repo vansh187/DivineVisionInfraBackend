@@ -1,4 +1,4 @@
-import base64
+﻿import base64
 import os
 import requests
 from unittest.mock import patch, MagicMock
@@ -45,7 +45,7 @@ def test_safe_path_segment_truncates_long_input():
 
 def test_pdf_safe_text_replaces_non_latin1_chars():
     # FPDF's core font can't render this - must not raise, must return something renderable
-    result = _pdf_safe_text("Amount: ₹500 — café")
+    result = _pdf_safe_text("Amount: â‚¹500 â€” cafÃ©")
     result.encode("latin-1")  # would raise if any non-latin1 char slipped through
 
 
@@ -53,7 +53,7 @@ def test_pdf_safe_text_replaces_non_latin1_chars():
 
 def test_render_pdf_handles_unicode_form_data_without_raising():
     svc, _ = _service()
-    pdf_bytes = svc._render_pdf("kyc", {"name": "José 你好", "note": "₹1,000"})
+    pdf_bytes = svc._render_pdf("kyc", {"name": "JosÃ© ä½ å¥½", "note": "â‚¹1,000"})
     assert isinstance(pdf_bytes, bytes)
     assert pdf_bytes.startswith(b"%PDF")
 
@@ -473,29 +473,22 @@ def test_get_falls_back_to_default_bucket_when_row_has_no_storage_bucket():
 _PDF_BYTES = b"%PDF-1.4\n%fake pdf content\n%%EOF"
 
 
-def _booking_service(payment=None, customer=None, email_enabled=False):
+def _booking_service(payment=None):
     persistence = MagicMock()
     payment_persistence = MagicMock()
     payment_persistence.get_by_id.return_value = payment
-    customer_persistence = MagicMock()
-    customer_persistence.get_by_id.return_value = customer
-    email = MagicMock()
-    email.enabled = email_enabled
-    svc = serviceDocument(persistence, payment_persistence,
-                          customer_persistence=customer_persistence, email=email)
+    svc = serviceDocument(persistence, payment_persistence)
     svc._supabase_url = "https://fake.supabase.co"
     svc._service_key = "fake-service-key"
     svc._bucket = "documents"
     svc._booking_forms_bucket = "Booking_Forms"
-    svc._email_mock = email
-    svc._customer_persistence_mock = customer_persistence
     return svc, persistence, payment_persistence
 
 
 def _paid_payment(**overrides):
     defaults = dict(
         id="pay1", owner_id="C00001", status="paid", amount=2000000, currency="INR",
-        razorpay_order_id="order_Rzp123", razorpay_payment_id="pay_Rzp456",
+        zoho_payments_session_id="session_Zoho123", zoho_payment_id="pay_Zoho456",
     )
     defaults.update(overrides)
     return MagicMock(**defaults)
@@ -586,7 +579,7 @@ def test_upload_booking_application_rejects_unpaid_payment():
         assert str(e) == "payment_not_completed"
 
 
-def test_upload_booking_application_rejects_mismatched_razorpay_order_id():
+def test_upload_booking_application_rejects_mismatched_zoho_payments_session_id():
     svc, _, _ = _booking_service(_paid_payment())
     try:
         svc.upload_booking_application(
@@ -600,11 +593,11 @@ def test_upload_booking_application_rejects_mismatched_razorpay_order_id():
 
 
 def test_upload_booking_application_rejects_client_supplied_razorpay_id_against_cash_payment():
-    # A cash payment is legitimately status="paid" with both razorpay ids NULL (see
-    # service_payment.record_cash_payment). A client sending a self-reported razorpay_order_id
+    # A cash payment is legitimately status="paid" with both zoho ids NULL (see
+    # service_payment.record_cash_payment). A client sending a self-reported zoho_payments_session_id
     # for such a payment must be rejected, not silently accepted and persisted, since nothing
     # verifies the client's claim against anything real in that case.
-    svc, _, _ = _booking_service(_paid_payment(razorpay_order_id=None, razorpay_payment_id=None))
+    svc, _, _ = _booking_service(_paid_payment(zoho_payments_session_id=None, zoho_payment_id=None))
     try:
         svc.upload_booking_application(
             _PDF_BYTES, "application/pdf", "project_booking_application", "proj1", "pay1",
@@ -619,7 +612,7 @@ def test_upload_booking_application_rejects_client_supplied_razorpay_id_against_
 @patch.object(serviceDocument, "_sign_url", return_value="url")
 @patch.object(serviceDocument, "_upload_to_storage")
 def test_upload_booking_application_succeeds_for_cash_payment_when_no_razorpay_ids_supplied(mock_upload, mock_sign):
-    svc, persistence, _ = _booking_service(_paid_payment(razorpay_order_id=None, razorpay_payment_id=None))
+    svc, persistence, _ = _booking_service(_paid_payment(zoho_payments_session_id=None, zoho_payment_id=None))
     persistence.create_document.return_value = MagicMock(id="doc1")
 
     svc.upload_booking_application(
@@ -629,8 +622,8 @@ def test_upload_booking_application_succeeds_for_cash_payment_when_no_razorpay_i
     )
 
     _, kwargs = persistence.create_document.call_args
-    assert kwargs["razorpay_order_id"] is None
-    assert kwargs["razorpay_payment_id"] is None
+    assert kwargs["zoho_payments_session_id"] is None
+    assert kwargs["zoho_payment_id"] is None
 
 
 @patch.object(serviceDocument, "_sign_url", return_value="https://fake.supabase.co/signed")
@@ -644,7 +637,7 @@ def test_upload_booking_application_happy_path_uses_booking_forms_bucket(mock_up
 
     doc, signed_url, expires_in, plan = svc.upload_booking_application(
         _PDF_BYTES, "application/pdf", "project_booking_application", "ops-divine-greens", "pay1",
-        "order_Rzp123", "pay_Rzp456", '{"applicantName": "Jane", "total_amount": 5000000}',
+        "session_Zoho123", "pay_Zoho456", '{"applicantName": "Jane", "total_amount": 5000000}',
         owner_id="C00001", owner_role="customer",
     )
 
@@ -661,8 +654,8 @@ def test_upload_booking_application_happy_path_uses_booking_forms_bucket(mock_up
     assert kwargs["payment_id"] == "pay1"
     # Persisted from the payment record itself, not the client-supplied form fields (those are
     # only used to verify the caller's claim - see the mismatch tests below).
-    assert kwargs["razorpay_order_id"] == "order_Rzp123"
-    assert kwargs["razorpay_payment_id"] == "pay_Rzp456"
+    assert kwargs["zoho_payments_session_id"] == "session_Zoho123"
+    assert kwargs["zoho_payment_id"] == "pay_Zoho456"
     fd = kwargs["form_data"]
     assert fd["applicantName"] == "Jane"
     # the derived payment schedule is merged into form_data
@@ -699,89 +692,6 @@ def test_upload_booking_application_cleans_up_storage_when_persistence_fails(moc
     mock_sign.assert_not_called()
 
 
-# ---------- booking-confirmation email on upload_booking_application() ----------
-
-@patch.object(serviceDocument, "_sign_url", return_value="url")
-@patch.object(serviceDocument, "_upload_to_storage")
-def test_booking_upload_sends_confirmation_email_to_customer(mock_upload, mock_sign):
-    payment = _paid_payment(amount=2500000, currency="INR")
-    svc, persistence, _ = _booking_service(
-        payment,
-        customer=MagicMock(email="jane@example.com", first_name="Jane"),
-        email_enabled=True,
-    )
-    persistence.create_document.return_value = MagicMock(id="doc1")
-
-    svc.upload_booking_application(
-        _PDF_BYTES, "application/pdf", "project_booking_application", "ops-divine-greens", "pay1",
-        "order_Rzp123", "pay_Rzp456",
-        '{"project_name": "Divine Greens", "plot_number": "B-14", "total_amount": 5000000}',
-        owner_id="C00001", owner_role="customer",
-    )
-
-    svc._customer_persistence_mock.get_by_id.assert_called_once_with("C00001")
-    svc._email_mock.send_booking_confirmation_async.assert_called_once()
-    _, kwargs = svc._email_mock.send_booking_confirmation_async.call_args
-    assert kwargs["first_name"] == "Jane"
-    assert kwargs["project_name"] == "Divine Greens"
-    assert kwargs["unit_number"] == "B-14"
-    assert kwargs["currency"] == "INR"
-    # amount comes from the payment record, not the form
-    assert kwargs["amount"] == 2500000
-
-
-@patch.object(serviceDocument, "_sign_url", return_value="url")
-@patch.object(serviceDocument, "_upload_to_storage")
-def test_booking_upload_skips_email_for_broker_owner(mock_upload, mock_sign):
-    svc, persistence, _ = _booking_service(
-        _paid_payment(owner_id="B00001"),
-        customer=MagicMock(email="b@example.com"),
-        email_enabled=True,
-    )
-    persistence.create_document.return_value = MagicMock(id="doc1")
-
-    svc.upload_booking_application(
-        _PDF_BYTES, "application/pdf", "project_booking_application", "proj1", "pay1", None, None,
-        '{"total_amount": 5000000}', owner_id="B00001", owner_role="broker",
-    )
-
-    svc._email_mock.send_booking_confirmation_async.assert_not_called()
-
-
-@patch.object(serviceDocument, "_sign_url", return_value="url")
-@patch.object(serviceDocument, "_upload_to_storage")
-def test_booking_upload_skips_email_when_customer_has_no_address(mock_upload, mock_sign):
-    svc, persistence, _ = _booking_service(
-        _paid_payment(), customer=MagicMock(email=None), email_enabled=True,
-    )
-    persistence.create_document.return_value = MagicMock(id="doc1")
-
-    svc.upload_booking_application(
-        _PDF_BYTES, "application/pdf", "project_booking_application", "proj1", "pay1", None, None,
-        '{"total_amount": 5000000}', owner_id="C00001", owner_role="customer",
-    )
-
-    svc._email_mock.send_booking_confirmation_async.assert_not_called()
-
-
-@patch.object(serviceDocument, "_sign_url", return_value="url")
-@patch.object(serviceDocument, "_upload_to_storage")
-def test_booking_upload_email_failure_does_not_break_booking(mock_upload, mock_sign):
-    svc, persistence, _ = _booking_service(
-        _paid_payment(), customer=MagicMock(email="jane@example.com", first_name="Jane"),
-        email_enabled=True,
-    )
-    persistence.create_document.return_value = MagicMock(id="doc1")
-    svc._email_mock.send_booking_confirmation_async.side_effect = RuntimeError("resend down")
-
-    doc, signed_url, expires_in, plan = svc.upload_booking_application(
-        _PDF_BYTES, "application/pdf", "project_booking_application", "proj1", "pay1", None, None,
-        '{"total_amount": 5000000}', owner_id="C00001", owner_role="customer",
-    )
-    assert doc.id == "doc1"
-    assert expires_in == 3600
-
-
 def test_confirm_inventory_booked_creates_booking_record_for_safety_net_hold():
     inventory = MagicMock()
     booking_persistence = MagicMock()
@@ -795,8 +705,6 @@ def test_confirm_inventory_booked_creates_booking_record_for_safety_net_hold():
         payment_persistence=MagicMock(),
         inventory_persistence=inventory,
         booking_persistence=booking_persistence,
-        customer_persistence=MagicMock(),
-        email=MagicMock(),
     )
     doc = MagicMock()
 

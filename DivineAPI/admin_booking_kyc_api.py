@@ -89,7 +89,7 @@ def approve_booking(booking_id: str, dto: BookingDecisionRequestDTO, current_adm
 @router.post("/{booking_id}/reject", response_model=BookingDetailDTO)
 def reject_booking(booking_id: str, dto: BookingDecisionRequestDTO, current_admin: dict = Depends(get_current_admin)):
     """KYC rejected - releases the plot back to available and initiates a
-    refund (automatic for Razorpay, manual-instructions for cash/RTGS-NEFT),
+    refund (automatic for Zoho Payments, manual-instructions for cash/RTGS-NEFT/legacy Razorpay),
     then notifies the customer with the admin's note."""
     start = time.monotonic()
     try:
@@ -110,8 +110,8 @@ def cancel_booking(booking_id: str, dto: BookingDecisionRequestDTO, current_admi
     """Admin cancels the booking outright (distinct from a KYC Reject - e.g. the
     customer asked to cancel), whether it's still awaiting KYC review or already
     booked/approved. Releases the plot, initiates a refund matched to how the
-    payment arrived (automatic for Razorpay, manual instructions for cash /
-    RTGS-NEFT), and always emails the customer with refund instructions - `version`
+    payment arrived (automatic for Zoho Payments, manual instructions for cash /
+    RTGS-NEFT/legacy Razorpay), and always emails the customer with refund instructions - `version`
     must match the booking's current version (409 version_conflict otherwise)."""
     start = time.monotonic()
     try:

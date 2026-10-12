@@ -235,7 +235,13 @@ class serviceBookingKyc:
                 "payment_id": booking.payment_id,
                 "payment_method": getattr(payment, "method", None) if payment else None,
                 "payment_status": getattr(payment, "status", None) if payment else None,
-                "razorpay_payment_id": getattr(payment, "razorpay_payment_id", None) if payment else None,
+                # zoho_payment_id for a live-gateway payment, or the legacy
+                # razorpay_payment_id for a pre-cutover one - never both.
+                "gateway_payment_id": (
+                    getattr(payment, "zoho_payment_id", None)
+                    if payment and (getattr(payment, "method", None) or "zoho").lower() != "razorpay"
+                    else getattr(payment, "razorpay_payment_id", None) if payment else None
+                ),
                 "utr_number": getattr(payment, "utr_number", None) if payment else None,
                 "documents": self._document_checklist(booking.customer_id),
                 "decision_history": [
@@ -413,9 +419,12 @@ class serviceBookingKyc:
         cash refund gets the same project-specific office address regardless of
         which decision triggered it."""
         try:
-            method = (getattr(payment, "method", None) or "razorpay").lower() if payment else "razorpay"
-            if method == "razorpay":
+            method = (getattr(payment, "method", None) or "zoho").lower() if payment else "zoho"
+            if method == "zoho":
                 return "Your payment is being refunded automatically to your original payment method."
+            if method == "razorpay":
+                return ("Your refund is being processed manually by our team and will be completed "
+                        "within 5-7 business days.")
             if method == "cash":
                 office = self._cash_pickup_office(getattr(booking, "project_name", None))
                 return f"Please collect your cash refund from our office at {office} within 5-7 business days."

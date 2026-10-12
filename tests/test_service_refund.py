@@ -76,17 +76,31 @@ def test_list_refunds_rejects_invalid_filters():
 def test_get_refund_includes_detail_fields():
     svc, refunds, _ = _service()
     refunds.get_refund.return_value = _row(
-        method="razorpay", display_status="processing",
-        razorpay_payment_id="pay_gateway", razorpay_refund_id=None,
+        method="zoho", display_status="processing",
+        zoho_payment_id="pay_gateway", zoho_refund_id=None,
         utr_number=None, refund_note="gateway timeout",
         created_date=datetime(2026, 9, 1, tzinfo=timezone.utc),
     )
 
     item = svc.get_refund("pay-1")
 
-    assert item["razorpay_payment_id"] == "pay_gateway"
+    assert item["gateway_payment_id"] == "pay_gateway"
     assert item["refund_note"] == "gateway timeout"
     assert item["created_at"].year == 2026
+
+
+def test_get_refund_uses_legacy_razorpay_payment_id_for_pre_cutover_rows():
+    svc, refunds, _ = _service()
+    refunds.get_refund.return_value = _row(
+        method="razorpay", display_status="bank_transfer_pending",
+        razorpay_payment_id="pay_legacy", zoho_payment_id=None, zoho_refund_id=None,
+        utr_number=None, refund_note="manual - gateway retired",
+        created_date=datetime(2026, 9, 1, tzinfo=timezone.utc),
+    )
+
+    item = svc.get_refund("pay-1")
+
+    assert item["gateway_payment_id"] == "pay_legacy"
 
 
 def test_get_refund_not_found_for_blank_id():
@@ -101,13 +115,26 @@ def test_get_refund_not_found_for_blank_id():
 
 def test_mark_collected_requires_manual_refund():
     svc, _, payments = _service()
-    payments.get_by_id.return_value = SimpleNamespace(method="razorpay")
+    payments.get_by_id.return_value = SimpleNamespace(method="zoho")
 
     try:
         svc.mark_collected("pay-1", admin_id="DV1")
         assert False, "expected ValueError"
     except ValueError as e:
         assert str(e) == "not_a_manual_refund"
+
+
+def test_mark_collected_accepts_legacy_razorpay_refund():
+    """Unlike a live 'zoho' refund, a pre-cutover razorpay refund IS treated as
+    a manual refund now that the Razorpay gateway is retired."""
+    svc, refunds, payments = _service()
+    payments.get_by_id.return_value = SimpleNamespace(method="razorpay")
+    payments.mark_manual_refund_collected.return_value = SimpleNamespace(id="pay-1")
+    refunds.get_refund.return_value = _row(method="razorpay", display_status="bank_transfer_completed")
+
+    svc.mark_collected("pay-1", admin_id="DV1")
+
+    payments.mark_manual_refund_collected.assert_called_once()
 
 
 def test_mark_collected_claims_pending_manual_refund_and_returns_detail():

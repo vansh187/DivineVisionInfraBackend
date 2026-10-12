@@ -1,4 +1,4 @@
-# SQL for the admin panel's Refunds tab (GET /admin/refunds/*).
+﻿# SQL for the admin panel's Refunds tab (GET /admin/refunds/*).
 # See Divinepersistence/persistence_refund.py.
 #
 # Scope: only divine_payments rows where a refund has actually been initiated
@@ -7,13 +7,15 @@
 # `display_status`, via the same CASE expression repeated identically in every
 # query below (list/count/detail) so filtering and the returned value can
 # never disagree:
-#   processing               - razorpay, refund_status pending/processing
-#   completed                - razorpay, refund_status completed
-#   failed                   - razorpay, refund_status failed
+#   processing               - zoho (live gateway), refund_status pending/processing
+#   completed                - zoho (live gateway), refund_status completed
+#   failed                   - zoho (live gateway), refund_status failed
 #   cash_refund_pending      - cash, refund_status pending/processing
 #   cash_collected           - cash, refund_status completed
-#   bank_transfer_pending    - rtgs_neft, refund_status pending/processing
-#   bank_transfer_completed  - rtgs_neft, refund_status completed
+#   bank_transfer_pending    - rtgs_neft OR legacy razorpay (gateway retired,
+#                              refunded manually same as a bank transfer),
+#                              refund_status pending/processing
+#   bank_transfer_completed  - rtgs_neft OR legacy razorpay, refund_status completed
 #
 # Booking/customer join, search escaping, and the total_count window-function
 # pagination all follow the exact same shape as admin_revenue_queries.yaml -
@@ -39,9 +41,9 @@ list_refunds: |
       cu.first_name AS customer_first_name,
       cu.last_name AS customer_last_name,
       CASE
-        WHEN p.method = 'razorpay' AND p.refund_status = 'completed' THEN 'completed'
-        WHEN p.method = 'razorpay' AND p.refund_status = 'failed' THEN 'failed'
-        WHEN p.method = 'razorpay' THEN 'processing'
+        WHEN p.method = 'zoho' AND p.refund_status = 'completed' THEN 'completed'
+        WHEN p.method = 'zoho' AND p.refund_status = 'failed' THEN 'failed'
+        WHEN p.method = 'zoho' THEN 'processing'
         WHEN p.method = 'cash' AND p.refund_status = 'completed' THEN 'cash_collected'
         WHEN p.method = 'cash' THEN 'cash_refund_pending'
         WHEN p.refund_status = 'completed' THEN 'bank_transfer_completed'
@@ -64,9 +66,9 @@ list_refunds: |
            OR lower(coalesce(cu.first_name, '') || ' ' || coalesce(cu.last_name, '')) LIKE '%' || replace(replace(lower(:search), '%', '\%'), '_', '\_') || '%' ESCAPE '\')
       AND (:status IS NULL
            OR CASE
-                WHEN p.method = 'razorpay' AND p.refund_status = 'completed' THEN 'completed'
-                WHEN p.method = 'razorpay' AND p.refund_status = 'failed' THEN 'failed'
-                WHEN p.method = 'razorpay' THEN 'processing'
+                WHEN p.method = 'zoho' AND p.refund_status = 'completed' THEN 'completed'
+                WHEN p.method = 'zoho' AND p.refund_status = 'failed' THEN 'failed'
+                WHEN p.method = 'zoho' THEN 'processing'
                 WHEN p.method = 'cash' AND p.refund_status = 'completed' THEN 'cash_collected'
                 WHEN p.method = 'cash' THEN 'cash_refund_pending'
                 WHEN p.refund_status = 'completed' THEN 'bank_transfer_completed'
@@ -98,9 +100,9 @@ count_refunds: |
            OR lower(coalesce(cu.first_name, '') || ' ' || coalesce(cu.last_name, '')) LIKE '%' || replace(replace(lower(:search), '%', '\%'), '_', '\_') || '%' ESCAPE '\')
       AND (:status IS NULL
            OR CASE
-                WHEN p.method = 'razorpay' AND p.refund_status = 'completed' THEN 'completed'
-                WHEN p.method = 'razorpay' AND p.refund_status = 'failed' THEN 'failed'
-                WHEN p.method = 'razorpay' THEN 'processing'
+                WHEN p.method = 'zoho' AND p.refund_status = 'completed' THEN 'completed'
+                WHEN p.method = 'zoho' AND p.refund_status = 'failed' THEN 'failed'
+                WHEN p.method = 'zoho' THEN 'processing'
                 WHEN p.method = 'cash' AND p.refund_status = 'completed' THEN 'cash_collected'
                 WHEN p.method = 'cash' THEN 'cash_refund_pending'
                 WHEN p.refund_status = 'completed' THEN 'bank_transfer_completed'
@@ -120,8 +122,9 @@ get_refund_by_id: |
     p.refund_initiated_date AS refund_initiated_date,
     p.refund_completed_date AS refund_completed_date,
     p.refund_note AS refund_note,
+    p.zoho_payment_id AS zoho_payment_id,
     p.razorpay_payment_id AS razorpay_payment_id,
-    p.razorpay_refund_id AS razorpay_refund_id,
+    p.zoho_refund_id AS zoho_refund_id,
     p.utr_number AS utr_number,
     p.owner_id AS customer_id,
     p.created_date AS created_date,
@@ -131,9 +134,9 @@ get_refund_by_id: |
     cu.first_name AS customer_first_name,
     cu.last_name AS customer_last_name,
     CASE
-      WHEN p.method = 'razorpay' AND p.refund_status = 'completed' THEN 'completed'
-      WHEN p.method = 'razorpay' AND p.refund_status = 'failed' THEN 'failed'
-      WHEN p.method = 'razorpay' THEN 'processing'
+      WHEN p.method = 'zoho' AND p.refund_status = 'completed' THEN 'completed'
+      WHEN p.method = 'zoho' AND p.refund_status = 'failed' THEN 'failed'
+      WHEN p.method = 'zoho' THEN 'processing'
       WHEN p.method = 'cash' AND p.refund_status = 'completed' THEN 'cash_collected'
       WHEN p.method = 'cash' THEN 'cash_refund_pending'
       WHEN p.refund_status = 'completed' THEN 'bank_transfer_completed'

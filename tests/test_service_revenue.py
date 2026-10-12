@@ -22,7 +22,7 @@ def _row(**kw):
         "transaction_id": "pay-1", "booking_id": "BKG-2026-000001", "customer_id": "C00001",
         "customer_first_name": "Meera", "customer_last_name": "Pillai",
         "project_name": "Palm County", "unit_number": "P-01",
-        "amount": 3120000, "currency": "INR", "method": "razorpay",
+        "amount": 3120000, "currency": "INR", "method": "zoho",
         "revenue_status": "captured", "created_date": datetime(2026, 9, 10, tzinfo=timezone.utc),
         "total_count": 1,
     }
@@ -147,10 +147,19 @@ def test_get_transaction_not_found_when_persistence_returns_none():
 
 def test_get_transaction_includes_gateway_reference_fields():
     svc, persistence = _service()
-    persistence.get_transaction.return_value = _row(razorpay_payment_id="pay_x", utr_number=None)
+    persistence.get_transaction.return_value = _row(zoho_payment_id="pay_x", razorpay_payment_id=None, utr_number=None)
     item = svc.get_transaction("pay-1")
-    assert item["razorpay_payment_id"] == "pay_x"
+    assert item["gateway_payment_id"] == "pay_x"
     assert item["utr_number"] is None
+
+
+def test_get_transaction_uses_legacy_razorpay_payment_id_for_pre_cutover_rows():
+    svc, persistence = _service()
+    persistence.get_transaction.return_value = _row(
+        method="razorpay", zoho_payment_id=None, razorpay_payment_id="pay_legacy", utr_number=None,
+    )
+    item = svc.get_transaction("pay-1")
+    assert item["gateway_payment_id"] == "pay_legacy"
 
 
 def test_get_transaction_wraps_unexpected_persistence_failure():
