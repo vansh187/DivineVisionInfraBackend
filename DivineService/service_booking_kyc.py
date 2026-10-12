@@ -72,13 +72,6 @@ class serviceBookingKyc:
         full = f"{first} {last}".strip()
         return full or None
 
-    def _customer_name(self, customer_id: str) -> str:
-        try:
-            customer = self._customer_persistence.get_by_id(customer_id)
-            return self._format_customer_name(customer)
-        except Exception:
-            return None
-
     def _customer_names(self, rows) -> dict:
         ids = list(dict.fromkeys(
             getattr(r, "customer_id", None)
@@ -181,14 +174,19 @@ class serviceBookingKyc:
         return self._payment_service.get_receipt(booking.payment_id, requester_id=requester_id)
 
     def _document_checklist(self, customer_id: str) -> list:
+        """One batched lookup for all 5 KYC document types (admin_get_latest_batch:
+        1 DB query + 1 Supabase sign call) instead of looping admin_get_latest
+        per type (5 serial DB queries + 5 serial blocking Supabase calls) - this
+        loop used to be the entire reason the admin booking-detail page was slow."""
+        try:
+            by_type = self._document_service.admin_get_latest_batch(KYC_DOCUMENT_TYPES, customer_id)
+        except Exception as e:  # pragma: no cover - admin_get_latest_batch already guards, defensive here too
+            logger.warning("booking_kyc.document_batch_lookup_failed customer_id=%s error=%s", customer_id, e)
+            by_type = {}
+
         checklist = []
         for doc_type in KYC_DOCUMENT_TYPES:
-            try:
-                doc, signed_url, expires_in = self._document_service.admin_get_latest(doc_type, customer_id)
-            except Exception as e:  # pragma: no cover - admin_get_latest already guards, defensive here too
-                logger.warning("booking_kyc.document_lookup_failed document_type=%s customer_id=%s error=%s",
-                               doc_type, customer_id, e)
-                doc, signed_url, expires_in = None, None, None
+            doc, signed_url, expires_in = by_type.get(doc_type, (None, None, None))
             checklist.append({
                 "document_type": doc_type,
                 "label": _DOCUMENT_LABELS.get(doc_type, doc_type),
@@ -226,7 +224,7 @@ class serviceBookingKyc:
                 "version": booking.version,
                 "admin_note": booking.admin_note,
                 "customer_id": booking.customer_id,
-                "customer_name": self._customer_name(booking.customer_id),
+                "customer_name": self._format_customer_name(customer),
                 "customer_email": getattr(customer, "email", None) if customer else None,
                 "customer_phone": getattr(customer, "phone", None) if customer else None,
                 "project_name": booking.project_name,

@@ -115,10 +115,10 @@ def test_sign_url_raises_when_not_configured():
         assert str(e) == "storage_not_configured"
 
 
-@patch("DivineService.service_document.requests.post")
-def test_sign_url_raises_on_non_200(mock_post):
-    mock_post.return_value = MagicMock(status_code=500)
+def test_sign_url_raises_on_non_200():
     svc, _ = _service()
+    svc._http = MagicMock()
+    svc._http.post.return_value = MagicMock(status_code=500)
     try:
         svc._sign_url("C00001/kyc_1.pdf")
         assert False, "expected RuntimeError"
@@ -126,12 +126,12 @@ def test_sign_url_raises_on_non_200(mock_post):
         assert str(e) == "storage_sign_failed:500"
 
 
-@patch("DivineService.service_document.requests.post")
-def test_sign_url_raises_on_invalid_json(mock_post):
+def test_sign_url_raises_on_invalid_json():
+    svc, _ = _service()
     resp = MagicMock(status_code=200)
     resp.json.side_effect = ValueError("not json")
-    mock_post.return_value = resp
-    svc, _ = _service()
+    svc._http = MagicMock()
+    svc._http.post.return_value = resp
     try:
         svc._sign_url("C00001/kyc_1.pdf")
         assert False, "expected RuntimeError"
@@ -139,12 +139,12 @@ def test_sign_url_raises_on_invalid_json(mock_post):
         assert str(e) == "storage_sign_failed:invalid_response"
 
 
-@patch("DivineService.service_document.requests.post")
-def test_sign_url_raises_when_response_missing_signed_url(mock_post):
+def test_sign_url_raises_when_response_missing_signed_url():
+    svc, _ = _service()
     resp = MagicMock(status_code=200)
     resp.json.return_value = {"unexpected": "shape"}
-    mock_post.return_value = resp
-    svc, _ = _service()
+    svc._http = MagicMock()
+    svc._http.post.return_value = resp
     try:
         svc._sign_url("C00001/kyc_1.pdf")
         assert False, "expected RuntimeError"
@@ -152,14 +152,124 @@ def test_sign_url_raises_when_response_missing_signed_url(mock_post):
         assert str(e) == "storage_sign_failed:no_url"
 
 
-@patch("DivineService.service_document.requests.post")
-def test_sign_url_returns_absolute_url_on_success(mock_post):
+def test_sign_url_returns_absolute_url_on_success():
+    svc, _ = _service()
     resp = MagicMock(status_code=200)
     resp.json.return_value = {"signedURL": "/object/sign/documents/C00001/kyc_1.pdf?token=abc"}
-    mock_post.return_value = resp
-    svc, _ = _service()
+    svc._http = MagicMock()
+    svc._http.post.return_value = resp
     url = svc._sign_url("C00001/kyc_1.pdf")
     assert url == "https://fake.supabase.co/storage/v1/object/sign/documents/C00001/kyc_1.pdf?token=abc"
+
+
+# ---------- _sign_urls_batch ----------
+
+def test_sign_urls_batch_returns_empty_dict_for_empty_input():
+    svc, _ = _service()
+    assert svc._sign_urls_batch([]) == {}
+
+
+def test_sign_urls_batch_raises_when_not_configured():
+    svc, _ = _service(configured=False)
+    try:
+        svc._sign_urls_batch(["C00001/kyc_1.pdf"])
+        assert False, "expected RuntimeError"
+    except RuntimeError as e:
+        assert str(e) == "storage_not_configured"
+
+
+def test_sign_urls_batch_hits_the_plural_endpoint_once():
+    svc, _ = _service()
+    resp = MagicMock(status_code=200)
+    resp.json.return_value = [
+        {"path": "C00001/a.pdf", "signedURL": "/object/sign/documents/C00001/a.pdf?token=1", "error": None},
+        {"path": "C00001/b.pdf", "signedURL": "/object/sign/documents/C00001/b.pdf?token=2", "error": None},
+    ]
+    svc._http = MagicMock()
+    svc._http.post.return_value = resp
+
+    result = svc._sign_urls_batch(["C00001/a.pdf", "C00001/b.pdf"])
+
+    svc._http.post.assert_called_once()
+    call_url = svc._http.post.call_args.args[0]
+    assert call_url == "https://fake.supabase.co/storage/v1/object/sign/documents"
+    assert result == {
+        "C00001/a.pdf": "https://fake.supabase.co/storage/v1/object/sign/documents/C00001/a.pdf?token=1",
+        "C00001/b.pdf": "https://fake.supabase.co/storage/v1/object/sign/documents/C00001/b.pdf?token=2",
+    }
+
+
+def test_sign_urls_batch_omits_paths_with_a_per_item_error():
+    svc, _ = _service()
+    resp = MagicMock(status_code=200)
+    resp.json.return_value = [
+        {"path": "C00001/a.pdf", "signedURL": "/object/sign/documents/C00001/a.pdf?token=1", "error": None},
+        {"path": "C00001/b.pdf", "signedURL": None, "error": "Object not found"},
+    ]
+    svc._http = MagicMock()
+    svc._http.post.return_value = resp
+
+    result = svc._sign_urls_batch(["C00001/a.pdf", "C00001/b.pdf"])
+
+    assert "C00001/a.pdf" in result
+    assert "C00001/b.pdf" not in result
+
+
+def test_sign_urls_batch_raises_on_non_200():
+    svc, _ = _service()
+    svc._http = MagicMock()
+    svc._http.post.return_value = MagicMock(status_code=500)
+    try:
+        svc._sign_urls_batch(["C00001/a.pdf"])
+        assert False, "expected RuntimeError"
+    except RuntimeError as e:
+        assert str(e) == "storage_sign_failed:500"
+
+
+# ---------- admin_get_latest_batch ----------
+
+def test_admin_get_latest_batch_returns_empty_dict_for_no_types():
+    svc, persistence = _service()
+    assert svc.admin_get_latest_batch([], "C00001") == {}
+    persistence.get_latest_by_owner_and_types.assert_not_called()
+
+
+def test_admin_get_latest_batch_returns_doc_and_signed_url_per_type():
+    svc, persistence = _service()
+    doc_a = MagicMock(document_type="pan_card", storage_path="C00001/pan.pdf", storage_bucket=None)
+    doc_b = MagicMock(document_type="aadhaar_front", storage_path="C00001/aadhaar.pdf", storage_bucket=None)
+    persistence.get_latest_by_owner_and_types.return_value = [doc_a, doc_b]
+
+    resp = MagicMock(status_code=200)
+    resp.json.return_value = [
+        {"path": "C00001/pan.pdf", "signedURL": "/object/sign/documents/C00001/pan.pdf?token=1", "error": None},
+        {"path": "C00001/aadhaar.pdf", "signedURL": "/object/sign/documents/C00001/aadhaar.pdf?token=2", "error": None},
+    ]
+    svc._http = MagicMock()
+    svc._http.post.return_value = resp
+
+    result = svc.admin_get_latest_batch(["pan_card", "aadhaar_front"], "C00001")
+
+    svc._http.post.assert_called_once()  # one bucket -> one batch call, not one per doc
+    assert result["pan_card"][0] is doc_a
+    assert result["pan_card"][1] == "https://fake.supabase.co/storage/v1/object/sign/documents/C00001/pan.pdf?token=1"
+    assert result["aadhaar_front"][0] is doc_b
+
+
+def test_admin_get_latest_batch_degrades_gracefully_when_signing_fails():
+    """A Supabase-side failure must still return the doc rows (uploaded=True is
+    still knowable) with a None signed_url, not drop/crash the whole lookup -
+    same tolerance admin_get_latest already has per document."""
+    svc, persistence = _service()
+    doc = MagicMock(document_type="pan_card", storage_path="C00001/pan.pdf", storage_bucket=None)
+    persistence.get_latest_by_owner_and_types.return_value = [doc]
+    svc._http = MagicMock()
+    svc._http.post.return_value = MagicMock(status_code=500)
+
+    result = svc.admin_get_latest_batch(["pan_card"], "C00001")
+
+    assert result["pan_card"][0] is doc
+    assert result["pan_card"][1] is None
 
 
 # ---------- generate() cleanup-on-failure behavior ----------

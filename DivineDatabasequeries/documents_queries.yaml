@@ -8,3 +8,10 @@ get_by_id: |
 get_latest_by_owner_and_type: |
   SELECT * FROM divine_documents WHERE owner_id = :owner_id AND document_type = :document_type
   ORDER BY created_date DESC LIMIT 1;
+get_latest_by_owner_and_types: |
+  SELECT * FROM (
+    SELECT *, ROW_NUMBER() OVER (PARTITION BY document_type ORDER BY created_date DESC) AS rn
+    FROM divine_documents
+    WHERE owner_id = :owner_id AND document_type IN :document_types
+  ) ranked
+  WHERE rn = 1;

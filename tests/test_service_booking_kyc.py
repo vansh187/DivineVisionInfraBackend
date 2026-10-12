@@ -103,7 +103,7 @@ def test_approve_happy_path():
     persistence.list_decisions.return_value = []
     customer_persistence.get_by_id.return_value = SimpleNamespace(
         first_name="Rehan", last_name="Sharma", email="rehan@example.com", phone="9999999998")
-    document_service.admin_get_latest.return_value = (None, None, None)
+    document_service.admin_get_latest_batch.return_value = {}
     payment_service.get.return_value = SimpleNamespace(method="razorpay", status="paid",
                                                         razorpay_payment_id="pay_x", utr_number=None)
 
@@ -153,7 +153,7 @@ def test_reject_releases_plot_and_initiates_refund():
     persistence.list_decisions.return_value = []
     customer_persistence.get_by_id.return_value = SimpleNamespace(
         first_name="Rehan", last_name="Sharma", email="rehan@example.com", phone="9999999998")
-    document_service.admin_get_latest.return_value = (None, None, None)
+    document_service.admin_get_latest_batch.return_value = {}
     payment_service.get.return_value = SimpleNamespace(method="razorpay", status="paid",
                                                         razorpay_payment_id="pay_x", utr_number=None)
 
@@ -175,7 +175,7 @@ def test_reject_refund_failure_does_not_fail_the_reject():
     persistence.update_decision.return_value = updated_booking
     persistence.list_decisions.return_value = []
     customer_persistence.get_by_id.return_value = None
-    document_service.admin_get_latest.return_value = (None, None, None)
+    document_service.admin_get_latest_batch.return_value = {}
     payment_service.initiate_refund.side_effect = RuntimeError("gateway down")
 
     detail = svc.reject("BKG-1", admin_id="DV0001", note="Docs mismatch", expected_version=1)
@@ -191,7 +191,7 @@ def test_cancel_uses_cancelled_status_and_action():
     persistence.update_decision.return_value = updated_booking
     persistence.list_decisions.return_value = []
     customer_persistence.get_by_id.return_value = None
-    document_service.admin_get_latest.return_value = (None, None, None)
+    document_service.admin_get_latest_batch.return_value = {}
 
     detail = svc.cancel("BKG-1", admin_id="DV0001", note="Customer asked to cancel", expected_version=1)
 
@@ -226,7 +226,7 @@ def test_cancel_an_already_booked_plot_unbooks_instead_of_releasing_from_review(
     persistence.update_decision.return_value = updated_booking
     persistence.list_decisions.return_value = []
     customer_persistence.get_by_id.return_value = None
-    document_service.admin_get_latest.return_value = (None, None, None)
+    document_service.admin_get_latest_batch.return_value = {}
 
     detail = svc.cancel("BKG-1", admin_id="DV0001", note="Customer asked to cancel", expected_version=2)
 
@@ -265,7 +265,7 @@ def test_cancel_sends_project_specific_cash_office_address():
     persistence.list_decisions.return_value = []
     customer_persistence.get_by_id.return_value = SimpleNamespace(
         first_name="Rehan", last_name="Sharma", email="rehan@example.com", phone="9999999998")
-    document_service.admin_get_latest.return_value = (None, None, None)
+    document_service.admin_get_latest_batch.return_value = {}
     payment_service.get.return_value = SimpleNamespace(method="cash", status="paid",
                                                         razorpay_payment_id=None, utr_number=None)
 
@@ -284,7 +284,7 @@ def test_cancel_refund_failure_does_not_fail_the_cancel():
     persistence.update_decision.return_value = updated_booking
     persistence.list_decisions.return_value = []
     customer_persistence.get_by_id.return_value = None
-    document_service.admin_get_latest.return_value = (None, None, None)
+    document_service.admin_get_latest_batch.return_value = {}
     payment_service.initiate_refund.side_effect = RuntimeError("gateway down")
 
     detail = svc.cancel("BKG-1", admin_id="DV0001", note="Customer asked to cancel", expected_version=1)
