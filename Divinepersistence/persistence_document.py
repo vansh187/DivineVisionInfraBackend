@@ -1,5 +1,5 @@
 import json
-from sqlalchemy import Column, String, DateTime, JSON, Text, text
+from sqlalchemy import Column, String, DateTime, JSON, Text, text, bindparam
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import IntegrityError
 from datetime import datetime, timezone
@@ -39,6 +39,12 @@ class persistenceDocument:
         queries.setdefault("get_latest_by_owner_and_type", (
             'SELECT * FROM divine_documents WHERE owner_id = :owner_id AND document_type = :document_type '
             'ORDER BY created_date DESC LIMIT 1;'
+        ))
+        queries.setdefault("get_latest_by_owner_and_types", (
+            'SELECT * FROM ('
+            'SELECT *, ROW_NUMBER() OVER (PARTITION BY document_type ORDER BY created_date DESC) AS rn '
+            'FROM divine_documents WHERE owner_id = :owner_id AND document_type IN :document_types'
+            ') ranked WHERE rn = 1;'
         ))
         queries.setdefault("get_latest_by_payment_id", (
             'SELECT * FROM divine_documents WHERE payment_id = :payment_id '
@@ -110,6 +116,20 @@ class persistenceDocument:
             if not row:
                 return None
             return RowWrapper(row)
+
+    def get_latest_by_owner_and_types(self, owner_id: str, document_types) -> list:
+        """Batched sibling of get_latest_by_owner_and_type - one query for several
+        document types instead of one query each, for admin_get_latest_batch's
+        booking-detail-page checklist (was 5 serial round trips, now 1)."""
+        document_types = list(dict.fromkeys(document_types or []))
+        if not document_types:
+            return []
+        with self._session_factory() as db:
+            query = text(self._queries.get("get_latest_by_owner_and_types")).bindparams(
+                bindparam("document_types", expanding=True)
+            )
+            result = db.execute(query, {"owner_id": owner_id, "document_types": document_types})
+            return [RowWrapper(row) for row in result.mappings().all()]
 
     def get_latest_by_payment_id(self, payment_id: str):
         with self._session_factory() as db:

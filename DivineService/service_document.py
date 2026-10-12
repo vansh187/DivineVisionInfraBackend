@@ -116,6 +116,10 @@ class serviceDocument:
         self._service_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
         self._bucket = os.getenv("SUPABASE_STORAGE_BUCKET", "documents")
         self._booking_forms_bucket = os.getenv(_BOOKING_FORMS_BUCKET_ENV, _DEFAULT_BOOKING_FORMS_BUCKET)
+        # Reused across every Supabase Storage call this instance makes - keeps the
+        # TCP/TLS connection to Supabase warm instead of paying a fresh handshake on
+        # every single sign/upload/download/delete call.
+        self._http = requests.Session()
 
     def _render_pdf(self, document_type: str, form_data: dict, attachments: dict = None, photos: dict = None) -> bytes:
         pdf = FPDF()
@@ -221,7 +225,7 @@ class serviceDocument:
             raise RuntimeError("storage_not_configured")
         sign_url = f"{self._supabase_url}/storage/v1/object/sign/{bucket or self._bucket}/{object_path}"
         try:
-            resp = requests.post(
+            resp = self._http.post(
                 sign_url,
                 headers={
                     "Authorization": f"Bearer {self._service_key}",
@@ -242,6 +246,54 @@ class serviceDocument:
         if not signed_url:
             raise RuntimeError("storage_sign_failed:no_url")
         return f"{self._supabase_url}/storage/v1{signed_url}"
+
+    def _sign_urls_batch(self, object_paths: list, expires_in: int = DEFAULT_SIGNED_URL_EXPIRY_SECONDS,
+                          bucket: str = None) -> dict:
+        """One Supabase Storage call signing MANY paths at once (the plural
+        /object/sign/{bucket} endpoint, not the singular /object/sign/{bucket}/{path}
+        _sign_url uses) - for admin_get_latest_batch, where signing 5 KYC documents
+        one at a time was the entire cost of a slow admin booking-detail page.
+        Returns {object_path: signed_url_or_None} - a path Supabase couldn't sign
+        (its own per-path "error") maps to None rather than failing every other
+        path in the batch, same per-item tolerance _document_checklist already
+        relies on from the old one-call-per-doc code. Raises only if the WHOLE
+        batch call itself fails (config/network/non-200/unparseable body) - never
+        for an individual path's error."""
+        if not self._supabase_url or not self._service_key:
+            raise RuntimeError("storage_not_configured")
+        if not object_paths:
+            return {}
+        sign_url = f"{self._supabase_url}/storage/v1/object/sign/{bucket or self._bucket}"
+        try:
+            resp = self._http.post(
+                sign_url,
+                headers={
+                    "Authorization": f"Bearer {self._service_key}",
+                    "Content-Type": "application/json",
+                },
+                json={"paths": object_paths, "expiresIn": expires_in},
+                timeout=30,
+            )
+        except requests.exceptions.RequestException:
+            raise RuntimeError("storage_unreachable")
+        if resp.status_code != 200:
+            raise RuntimeError(f"storage_sign_failed:{resp.status_code}")
+        try:
+            items = resp.json()
+        except ValueError:
+            raise RuntimeError("storage_sign_failed:invalid_response")
+        if not isinstance(items, list):
+            raise RuntimeError("storage_sign_failed:invalid_response")
+
+        result = {}
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            path = item.get("path")
+            signed_url = item.get("signedURL")
+            if path and signed_url and not item.get("error"):
+                result[path] = f"{self._supabase_url}/storage/v1{signed_url}"
+        return result
 
     def _download_from_storage(self, object_path: str, bucket: str = None) -> bytes:
         if not self._supabase_url or not self._service_key:
@@ -710,3 +762,51 @@ class serviceDocument:
             logger.warning("admin_get_latest_document_failed document_type=%s owner_id=%s error=%s",
                            document_type, owner_id, e)
             return None, None, None
+
+    def admin_get_latest_batch(self, document_types, owner_id: str) -> dict:
+        """Batched sibling of admin_get_latest - one DB query (instead of one per
+        document type) plus one Supabase sign call per distinct storage bucket
+        involved (normally just one call total, since every KYC document type is
+        uploaded to the same bucket) instead of one sign call per document. This
+        is what made the admin booking-detail page slow: 5 document types used to
+        mean 5 serial DB queries + 5 serial blocking Supabase HTTP calls on a
+        single request.
+
+        Returns {document_type: (doc, signed_url, expires_in)} - same 3-tuple
+        admin_get_latest returns per type, just for every type at once. A type
+        with nothing uploaded, or whose signed-URL failed, is simply absent from
+        the dict - callers already do dict.get(doc_type, (None, None, None))."""
+        try:
+            clean_types = [(t or "").strip() for t in (document_types or []) if (t or "").strip()]
+            if not clean_types:
+                return {}
+            docs = self._persistence.get_latest_by_owner_and_types(owner_id, clean_types)
+            if not docs:
+                return {}
+
+            by_bucket = {}
+            for doc in docs:
+                bucket = getattr(doc, "storage_bucket", None) or self._bucket
+                by_bucket.setdefault(bucket, []).append(doc)
+
+            signed_by_path = {}
+            for bucket, bucket_docs in by_bucket.items():
+                try:
+                    signed_by_path.update(self._sign_urls_batch(
+                        [d.storage_path for d in bucket_docs], bucket=bucket,
+                    ))
+                except Exception as e:
+                    # One bucket's batch sign failing must not lose the other
+                    # buckets' results (or crash the whole checklist) - those
+                    # documents just come back without a preview_url, same as a
+                    # single admin_get_latest call failing for one doc type today.
+                    logger.warning("admin_get_latest_batch_sign_failed bucket=%s error=%s", bucket, e)
+
+            result = {}
+            for doc in docs:
+                signed_url = signed_by_path.get(doc.storage_path)
+                result[doc.document_type] = (doc, signed_url, DEFAULT_SIGNED_URL_EXPIRY_SECONDS)
+            return result
+        except Exception as e:
+            logger.warning("admin_get_latest_batch_failed owner_id=%s error=%s", owner_id, e)
+            return {}

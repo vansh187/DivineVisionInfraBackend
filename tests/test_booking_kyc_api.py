@@ -18,6 +18,7 @@ os.environ["ADMIN_JWT_SECRET_KEY"] = "admintestsecret"
 from Divinepersistence.persistence_db import PersistenceDB
 from Divinepersistence.persistence_inventory import persistenceInventory
 from Divinepersistence.persistence_customer import persistenceCustomer
+from Divinepersistence.persistence_document import persistenceDocument
 from DivineService.service_payment import servicePayment
 from DivineAPI.main import app
 
@@ -150,6 +151,29 @@ def test_admin_detail_includes_document_checklist_and_decision_history():
     assert data["decision_history"][0]["action"] == "payment_received"
     assert data["utr_number"] == "UTR000111222"
     assert data["payment_method"] == "rtgs_neft"
+
+
+def test_admin_detail_batches_uploaded_documents_correctly():
+    """Regression coverage for the get_latest_by_owner_and_types query used by
+    admin_get_latest_batch (the booking-detail perf fix - was 5 serial
+    admin_get_latest calls, now one batched query) - specifically exercises it
+    against a REAL database with an actual uploaded document, over real HTTP,
+    rather than a mock that would hide a SQL portability bug (this caught
+    DISTINCT ON not being valid SQLite syntax, which a pure-mock test can't)."""
+    persistenceDocument().create_document(
+        id=str(uuid.uuid4()), owner_id=_CUSTOMER_ID, owner_role="customer",
+        document_type="pan_card", form_data={}, storage_path=f"{_CUSTOMER_ID}/pan_card.pdf",
+    )
+
+    r = client.get(f"/admin/bookings/{_BOOKING_ID}", headers=_admin_headers())
+    assert r.status_code == 200, r.text
+    data = r.json()
+    by_type = {d["document_type"]: d for d in data["documents"]}
+    assert by_type["pan_card"]["uploaded"] is True
+    assert by_type["pan_card"]["uploaded_at"] is not None
+    # Every other KYC document type is still correctly reported as not uploaded.
+    for doc_type in ("aadhaar_front", "aadhaar_back", "applicant_photo", "cancelled_cheque"):
+        assert by_type[doc_type]["uploaded"] is False
 
 
 def test_admin_detail_not_found():
