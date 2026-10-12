@@ -368,13 +368,10 @@ def test_cancel_an_already_booked_plot_unbooks_it_and_initiates_cash_refund():
         id=unit4_id, project_name="Suraksha Enclave", city="Sonipat", unit_number="C-9",
         area_sqmt=180, area_sqyd=215, status="available",
     )
-    # owner_role="broker" is required for a cash payment to be trusted enough to
-    # flip the unit into KYC review immediately (see servicePayment._booking_flip_trusted -
-    # a customer's own self-reported cash entry is deliberately NOT trusted); the
-    # booking's customer_id still ends up as owner_id, so this still lands as
-    # _CUSTOMER_ID's booking for the rest of the test.
+    # Only a customer ever books a plot (see servicePayment._booking_flip_trusted) -
+    # a cash payment is trusted enough to flip the unit into KYC review.
     payment4 = servicePayment().record_cash_payment(
-        amount=900000, owner_id=_CUSTOMER_ID, owner_role="broker",
+        amount=900000, owner_id=_CUSTOMER_ID, owner_role="customer",
         purpose="plot_booking", inventory_id=unit4_id, method="cash",
     )
     booking4_id = payment4.booking_id

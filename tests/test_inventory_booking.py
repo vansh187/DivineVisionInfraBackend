@@ -65,19 +65,32 @@ def test_broker_recorded_cash_booking_holds_unit_for_kyc_review():
     )
 
 
-def test_customer_self_reported_cash_booking_never_flips_inventory():
-    """A customer's unverified cash entry must not move inventory - otherwise anyone
-    locks arbitrary plots for a rupee. The payment row is still created."""
+def test_customer_self_reported_cash_booking_holds_unit_for_kyc_review():
+    """A customer's own self-reported cash entry is trusted the same as rtgs_neft -
+    enough to put the unit on a KYC-review HOLD (never a final booking), so it
+    shows up for an admin to verify documents against, same as broker-recorded
+    cash or an online gateway payment."""
     svc, payments, inventory, booking = _pay_service()
     payments.create_payment.return_value = _row(method="cash", owner_role="customer",
                                                 purpose="plot_booking", inventory_id="INV-9")
+    inventory.hold_for_kyc_review.return_value = _row(id="INV-9", status="pending_kyc_review",
+                                                       project_name="Green Meadows", unit_number="A-1")
 
-    record = svc.record_cash_payment(1, owner_id="C00001", owner_role="customer",
+    record = svc.record_cash_payment(500000, owner_id="C00001", owner_role="customer",
                                      purpose="plot_booking", inventory_id="INV-9")
 
-    inventory.hold_for_kyc_review.assert_not_called()
-    assert record.status == "paid"
-    assert record.inventory_status is None
+    inventory.hold_for_kyc_review.assert_called_once_with(id="INV-9", payment_id="pay1", customer_id="C00001")
+    assert record.inventory_status == "pending_kyc_review"
+    assert record.booking_id == "BKG-2026-000001"
+
+
+def test_booking_flip_trusted_rejects_unrecognized_method():
+    """The only thing _booking_flip_trusted still guards against is a method value
+    outside the known set - every known method (zoho/razorpay/cash/rtgs_neft) is
+    trusted the same way regardless of owner_role."""
+    svc, _, _, _ = _pay_service()
+    bogus_record = SimpleNamespace(method="bogus", owner_role="customer")
+    assert svc._booking_flip_trusted(bogus_record) is False
 
 
 def test_cash_payment_without_booking_purpose_never_touches_inventory():

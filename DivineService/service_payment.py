@@ -16,6 +16,10 @@ ALLOWED_PURPOSES = ("plot_booking", "installment", "other")
 BOOKING_PURPOSE = "plot_booking"
 INSTALLMENT_PURPOSE = "installment"
 
+# Every payment method this backend recognizes - see _booking_flip_trusted below,
+# the one place this is checked against.
+_KNOWN_PAYMENT_METHODS = ("zoho", "razorpay", "cash", "rtgs_neft")
+
 # Only these events flip a payment's status - everything else (refund/dispute events,
 # etc.) is out of scope for this feature and acknowledged without action.
 _WEBHOOK_EVENT_STATUS = {"payment.success": "paid", "payment.failed": "failed"}
@@ -53,36 +57,38 @@ class servicePayment:
 
     def _booking_flip_trusted(self, record) -> bool:
         """Whether a plot-booking payment may put a unit on HOLD for admin KYC
-        review (see _apply_booking_to_inventory - this no longer books outright,
-        so the bar for "trusted enough" is lower than it used to be: the worst
-        case for an untrustworthy flip is a temporary hold an admin later
-        releases on reject, not a permanently lost unit):
+        review (see _apply_booking_to_inventory - this never books outright, so
+        the bar for "trusted enough" is just "worth an admin's time to review",
+        not "verified" - the worst case for an untrustworthy flip is a temporary
+        hold an admin later releases on reject, not a permanently lost unit).
+        Only a CUSTOMER ever books a plot in this system - brokers aren't given
+        inventory/booking access at all - so there is no separate broker-trust
+        case to consider here:
 
           * a Zoho Payments payment (or a legacy Razorpay one, from before the Zoho
             cutover) - the caller only reaches _apply_booking_to_inventory after
             verify_payment / the webhook has confirmed the signature, so a 'paid'
             row is real; or
-          * a cash payment RECORDED BY A BROKER - staff logging cash they physically
-            collected, same trust level as the receipt book; or
+          * a cash payment - the customer self-reporting money they handed over,
+            same trust level as a physical receipt book entry; or
           * an rtgs_neft payment - self-reported by the customer with a UTR
-            reference from their own bank transfer, but only ever a HOLD pending
-            admin review (who confirms the actual bank credit before Approve), not
-            a final booking - see the KYC-review gate this money now sits behind.
+            reference from their own bank transfer.
 
-        A customer's own self-reported CASH entry is still NOT trusted (cash
-        leaves no verifiable trail before it's physically handed over) - it
-        settles 'paid' straight from typed input, so honouring it here would let
-        anyone lock arbitrary plots for a rupee. Those still create a payment
-        row; a broker confirms the plot via POST /inventory/{id}/book."""
-        method = (getattr(record, "method", None) or "zoho").lower()
-        role = (getattr(record, "owner_role", None) or "").lower()
-        if method in ("zoho", "razorpay"):
-            return True
-        if method == "cash" and role == "broker":
-            return True
-        if method == "rtgs_neft":
-            return True
-        return False
+        None of these are cryptographically verified the way a gateway payment
+        is - that's exactly why every one of them only ever earns a HOLD pending
+        admin review (who checks the actual documents/bank credit before
+        Approve), never a final booking - see the KYC-review gate this money
+        now sits behind. Every method this backend recognizes is trusted enough
+        for that hold; this is purely a known-method guard (see
+        _KNOWN_PAYMENT_METHODS) against some future/garbage method value, not a
+        policy distinction between methods. Never raises - an unexpected error
+        here fails safe (no hold), exactly like an unrecognized method would."""
+        try:
+            method = (getattr(record, "method", None) or "zoho").lower()
+            return method in _KNOWN_PAYMENT_METHODS
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning("payment.booking.flip_trusted_check_failed error=%s", e)
+            return False
 
     def _apply_booking_to_inventory(self, record):
         """Called right after a plot-booking payment settles. HOLDS the linked
@@ -114,8 +120,8 @@ class servicePayment:
             if purpose != BOOKING_PURPOSE or not inventory_id or not payment_id:
                 return record
             if not self._booking_flip_trusted(record):
-                logger.info("payment.booking.flip_skipped_untrusted payment_id=%s method=%s role=%s",
-                            payment_id, getattr(record, "method", None), getattr(record, "owner_role", None))
+                logger.info("payment.booking.flip_skipped_untrusted payment_id=%s method=%s",
+                            payment_id, getattr(record, "method", None))
                 return record
 
             try:

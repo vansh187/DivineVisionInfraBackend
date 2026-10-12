@@ -9,9 +9,8 @@ import numpy as np
 import requests
 from fpdf import FPDF
 from fpdf.enums import XPos, YPos
-from Divinepersistence import persistenceDocument, persistencePayment, persistenceCustomer, persistenceInventory, persistenceBooking
+from Divinepersistence import persistenceDocument, persistencePayment, persistenceInventory, persistenceBooking
 from DivineDTO.models import DocumentGenerateRequestDTO
-from DivineService.service_email import serviceEmail, dispatch_booking_confirmation_email
 from DivineService.service_payment_schedule import build_payment_schedule
 from DivineService.loan_utils import normalize_indian_amount
 
@@ -63,19 +62,6 @@ _PHOTO_COLUMN_WIDTH_MM = 45
 _PHOTO_COLUMN_HEIGHT_MM = 55
 _PHOTO_COLUMN_GAP_MM = 6
 
-# Where to find booking display values inside the (client-supplied, schema-free)
-# booking-application form_data blob - snake_case and camelCase both accepted. The
-# money figure is NOT read from here; the authoritative amount is the linked
-# payment record's own value.
-_BOOKING_PROJECT_NAME_KEYS = (
-    "project_name", "projectName", "project", "township", "townshipName",
-    "township_name", "township_label", "townshipLabel",
-)
-_BOOKING_UNIT_NUMBER_KEYS = (
-    "unit_number", "unitNumber", "unit_no", "unitNo",
-    "plot_number", "plotNumber", "plot_no", "plotNo",
-)
-
 
 def _first_present(form_data: dict, keys) -> str:
     for key in keys:
@@ -108,7 +94,6 @@ def _pdf_safe_text(value) -> str:
 
 class serviceDocument:
     def __init__(self, persistence: persistenceDocument = None, payment_persistence: persistencePayment = None,
-                 customer_persistence: persistenceCustomer = None, email: serviceEmail = None,
                  inventory_persistence: persistenceInventory = None, booking_persistence: persistenceBooking = None):
         self._persistence = persistence or persistenceDocument()
         self._payment_persistence = payment_persistence or persistencePayment()
@@ -131,18 +116,6 @@ class serviceDocument:
         self._service_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
         self._bucket = os.getenv("SUPABASE_STORAGE_BUCKET", "documents")
         self._booking_forms_bucket = os.getenv(_BOOKING_FORMS_BUCKET_ENV, _DEFAULT_BOOKING_FORMS_BUCKET)
-        # Optional - only used to send the booking-confirmation email. Guarded so a
-        # missing dependency can never stop a document from being stored.
-        try:
-            self._customer_persistence = customer_persistence or persistenceCustomer()
-        except Exception as e:
-            logger.warning("document_customer_persistence_init_failed: %s", e)
-            self._customer_persistence = None
-        try:
-            self._email = email or serviceEmail()
-        except Exception as e:
-            logger.warning("document_email_service_init_failed: %s", e)
-            self._email = None
 
     def _render_pdf(self, document_type: str, form_data: dict, attachments: dict = None, photos: dict = None) -> bytes:
         pdf = FPDF()
@@ -516,9 +489,14 @@ class serviceDocument:
             self._delete_from_storage(object_path, bucket=self._booking_forms_bucket)
             raise
 
-        # Booking is now persisted and payment-backed - congratulate the customer.
-        # Best-effort: a mail failure never affects the stored booking.
-        self._notify_booking_confirmation(owner_id, owner_role, form_data, payment.amount, payment.currency)
+        # No "booking confirmed" email here - the booking still only has a KYC-review
+        # HOLD on the unit at this point, not an admin-approved booking. Only a
+        # CUSTOMER ever books a plot (brokers have no inventory/booking access), so
+        # owner_id here is always the real customer - serviceBookingKyc.approve()
+        # emails that same customer (via dispatch_kyc_decision_email) once KYC is
+        # actually verified and the unit is booked for real - never earlier, so a
+        # premature "congratulations" email can't promise a booking that KYC review
+        # might still reject.
 
         # Safety-net plot lock. This ONLY ever re-confirms the exact unit the payment
         # itself was created for (payment.purpose == 'plot_booking' + payment.inventory_id) -
@@ -629,33 +607,6 @@ class serviceDocument:
         except Exception as e:
             logger.warning("document_booking_record_create_failed payment_id=%s error=%s",
                            getattr(payment, "id", None), e)
-
-    def _notify_booking_confirmation(self, owner_id: str, owner_role: str, form_data: dict,
-                                     amount=None, currency: str = "INR") -> None:
-        """Send the plot-booking congratulations email. Customers only (a broker who
-        books on a client's behalf is not the person to congratulate). Silently
-        no-ops when email is unconfigured or no address is on file. Never raises."""
-        try:
-            if owner_role != "customer":
-                return
-            if not self._email or not getattr(self._email, "enabled", False) or not self._customer_persistence:
-                return
-            customer = self._customer_persistence.get_by_id(owner_id)
-            email = getattr(customer, "email", None) if customer else None
-            if not email:
-                logger.info("booking_confirmation_skipped owner_id=%s reason=no_email_on_file", owner_id)
-                return
-            dispatch_booking_confirmation_email(
-                self._email,
-                email,
-                first_name=getattr(customer, "first_name", None),
-                project_name=_first_present(form_data, _BOOKING_PROJECT_NAME_KEYS),
-                unit_number=_first_present(form_data, _BOOKING_UNIT_NUMBER_KEYS),
-                amount=amount,
-                currency=currency or "INR",
-            )
-        except Exception as e:
-            logger.warning("booking_confirmation_notify_failed owner_id=%s error=%s", owner_id, e)
 
     def get(self, document_id: str, requester_id: str, requester_role: str = None):
         """Fetch one document and mint a FRESH signed URL for it, whatever its type -
