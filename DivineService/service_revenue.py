@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 # these buckets - see admin_revenue_queries.yaml's CASE expression, which this
 # list must stay in sync with.
 REVENUE_STATUSES = ("captured", "cash_recorded", "refund_pending", "refunded")
-PAYMENT_METHODS = ("zoho", "cash", "rtgs_neft", "razorpay")
+PAYMENT_METHODS = ("zoho", "cash", "rtgs_neft", "razorpay", "cheque")
 
 
 class serviceRevenue:

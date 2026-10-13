@@ -721,6 +721,23 @@ class serviceDocument:
         signed_url = self._sign_url(doc.storage_path, bucket=bucket)
         return doc, signed_url, DEFAULT_SIGNED_URL_EXPIRY_SECONDS
 
+    def get_booking_application_document_id(self, payment_id: str):
+        """The booking-application document's own id for a given plot-booking
+        payment - this, NOT divine_bookings.id, is what serviceMilestones calls
+        "booking_id" everywhere (see service_milestones.py /
+        _create_payment_milestones - milestone rows are keyed off the document's
+        id so a multi-plot customer's separate booking-application documents each
+        get their own isolated milestone plan). Returns None when nothing has
+        been uploaded against this payment yet. Never raises."""
+        try:
+            if not payment_id:
+                return None
+            doc = self._persistence.get_latest_by_payment_id(payment_id)
+            return getattr(doc, "id", None) if doc else None
+        except Exception as e:
+            logger.warning("get_booking_application_document_id_failed payment_id=%s error=%s", payment_id, e)
+            return None
+
     def get_booking_application_bytes(self, payment_id: str):
         """Fetches the raw bytes of the customer's signed booking-application PDF for a
         given payment (the same file uploaded via upload_booking_application) - used to

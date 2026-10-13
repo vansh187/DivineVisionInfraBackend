@@ -18,7 +18,7 @@ INSTALLMENT_PURPOSE = "installment"
 
 # Every payment method this backend recognizes - see _booking_flip_trusted below,
 # the one place this is checked against.
-_KNOWN_PAYMENT_METHODS = ("zoho", "razorpay", "cash", "rtgs_neft")
+_KNOWN_PAYMENT_METHODS = ("zoho", "razorpay", "cash", "rtgs_neft", "cheque")
 
 # Only these events flip a payment's status - everything else (refund/dispute events,
 # etc.) is out of scope for this feature and acknowledged without action.
@@ -339,7 +339,8 @@ class servicePayment:
     def _persist_new_payment(self, owner_id: str, owner_role: str, amount: float, status: str,
                               zoho_payments_session_id: str = None, method: str = "zoho", notes: dict = None,
                               purpose: str = "other", inventory_id: str = None,
-                              installment_no: int = None, due_date=None, utr_number: str = None):
+                              installment_no: int = None, due_date=None, utr_number: str = None,
+                              cheque_number: str = None, recorded_by_admin_id: str = None):
         payment_id = str(uuid.uuid4())
         return self._persistence.create_payment(
             id=payment_id,
@@ -356,6 +357,8 @@ class servicePayment:
             installment_no=installment_no,
             due_date=due_date,
             utr_number=utr_number,
+            cheque_number=cheque_number,
+            recorded_by_admin_id=recorded_by_admin_id,
         )
 
     def create_order(self, amount: float, owner_id: str, owner_role: str,
@@ -449,22 +452,26 @@ class servicePayment:
             return kind
         return f"{kind}:{safe[:120]}"
 
-    _MANUAL_METHODS = ("cash", "rtgs_neft")
+    _MANUAL_METHODS = ("cash", "rtgs_neft", "cheque")
 
     def record_cash_payment(self, amount: float, owner_id: str, owner_role: str, note: str = None,
                             purpose: str = "other", inventory_id: str = None,
                             installment_no: int = None, due_date=None, method: str = "cash",
-                            utr_number: str = None):
+                            utr_number: str = None, cheque_number: str = None,
+                            recorded_by_admin_id: str = None):
         """Records money already collected/transferred outside the gateway - cash
-        handed over in person, or an RTGS/NEFT bank transfer identified by its UTR
-        reference - there's no gateway transaction to create or verify (unlike
-        create_order/verify_payment), so this settles the record as "paid"
-        immediately, straight from what was typed in. Available to both customers
-        (self-reporting money they've sent/handed over) and brokers (logging cash
-        collected on a visit) - it's an unverified, self-reported record either
-        way, same trust model as someone writing it in a physical receipt book,
-        not a cryptographically confirmed transaction like the Zoho Payments flow.
-        Raises ValueError("invalid_method") / ValueError("utr_number_required")."""
+        handed over in person, a cheque identified by its cheque number, or an
+        RTGS/NEFT bank transfer identified by its UTR reference - there's no
+        gateway transaction to create or verify (unlike create_order/verify_payment),
+        so this settles the record as "paid" immediately, straight from what was
+        typed in. Available to customers/brokers self-reporting money they've
+        sent/collected, and to an admin recording it on the customer's behalf
+        (recorded_by_admin_id set, owner_id/owner_role still the real customer) -
+        it's an unverified, self-reported record either way, same trust model as
+        someone writing it in a physical receipt book, not a cryptographically
+        confirmed transaction like the Zoho Payments flow.
+        Raises ValueError("invalid_method") / ValueError("utr_number_required") /
+        ValueError("cheque_number_required")."""
         self._validate_amount(amount)
         purpose = self._clean_purpose(purpose)
         inventory_id = (inventory_id or "").strip() or None
@@ -476,6 +483,9 @@ class servicePayment:
         clean_utr = (utr_number or "").strip() or None
         if clean_method == "rtgs_neft" and not clean_utr:
             raise ValueError("utr_number_required")
+        clean_cheque_number = (cheque_number or "").strip() or None
+        if clean_method == "cheque" and not clean_cheque_number:
+            raise ValueError("cheque_number_required")
         if purpose == INSTALLMENT_PURPOSE:
             self._guard_installment(owner_id, installment_no, amount, due_date, inventory_id)
 
@@ -485,6 +495,7 @@ class servicePayment:
             zoho_payments_session_id=None, method=clean_method, notes={"note": note} if note else {},
             purpose=purpose, inventory_id=inventory_id,
             installment_no=installment_no, due_date=due_date, utr_number=clean_utr,
+            cheque_number=clean_cheque_number, recorded_by_admin_id=(recorded_by_admin_id or "").strip() or None,
         )
         # Cash / RTGS-NEFT - any manually-recorded method - settles immediately ->
         # lock the plot / mark the milestone now (a first booking also mirrors the
@@ -787,7 +798,7 @@ class servicePayment:
     # longer does either - that gateway's credentials/package were removed, so a
     # legacy Razorpay refund is now handled exactly like a manual cash refund
     # (admin confirms the payout themselves via mark_collected).
-    _MANUAL_REFUND_METHODS = ("cash", "rtgs_neft", "razorpay")
+    _MANUAL_REFUND_METHODS = ("cash", "rtgs_neft", "razorpay", "cheque")
 
     def initiate_refund(self, payment_id: str, reason: str = None):
         """Starts a refund for a KYC-rejected/cancelled booking payment (called by
@@ -827,6 +838,8 @@ class servicePayment:
         # bookkeeping/notification entry.
         if method == "cash":
             note = "Refund approved - please collect the cash refund from our office within 5-7 business days."
+        elif method == "cheque":
+            note = "Refund approved - a cheque will be issued by our team within 5-7 business days."
         elif method == "razorpay":
             note = ("Refund approved - this payment was made via our previous payment partner; "
                     "the refund is being processed manually by our team within 5-7 business days.")

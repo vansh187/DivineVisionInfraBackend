@@ -440,3 +440,188 @@ def test_cancel_an_already_booked_plot_unbooks_it_and_initiates_cash_refund():
     )
     assert recancel.status_code == 409, recancel.text
     assert recancel.json()["detail"] == "booking_not_cancellable"
+
+
+# ---------- payment plan: payment_schedule on GET, recording installment payments, allotment letter ----------
+
+def _setup_booked_booking_with_payment_schedule():
+    """Creates a fresh customer+unit+booking, approves it (status='booked'), and
+    uploads a booking-application document with a payment schedule so
+    serviceMilestones.ensure_for_customer can lazily backfill milestone rows.
+    Returns (booking_id, customer_id, payment_schedule_rows) - the rows as
+    returned by GET /admin/bookings/{id} right after, so tests can pick real
+    milestone ids straight from the API response, same as a real frontend would."""
+    from Divinepersistence.persistence_inventory import persistenceInventory as _PI
+    from DivineService.service_payment import servicePayment as _SP
+
+    customer = persistenceCustomer().create_user(
+        username=f"payplan_customer_{uuid.uuid4().hex[:8]}", password_hash="not-used",
+        phone="9000000099", email="payplan@example.com", first_name="Asha", last_name="Verma",
+    )
+    unit_id = str(uuid.uuid4())
+    _PI().upsert_unit(
+        id=unit_id, project_name="Green Meadows", city="Karnal", unit_number=f"B-{uuid.uuid4().hex[:8]}",
+        area_sqmt=200, area_sqyd=239, status="available",
+    )
+    payment = _SP().record_cash_payment(
+        amount=200000, owner_id=customer.id, owner_role="customer",
+        purpose="plot_booking", inventory_id=unit_id, method="rtgs_neft", utr_number="UTR_PAYPLAN_1",
+    )
+    booking_id = payment.booking_id
+    assert booking_id
+
+    approve = client.post(
+        f"/admin/bookings/{booking_id}/approve",
+        json={"note": "KYC verified", "version": 1},
+        headers=_admin_headers(),
+    )
+    assert approve.status_code == 200, approve.text
+
+    persistenceDocument().create_document(
+        id=str(uuid.uuid4()), owner_id=customer.id, owner_role="customer",
+        document_type="project_booking_application", storage_path=f"{customer.id}/booking_application.pdf",
+        payment_id=payment.id, form_data={"total_amount": 2000000, "booking_date": "2025-01-01"},
+    )
+
+    detail = client.get(f"/admin/bookings/{booking_id}", headers=_admin_headers())
+    assert detail.status_code == 200, detail.text
+    return booking_id, customer.id, detail.json()["payment_schedule"]
+
+
+def test_admin_detail_includes_payment_schedule_once_uploaded():
+    booking_id, customer_id, rows = _setup_booked_booking_with_payment_schedule()
+    assert len(rows) == 5
+    assert rows[0]["label"].lower().startswith("on booking")
+    assert rows[0]["status"] == "paid"
+    assert rows[1]["status"] in ("due", "overdue", "upcoming")
+
+    detail = client.get(f"/admin/bookings/{booking_id}", headers=_admin_headers()).json()
+    assert detail["amount_received"] is not None
+
+
+def test_admin_can_record_installment_payment_by_cash_cheque_and_rtgs():
+    booking_id, customer_id, rows = _setup_booked_booking_with_payment_schedule()
+    # rows[0] is the on-booking milestone, already paid - use the next three.
+    m2, m3, m4 = rows[1], rows[2], rows[3]
+
+    cash_resp = client.post(
+        f"/admin/bookings/{booking_id}/installments/{m2['id']}/payments",
+        json={"amount": m2["amount"], "method": "cash"},
+        headers=_admin_headers(),
+    )
+    assert cash_resp.status_code == 200, cash_resp.text
+    schedule = cash_resp.json()["payment_schedule"]
+    assert next(r for r in schedule if r["id"] == m2["id"])["status"] == "paid"
+
+    cheque_resp = client.post(
+        f"/admin/bookings/{booking_id}/installments/{m3['id']}/payments",
+        json={"amount": m3["amount"], "method": "cheque", "cheque_number": "CHQ445566"},
+        headers=_admin_headers(),
+    )
+    assert cheque_resp.status_code == 200, cheque_resp.text
+    schedule = cheque_resp.json()["payment_schedule"]
+    assert next(r for r in schedule if r["id"] == m3["id"])["status"] == "paid"
+
+    rtgs_resp = client.post(
+        f"/admin/bookings/{booking_id}/installments/{m4['id']}/payments",
+        json={"amount": m4["amount"], "method": "rtgs_neft", "utr_number": "UTR_INSTALL_4"},
+        headers=_admin_headers(),
+    )
+    assert rtgs_resp.status_code == 200, rtgs_resp.text
+    schedule = rtgs_resp.json()["payment_schedule"]
+    assert next(r for r in schedule if r["id"] == m4["id"])["status"] == "paid"
+
+
+def test_admin_installment_payment_rejects_cheque_without_cheque_number():
+    booking_id, customer_id, rows = _setup_booked_booking_with_payment_schedule()
+    m2 = rows[1]
+    resp = client.post(
+        f"/admin/bookings/{booking_id}/installments/{m2['id']}/payments",
+        json={"amount": m2["amount"], "method": "cheque"},
+        headers=_admin_headers(),
+    )
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["detail"] == "cheque_number_required"
+
+
+def test_admin_installment_payment_rejects_rtgs_without_utr_number():
+    booking_id, customer_id, rows = _setup_booked_booking_with_payment_schedule()
+    m2 = rows[1]
+    resp = client.post(
+        f"/admin/bookings/{booking_id}/installments/{m2['id']}/payments",
+        json={"amount": m2["amount"], "method": "rtgs_neft"},
+        headers=_admin_headers(),
+    )
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["detail"] == "utr_number_required"
+
+
+def test_admin_installment_payment_rejects_booking_still_pending_kyc_review():
+    customer = persistenceCustomer().create_user(
+        username=f"payplan_pending_{uuid.uuid4().hex[:8]}", password_hash="not-used",
+        phone="9000000098", email="payplan_pending@example.com", first_name="Nina", last_name="Rao",
+    )
+    from Divinepersistence.persistence_inventory import persistenceInventory as _PI
+    from DivineService.service_payment import servicePayment as _SP
+    unit_id = str(uuid.uuid4())
+    _PI().upsert_unit(
+        id=unit_id, project_name="Green Meadows", city="Karnal", unit_number=f"B-{uuid.uuid4().hex[:8]}",
+        area_sqmt=200, area_sqyd=239, status="available",
+    )
+    payment = _SP().record_cash_payment(
+        amount=200000, owner_id=customer.id, owner_role="customer",
+        purpose="plot_booking", inventory_id=unit_id, method="rtgs_neft", utr_number="UTR_PENDING_1",
+    )
+    booking_id = payment.booking_id
+
+    resp = client.post(
+        f"/admin/bookings/{booking_id}/installments/some-milestone-id/payments",
+        json={"amount": 100000, "method": "cash"},
+        headers=_admin_headers(),
+    )
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["detail"] == "booking_not_booked"
+
+
+def test_admin_installment_payment_rejects_milestone_from_a_different_booking():
+    booking_id_1, _, rows_1 = _setup_booked_booking_with_payment_schedule()
+    booking_id_2, _, rows_2 = _setup_booked_booking_with_payment_schedule()
+    foreign_milestone_id = rows_2[1]["id"]
+
+    resp = client.post(
+        f"/admin/bookings/{booking_id_1}/installments/{foreign_milestone_id}/payments",
+        json={"amount": rows_1[1]["amount"], "method": "cash"},
+        headers=_admin_headers(),
+    )
+    assert resp.status_code == 404, resp.text
+    assert resp.json()["detail"] == "milestone_not_found"
+
+
+def test_admin_installment_payment_requires_admin_auth():
+    booking_id, customer_id, rows = _setup_booked_booking_with_payment_schedule()
+    m2 = rows[1]
+    resp = client.post(
+        f"/admin/bookings/{booking_id}/installments/{m2['id']}/payments",
+        json={"amount": m2["amount"], "method": "cash"},
+        headers=_customer_headers(customer_id),
+    )
+    assert resp.status_code in (401, 403)
+
+
+# ---------- allotment letter ----------
+
+def test_allotment_letter_requires_admin_auth():
+    resp = client.get(f"/admin/bookings/{_BOOKING_ID}/allotment-letter")
+    assert resp.status_code in (401, 403)
+
+
+def test_allotment_letter_404s_when_no_booking_application_uploaded():
+    resp = client.get(f"/admin/bookings/{_BOOKING_ID}/allotment-letter", headers=_admin_headers())
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "not_uploaded"
+
+
+def test_allotment_letter_404s_for_unknown_booking():
+    resp = client.get("/admin/bookings/BKG-DOES-NOT-EXIST/allotment-letter", headers=_admin_headers())
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "not_found"

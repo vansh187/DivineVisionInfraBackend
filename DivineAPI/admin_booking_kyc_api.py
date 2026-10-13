@@ -1,10 +1,13 @@
+import io
 import logging
 import time
 from typing import Optional, Literal
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 
 from DivineDTO.models import (
     BookingQueueResponseDTO, BookingDetailDTO, BookingDecisionRequestDTO,
+    AdminInstallmentPaymentRequestDTO,
 )
 from DivineService import serviceBookingKyc
 from DivineService.auth import get_current_admin
@@ -103,6 +106,61 @@ def reject_booking(booking_id: str, dto: BookingDecisionRequestDTO, current_admi
         raise HTTPException(status_code=500, detail="internal_error")
     finally:
         logger.debug("admin_reject_booking_latency_ms=%.2f", (time.monotonic() - start) * 1000)
+
+
+@router.get("/{booking_id}/allotment-letter")
+def get_allotment_letter(booking_id: str, current_admin: dict = Depends(get_current_admin)):
+    """The customer's already-uploaded, signed Booking Application Form PDF -
+    the "allotment letter" for this booking - for admin download from the
+    Booking Detail screen."""
+    try:
+        pdf_bytes, filename = _booking_service.get_allotment_letter(booking_id)
+        return StreamingResponse(
+            io.BytesIO(pdf_bytes), media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    except ValueError as e:
+        if str(e) == "not_uploaded":
+            raise HTTPException(status_code=404, detail="not_uploaded")
+        raise HTTPException(status_code=404, detail="not_found")
+    except Exception:
+        logger.exception("admin_get_allotment_letter_failed booking_id=%s", booking_id)
+        raise HTTPException(status_code=500, detail="allotment_letter_failed")
+
+
+_INSTALLMENT_PAYMENT_ERROR_STATUS = {
+    "not_found": 404,
+    "milestone_not_found": 404,
+    "booking_not_booked": 409,
+    "installment_already_paid": 409,
+}
+
+
+@router.post("/{booking_id}/installments/{milestone_id}/payments", response_model=BookingDetailDTO)
+def record_installment_payment(
+    booking_id: str, milestone_id: str, dto: AdminInstallmentPaymentRequestDTO,
+    current_admin: dict = Depends(get_current_admin),
+):
+    """Admin records an installment payment collected outside the gateway
+    (cash/cheque/RTGS-NEFT) against one milestone of the booking's payment
+    plan, from the Booking Detail screen. Returns the refreshed booking detail
+    (payment_schedule reflects the now-paid milestone)."""
+    start = time.monotonic()
+    try:
+        return _booking_service.record_installment_payment(
+            booking_id, admin_id=current_admin["sub"], milestone_id=milestone_id,
+            amount=dto.amount, method=dto.method, utr_number=dto.utr_number,
+            cheque_number=dto.cheque_number, note=dto.note,
+        )
+    except ValueError as e:
+        code = str(e)
+        raise HTTPException(status_code=_INSTALLMENT_PAYMENT_ERROR_STATUS.get(code, 400), detail=code)
+    except Exception:
+        logger.exception("admin_record_installment_payment_failed booking_id=%s milestone_id=%s",
+                          booking_id, milestone_id)
+        raise HTTPException(status_code=500, detail="internal_error")
+    finally:
+        logger.debug("admin_record_installment_payment_latency_ms=%.2f", (time.monotonic() - start) * 1000)
 
 
 @router.post("/{booking_id}/cancel", response_model=BookingDetailDTO)

@@ -86,11 +86,28 @@ def test_customer_self_reported_cash_booking_holds_unit_for_kyc_review():
 
 def test_booking_flip_trusted_rejects_unrecognized_method():
     """The only thing _booking_flip_trusted still guards against is a method value
-    outside the known set - every known method (zoho/razorpay/cash/rtgs_neft) is
-    trusted the same way regardless of owner_role."""
+    outside the known set - every known method (zoho/razorpay/cash/rtgs_neft/cheque)
+    is trusted the same way regardless of owner_role."""
     svc, _, _, _ = _pay_service()
     bogus_record = SimpleNamespace(method="bogus", owner_role="customer")
     assert svc._booking_flip_trusted(bogus_record) is False
+
+
+def test_customer_self_reported_cheque_booking_holds_unit_for_kyc_review():
+    """A cheque payment is trusted the same as cash/rtgs_neft - puts the unit on
+    a KYC-review HOLD, never a final booking."""
+    svc, payments, inventory, booking = _pay_service()
+    payments.create_payment.return_value = _row(method="cheque", owner_role="customer",
+                                                purpose="plot_booking", inventory_id="INV-9")
+    inventory.hold_for_kyc_review.return_value = _row(id="INV-9", status="pending_kyc_review",
+                                                       project_name="Green Meadows", unit_number="A-1")
+
+    record = svc.record_cash_payment(500000, owner_id="C00001", owner_role="customer",
+                                     purpose="plot_booking", inventory_id="INV-9",
+                                     method="cheque", cheque_number="CHQ987654")
+
+    inventory.hold_for_kyc_review.assert_called_once_with(id="INV-9", payment_id="pay1", customer_id="C00001")
+    assert record.inventory_status == "pending_kyc_review"
 
 
 def test_cash_payment_without_booking_purpose_never_touches_inventory():

@@ -545,6 +545,69 @@ def test_record_cash_payment_omits_note_when_not_given():
     assert kwargs["notes"] == {}
 
 
+def test_record_cash_payment_rejects_invalid_method():
+    svc, _, _ = _service()
+    try:
+        svc.record_cash_payment(1000, owner_id="B00001", owner_role="broker", method="bogus")
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert str(e) == "invalid_method"
+
+
+def test_record_cash_payment_rejects_rtgs_neft_without_utr_number():
+    svc, _, _ = _service()
+    try:
+        svc.record_cash_payment(1000, owner_id="B00001", owner_role="broker", method="rtgs_neft")
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert str(e) == "utr_number_required"
+
+
+def test_record_cash_payment_accepts_cheque_with_cheque_number():
+    svc, persistence, _ = _service()
+    persistence.create_payment.return_value = MagicMock(id="pay1", status="paid", method="cheque")
+
+    record = svc.record_cash_payment(
+        1000, owner_id="C00001", owner_role="customer", method="cheque", cheque_number="CHQ123456",
+    )
+
+    assert record.status == "paid"
+    _, kwargs = persistence.create_payment.call_args
+    assert kwargs["method"] == "cheque"
+    assert kwargs["cheque_number"] == "CHQ123456"
+
+
+def test_record_cash_payment_rejects_cheque_without_cheque_number():
+    svc, _, _ = _service()
+    try:
+        svc.record_cash_payment(1000, owner_id="C00001", owner_role="customer", method="cheque")
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert str(e) == "cheque_number_required"
+
+
+def test_record_cash_payment_passes_through_recorded_by_admin_id():
+    svc, persistence, _ = _service()
+    persistence.create_payment.return_value = MagicMock(id="pay1", status="paid", method="cash")
+
+    svc.record_cash_payment(
+        1000, owner_id="C00001", owner_role="customer", method="cash", recorded_by_admin_id="DV1234",
+    )
+
+    _, kwargs = persistence.create_payment.call_args
+    assert kwargs["recorded_by_admin_id"] == "DV1234"
+
+
+def test_record_cash_payment_omits_recorded_by_admin_id_when_not_given():
+    svc, persistence, _ = _service()
+    persistence.create_payment.return_value = MagicMock(id="pay1", status="paid", method="cash")
+
+    svc.record_cash_payment(1000, owner_id="C00001", owner_role="customer")
+
+    _, kwargs = persistence.create_payment.call_args
+    assert kwargs["recorded_by_admin_id"] is None
+
+
 def test_record_cash_payment_omits_whitespace_only_note():
     svc, persistence, _ = _service()
     persistence.create_payment.return_value = MagicMock(id="pay1", status="paid", method="cash")
