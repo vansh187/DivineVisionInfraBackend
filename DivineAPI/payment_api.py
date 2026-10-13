@@ -111,7 +111,7 @@ def record_cash_payment(dto: PaymentCashRequestDTO, current_user: dict = Depends
             dto.amount, owner_id=current_user["sub"], owner_role=current_user["role"], note=dto.note,
             purpose=dto.purpose, inventory_id=dto.inventory_id,
             installment_no=dto.installment_no, due_date=dto.due_date,
-            method=dto.method, utr_number=dto.utr_number,
+            method=dto.method, utr_number=dto.utr_number, cheque_number=dto.cheque_number,
         )
         return _to_payment_out(record)
     except ValueError as e:

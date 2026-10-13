@@ -342,6 +342,30 @@ def test_record_cash_payment_works_without_a_note():
     assert r.json()["method"] == "cash"
 
 
+def test_record_cash_payment_accepts_cheque_with_cheque_number():
+    """Regression test: the route must actually forward cheque_number to the
+    service layer - previously it was dropped, so every customer/broker-side
+    cheque submission failed with cheque_number_required regardless of what
+    was submitted."""
+    r = client.post(
+        "/payments/cash",
+        json={"amount": 2500, "method": "cheque", "cheque_number": "CHQ998877"},
+        headers=_auth_headers(_BROKER_TOKEN),
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["method"] == "cheque"
+
+
+def test_record_cash_payment_rejects_cheque_without_cheque_number():
+    r = client.post(
+        "/payments/cash",
+        json={"amount": 2500, "method": "cheque"},
+        headers=_auth_headers(_BROKER_TOKEN),
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["detail"] == "cheque_number_required"
+
+
 def test_record_cash_payment_is_owner_scoped():
     r = client.post("/payments/cash", json={"amount": 999}, headers=_auth_headers(_BROKER_TOKEN))
     assert r.status_code == 200, r.text
