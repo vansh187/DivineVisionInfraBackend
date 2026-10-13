@@ -298,9 +298,9 @@ class serviceBookingKyc:
                 # back to an unscoped lookup, which could show a DIFFERENT plot's
                 # schedule for a multi-plot customer.
                 return empty
-            svc.ensure_for_customer(booking.customer_id)
-            schedule = svc.enriched_schedule(booking.customer_id, booking_id=document_id)
-            amount_received = svc.amount_received_rupees(booking.customer_id, booking_id=document_id)
+            rows = svc.ensure_for_customer(booking.customer_id)
+            schedule = svc.enriched_schedule(booking.customer_id, booking_id=document_id, rows=rows)
+            amount_received = svc.amount_received_rupees(booking.customer_id, booking_id=document_id, rows=rows)
             return {
                 "payment_schedule": schedule.get("rows", []),
                 "next_due": schedule.get("next_due"),

@@ -364,6 +364,8 @@ def test_get_detail_includes_payment_schedule_from_milestone_service():
     # what serviceMilestones calls "booking_id" (see
     # service_document.py::get_booking_application_document_id).
     document_service.get_booking_application_document_id.return_value = "DOC-APP-1"
+    milestone_rows = [SimpleNamespace(id="DOC-APP-1-m2", booking_id="DOC-APP-1")]
+    milestone_service.ensure_for_customer.return_value = milestone_rows
     schedule_row = {
         "id": "DOC-APP-1-m2", "label": "Within 45 days", "percent": 15, "due_days": 45,
         "due_date": "2026-01-01", "amount": 300000, "status": "due",
@@ -376,7 +378,13 @@ def test_get_detail_includes_payment_schedule_from_milestone_service():
 
     document_service.get_booking_application_document_id.assert_called_once_with("pay1")
     milestone_service.ensure_for_customer.assert_called_once_with("C00001")
-    milestone_service.enriched_schedule.assert_called_once_with("C00001", booking_id="DOC-APP-1")
+    # ensure_for_customer's result is reused (rows=) by both calls below instead of
+    # each one re-fetching the customer's milestones from the DB itself - was 3
+    # round trips to the milestones table per page load, now 1.
+    milestone_service.enriched_schedule.assert_called_once_with(
+        "C00001", booking_id="DOC-APP-1", rows=milestone_rows)
+    milestone_service.amount_received_rupees.assert_called_once_with(
+        "C00001", booking_id="DOC-APP-1", rows=milestone_rows)
     assert detail["payment_schedule"] == [schedule_row]
     assert detail["next_due"] == schedule_row
     assert detail["amount_received"] == 245000.0
