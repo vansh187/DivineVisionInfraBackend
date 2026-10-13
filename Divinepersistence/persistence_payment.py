@@ -47,6 +47,13 @@ class PaymentModel(Base):
     # the payment-method entry screen) - there's no gateway transaction id for those,
     # this is the equivalent of zoho_payment_id for that method.
     utr_number = Column(String(50))
+    # Cheque number for a "cheque" payment - same role as utr_number for rtgs_neft.
+    cheque_number = Column(String(50))
+    # Set only when an admin recorded this payment on the customer's behalf (e.g. from
+    # the Booking Detail screen's installment-payment action) - NULL for every
+    # customer/broker self-recorded payment. owner_id/owner_role above always stay the
+    # real customer's, so this is purely an audit trail of who actually captured it.
+    recorded_by_admin_id = Column(String(20))
     # Refund bookkeeping - see DivineService/service_payment.py::initiate_refund.
     # 'none' | 'pending' | 'processing' | 'completed' | 'failed'. 'pending'/'processing'
     # cover both an in-flight Zoho refund and a cash/rtgs_neft/legacy-razorpay refund
@@ -69,8 +76,8 @@ class persistencePayment:
         self._session_factory = session_factory
         queries = load_queries("payment_queries.yaml")
         queries.setdefault("create_payment", (
-            'INSERT INTO divine_payments(id, owner_id, owner_role, amount, currency, status, method, purpose, inventory_id, installment_no, due_date, zoho_payments_session_id, utr_number, notes, created_date, last_updated_date) '
-            'VALUES (:id, :owner_id, :owner_role, :amount, :currency, :status, :method, :purpose, :inventory_id, :installment_no, :due_date, :zoho_payments_session_id, :utr_number, :notes, :created_date, :last_updated_date) RETURNING *;'
+            'INSERT INTO divine_payments(id, owner_id, owner_role, amount, currency, status, method, purpose, inventory_id, installment_no, due_date, zoho_payments_session_id, utr_number, cheque_number, recorded_by_admin_id, notes, created_date, last_updated_date) '
+            'VALUES (:id, :owner_id, :owner_role, :amount, :currency, :status, :method, :purpose, :inventory_id, :installment_no, :due_date, :zoho_payments_session_id, :utr_number, :cheque_number, :recorded_by_admin_id, :notes, :created_date, :last_updated_date) RETURNING *;'
         ))
         queries.setdefault("get_by_id", 'SELECT * FROM divine_payments WHERE id = :id LIMIT 1;')
         queries.setdefault("get_by_zoho_session_id", 'SELECT * FROM divine_payments WHERE zoho_payments_session_id = :zoho_payments_session_id LIMIT 1;')
@@ -93,7 +100,7 @@ class persistencePayment:
         self._queries = queries
         self._engine = engine
 
-    def create_payment(self, id: str, owner_id: str, owner_role: str, amount, currency: str, status: str, zoho_payments_session_id: str = None, method: str = "zoho", notes: dict = None, purpose: str = "other", inventory_id: str = None, installment_no: int = None, due_date=None, utr_number: str = None) -> PaymentModel:
+    def create_payment(self, id: str, owner_id: str, owner_role: str, amount, currency: str, status: str, zoho_payments_session_id: str = None, method: str = "zoho", notes: dict = None, purpose: str = "other", inventory_id: str = None, installment_no: int = None, due_date=None, utr_number: str = None, cheque_number: str = None, recorded_by_admin_id: str = None) -> PaymentModel:
         with self._session_factory() as db:
             try:
                 now = datetime.now(timezone.utc)
@@ -112,6 +119,8 @@ class persistencePayment:
                     "due_date": due_date,
                     "zoho_payments_session_id": zoho_payments_session_id,
                     "utr_number": utr_number,
+                    "cheque_number": cheque_number,
+                    "recorded_by_admin_id": recorded_by_admin_id,
                     "notes": json.dumps(notes or {}),
                     "created_date": now,
                     "last_updated_date": now,

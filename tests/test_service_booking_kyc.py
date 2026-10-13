@@ -15,12 +15,18 @@ def _service():
     document_service = MagicMock()
     customer_persistence = MagicMock()
     email_service = MagicMock()
+    milestone_service = MagicMock()
+    milestone_service.enriched_schedule.return_value = {"rows": [], "next_due": None}
+    milestone_service.amount_received_rupees.return_value = None
+    milestone_persistence = MagicMock()
     svc = serviceBookingKyc(
         persistence=persistence, inventory_persistence=inventory, payment_service=payment_service,
         document_service=document_service, customer_persistence=customer_persistence,
-        email_service=email_service,
+        email_service=email_service, milestone_service=milestone_service,
+        milestone_persistence=milestone_persistence,
     )
-    return svc, persistence, inventory, payment_service, document_service, customer_persistence
+    return (svc, persistence, inventory, payment_service, document_service, customer_persistence,
+            milestone_service, milestone_persistence)
 
 
 def _booking(**kw):
@@ -91,7 +97,7 @@ def test_approve_version_conflict_rolls_back_with_unbook_not_release(monkeypatch
 
 
 def test_approve_happy_path():
-    svc, persistence, inventory, payment_service, document_service, customer_persistence = _service()
+    svc, persistence, inventory, payment_service, document_service, customer_persistence, *_ = _service()
     updated_booking = _booking(status="booked", kyc_status="verified", version=2)
     # get_by_id is called twice: once by approve() itself (must still see the
     # pre-decision row to pass _require_reviewable), once by the get_detail()
@@ -120,7 +126,7 @@ def test_approve_happy_path():
 
 
 def test_list_queue_batches_customer_names():
-    svc, persistence, inventory, payment_service, document_service, customer_persistence = _service()
+    svc, persistence, inventory, payment_service, document_service, customer_persistence, *_ = _service()
     rows = [
         _booking(id="BKG-1", customer_id="C00001"),
         _booking(id="BKG-2", customer_id="C00002"),
@@ -146,7 +152,7 @@ def test_list_queue_batches_customer_names():
 # ---------- reject / cancel ----------
 
 def test_reject_releases_plot_and_initiates_refund():
-    svc, persistence, inventory, payment_service, document_service, customer_persistence = _service()
+    svc, persistence, inventory, payment_service, document_service, customer_persistence, *_ = _service()
     updated_booking = _booking(status="rejected", kyc_status="rejected", version=2)
     persistence.get_by_id.side_effect = [_booking(), updated_booking]
     persistence.update_decision.return_value = updated_booking
@@ -169,7 +175,7 @@ def test_reject_refund_failure_does_not_fail_the_reject():
     """The booking decision and plot release already succeeded (the business-
     critical parts) - a refund-kickoff failure must be logged, never turned into
     a 500 that makes the admin think the reject itself failed."""
-    svc, persistence, inventory, payment_service, document_service, customer_persistence = _service()
+    svc, persistence, inventory, payment_service, document_service, customer_persistence, *_ = _service()
     updated_booking = _booking(status="rejected", kyc_status="rejected", version=2)
     persistence.get_by_id.side_effect = [_booking(), updated_booking]
     persistence.update_decision.return_value = updated_booking
@@ -185,7 +191,7 @@ def test_reject_refund_failure_does_not_fail_the_reject():
 
 
 def test_cancel_uses_cancelled_status_and_action():
-    svc, persistence, inventory, payment_service, document_service, customer_persistence = _service()
+    svc, persistence, inventory, payment_service, document_service, customer_persistence, *_ = _service()
     updated_booking = _booking(status="cancelled", kyc_status="rejected", version=2)
     persistence.get_by_id.side_effect = [_booking(), updated_booking]
     persistence.update_decision.return_value = updated_booking
@@ -219,7 +225,7 @@ def test_cancel_an_already_booked_plot_unbooks_instead_of_releasing_from_review(
     fully booked (KYC approved), not just while still pending_kyc_review - and it
     must unbook the unit (booked -> available), not call the KYC-review-only
     release path."""
-    svc, persistence, inventory, payment_service, document_service, customer_persistence = _service()
+    svc, persistence, inventory, payment_service, document_service, customer_persistence, *_ = _service()
     booked = _booking(status="booked", kyc_status="verified", version=2)
     updated_booking = _booking(status="cancelled", kyc_status="verified", version=3)
     persistence.get_by_id.side_effect = [booked, updated_booking]
@@ -256,7 +262,7 @@ def test_cancel_raises_booking_not_cancellable_for_already_terminal_booking():
 def test_cancel_sends_project_specific_cash_office_address():
     """Suraksha Enclave cash-refund cancellations must point the customer to the
     Ganaur site office, not the default OPS Divine Greens office."""
-    svc, persistence, inventory, payment_service, document_service, customer_persistence = _service()
+    svc, persistence, inventory, payment_service, document_service, customer_persistence, *_ = _service()
     booked = _booking(status="booked", kyc_status="verified", version=1, project_name="Suraksha Enclave")
     updated_booking = _booking(status="cancelled", kyc_status="verified", version=2,
                                project_name="Suraksha Enclave")
@@ -278,7 +284,7 @@ def test_cancel_sends_project_specific_cash_office_address():
 
 
 def test_cancel_refund_failure_does_not_fail_the_cancel():
-    svc, persistence, inventory, payment_service, document_service, customer_persistence = _service()
+    svc, persistence, inventory, payment_service, document_service, customer_persistence, *_ = _service()
     updated_booking = _booking(status="cancelled", kyc_status="rejected", version=2)
     persistence.get_by_id.side_effect = [_booking(), updated_booking]
     persistence.update_decision.return_value = updated_booking
@@ -343,3 +349,242 @@ def test_get_receipt_delegates_to_payment_service_once_booked():
     payment_service.get_receipt.assert_called_once_with("pay1", requester_id="C00001")
     assert pdf == b"%PDF-..."
     assert filename == "receipt.pdf"
+
+
+# ---------- get_detail: payment_schedule ----------
+
+def test_get_detail_includes_payment_schedule_from_milestone_service():
+    svc, persistence, inventory, payment_service, document_service, customer_persistence, milestone_service, _ = _service()
+    persistence.get_by_id.return_value = _booking(status="booked", payment_id="pay1")
+    persistence.list_decisions.return_value = []
+    payment_service.get.return_value = None
+    customer_persistence.get_by_id.return_value = None
+    document_service.admin_get_latest_batch.return_value = {}
+    # The booking-application DOCUMENT's own id - NOT the divine_bookings.id - is
+    # what serviceMilestones calls "booking_id" (see
+    # service_document.py::get_booking_application_document_id).
+    document_service.get_booking_application_document_id.return_value = "DOC-APP-1"
+    schedule_row = {
+        "id": "DOC-APP-1-m2", "label": "Within 45 days", "percent": 15, "due_days": 45,
+        "due_date": "2026-01-01", "amount": 300000, "status": "due",
+        "pay_enabled_from": "2025-12-27", "paid_on": None, "paid_payment_id": None,
+    }
+    milestone_service.enriched_schedule.return_value = {"rows": [schedule_row], "next_due": schedule_row}
+    milestone_service.amount_received_rupees.return_value = 245000.0
+
+    detail = svc.get_detail("BKG-1")
+
+    document_service.get_booking_application_document_id.assert_called_once_with("pay1")
+    milestone_service.ensure_for_customer.assert_called_once_with("C00001")
+    milestone_service.enriched_schedule.assert_called_once_with("C00001", booking_id="DOC-APP-1")
+    assert detail["payment_schedule"] == [schedule_row]
+    assert detail["next_due"] == schedule_row
+    assert detail["amount_received"] == 245000.0
+
+
+def test_get_detail_empty_schedule_when_no_booking_application_uploaded_yet():
+    """No booking-application document uploaded against this payment yet -> []
+    rather than an unscoped lookup that could leak a DIFFERENT plot's schedule
+    for a multi-plot customer."""
+    svc, persistence, inventory, payment_service, document_service, customer_persistence, milestone_service, _ = _service()
+    persistence.get_by_id.return_value = _booking(status="booked", payment_id="pay1")
+    persistence.list_decisions.return_value = []
+    payment_service.get.return_value = None
+    customer_persistence.get_by_id.return_value = None
+    document_service.admin_get_latest_batch.return_value = {}
+    document_service.get_booking_application_document_id.return_value = None
+
+    detail = svc.get_detail("BKG-1")
+
+    milestone_service.enriched_schedule.assert_not_called()
+    assert detail["payment_schedule"] == []
+    assert detail["next_due"] is None
+    assert detail["amount_received"] is None
+
+
+def test_get_detail_degrades_to_empty_schedule_on_milestone_service_failure():
+    """A milestone-service hiccup must never break the whole booking-detail page."""
+    svc, persistence, inventory, payment_service, document_service, customer_persistence, milestone_service, _ = _service()
+    persistence.get_by_id.return_value = _booking(status="booked", payment_id="pay1")
+    persistence.list_decisions.return_value = []
+    payment_service.get.return_value = None
+    customer_persistence.get_by_id.return_value = None
+    document_service.admin_get_latest_batch.return_value = {}
+    document_service.get_booking_application_document_id.return_value = "DOC-APP-1"
+    milestone_service.enriched_schedule.side_effect = RuntimeError("db exploded")
+
+    detail = svc.get_detail("BKG-1")
+
+    assert detail["payment_schedule"] == []
+    assert detail["next_due"] is None
+    assert detail["amount_received"] is None
+
+
+def test_get_detail_degrades_to_empty_schedule_when_milestone_service_unavailable():
+    svc, persistence, inventory, payment_service, document_service, customer_persistence, *_ = _service()
+    svc._milestones = lambda: None  # simulates _milestones()'s own except-branch returning None
+    persistence.get_by_id.return_value = _booking(status="booked")
+    persistence.list_decisions.return_value = []
+    payment_service.get.return_value = None
+    customer_persistence.get_by_id.return_value = None
+    document_service.admin_get_latest_batch.return_value = {}
+
+    detail = svc.get_detail("BKG-1")
+
+    assert detail["payment_schedule"] == []
+    assert detail["next_due"] is None
+    assert detail["amount_received"] is None
+
+
+# ---------- record_installment_payment ----------
+
+def _milestone(**kw):
+    # "booking_id" here is the booking-APPLICATION DOCUMENT's id (see
+    # service_document.py::get_booking_application_document_id) - never
+    # divine_bookings.id - "DOC-APP-1" is the matching document id the
+    # happy-path tests below mock get_booking_application_document_id to return.
+    base = {
+        "id": "DOC-APP-1-m2", "booking_id": "DOC-APP-1", "customer_id": "C00001",
+        "inventory_id": "INV-1", "milestone_no": 2, "label": "Within 45 days",
+        "due_date": "2026-01-01", "amount": 300000, "status": "due",
+    }
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+def test_record_installment_payment_raises_not_found():
+    svc, persistence, *_ = _service()
+    persistence.get_by_id.return_value = None
+    try:
+        svc.record_installment_payment("BKG-X", admin_id="DV0001", milestone_id="m2", amount=300000)
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert str(e) == "not_found"
+
+
+def test_record_installment_payment_raises_booking_not_booked():
+    svc, persistence, *_ = _service()
+    persistence.get_by_id.return_value = _booking(status="pending_kyc_review")
+    try:
+        svc.record_installment_payment("BKG-1", admin_id="DV0001", milestone_id="m2", amount=300000)
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert str(e) == "booking_not_booked"
+
+
+def test_record_installment_payment_raises_milestone_not_found_when_missing():
+    svc, persistence, inventory, payment_service, document_service, customer_persistence, milestone_service, milestone_persistence = _service()
+    persistence.get_by_id.return_value = _booking(status="booked")
+    milestone_persistence.get.return_value = None
+    try:
+        svc.record_installment_payment("BKG-2026-000001", admin_id="DV0001", milestone_id="m2", amount=300000)
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert str(e) == "milestone_not_found"
+
+
+def test_record_installment_payment_raises_milestone_not_found_for_wrong_booking():
+    """A milestone id that belongs to a DIFFERENT booking-application document
+    must be rejected, even if it exists - defends against an admin
+    pasting/guessing another booking's milestone id."""
+    svc, persistence, inventory, payment_service, document_service, customer_persistence, milestone_service, milestone_persistence = _service()
+    persistence.get_by_id.return_value = _booking(id="BKG-2026-000001", status="booked", payment_id="pay1")
+    document_service.get_booking_application_document_id.return_value = "DOC-APP-1"
+    milestone_persistence.get.return_value = _milestone(booking_id="DOC-APP-OTHER")
+    try:
+        svc.record_installment_payment("BKG-2026-000001", admin_id="DV0001", milestone_id="m2", amount=300000)
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert str(e) == "milestone_not_found"
+
+
+def test_record_installment_payment_raises_milestone_not_found_when_no_booking_application_uploaded():
+    """No booking-application document uploaded against this payment yet -> no
+    valid "booking_id" to match against, so any milestone_id is rejected."""
+    svc, persistence, inventory, payment_service, document_service, customer_persistence, milestone_service, milestone_persistence = _service()
+    persistence.get_by_id.return_value = _booking(status="booked", payment_id="pay1")
+    document_service.get_booking_application_document_id.return_value = None
+    milestone_persistence.get.return_value = _milestone()
+    try:
+        svc.record_installment_payment("BKG-2026-000001", admin_id="DV0001", milestone_id="m2", amount=300000)
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert str(e) == "milestone_not_found"
+
+
+def test_record_installment_payment_happy_path_calls_record_cash_payment_and_returns_detail():
+    svc, persistence, inventory, payment_service, document_service, customer_persistence, milestone_service, milestone_persistence = _service()
+    booking = _booking(id="BKG-2026-000001", status="booked", customer_id="C00001",
+                       inventory_id="INV-1", payment_id="pay1")
+    persistence.get_by_id.return_value = booking
+    persistence.list_decisions.return_value = []
+    payment_service.get.return_value = None
+    customer_persistence.get_by_id.return_value = None
+    document_service.admin_get_latest_batch.return_value = {}
+    document_service.get_booking_application_document_id.return_value = "DOC-APP-1"
+    milestone_persistence.get.return_value = _milestone()
+
+    detail = svc.record_installment_payment(
+        "BKG-2026-000001", admin_id="DV0001", milestone_id="BKG-2026-000001-m2", amount=300000,
+        method="cheque", cheque_number="CHQ123",
+    )
+
+    payment_service.record_cash_payment.assert_called_once_with(
+        300000, owner_id="C00001", owner_role="customer", note=None,
+        purpose="installment", inventory_id="INV-1",
+        installment_no=2, due_date="2026-01-01",
+        method="cheque", utr_number=None, cheque_number="CHQ123",
+        recorded_by_admin_id="DV0001",
+    )
+    assert detail["id"] == "BKG-2026-000001"
+
+
+def test_record_installment_payment_propagates_record_cash_payment_errors():
+    """A guard-rail ValueError from record_cash_payment (e.g. the milestone is
+    already paid) must propagate unchanged, not be swallowed/rewrapped."""
+    svc, persistence, inventory, payment_service, document_service, customer_persistence, milestone_service, milestone_persistence = _service()
+    persistence.get_by_id.return_value = _booking(status="booked", payment_id="pay1")
+    document_service.get_booking_application_document_id.return_value = "DOC-APP-1"
+    milestone_persistence.get.return_value = _milestone()
+    payment_service.record_cash_payment.side_effect = ValueError("installment_already_paid")
+
+    try:
+        svc.record_installment_payment("BKG-2026-000001", admin_id="DV0001", milestone_id="m2", amount=300000)
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert str(e) == "installment_already_paid"
+
+
+# ---------- get_allotment_letter ----------
+
+def test_get_allotment_letter_raises_not_found_for_missing_booking():
+    svc, persistence, *_ = _service()
+    persistence.get_by_id.return_value = None
+    try:
+        svc.get_allotment_letter("BKG-X")
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert str(e) == "not_found"
+
+
+def test_get_allotment_letter_raises_not_uploaded_when_no_application_pdf():
+    svc, persistence, inventory, payment_service, document_service, *_ = _service()
+    persistence.get_by_id.return_value = _booking()
+    document_service.get_booking_application_bytes.return_value = (None, None)
+    try:
+        svc.get_allotment_letter("BKG-1")
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert str(e) == "not_uploaded"
+
+
+def test_get_allotment_letter_returns_stored_pdf_bytes():
+    svc, persistence, inventory, payment_service, document_service, *_ = _service()
+    persistence.get_by_id.return_value = _booking(payment_id="pay1")
+    document_service.get_booking_application_bytes.return_value = (b"%PDF-...", "booking_application.pdf")
+
+    pdf, filename = svc.get_allotment_letter("BKG-1")
+
+    document_service.get_booking_application_bytes.assert_called_once_with("pay1")
+    assert pdf == b"%PDF-..."
+    assert filename == "booking_application.pdf"

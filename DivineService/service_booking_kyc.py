@@ -1,6 +1,6 @@
 import logging
 import os
-from Divinepersistence import persistenceBooking, persistenceInventory, persistenceCustomer
+from Divinepersistence import persistenceBooking, persistenceInventory, persistenceCustomer, persistenceMilestone
 from DivineService.service_payment import servicePayment
 from DivineService.service_document import serviceDocument
 
@@ -42,13 +42,16 @@ _CANCELLABLE_STATUSES = ("pending_kyc_review", "booked")
 class serviceBookingKyc:
     def __init__(self, persistence: persistenceBooking = None, inventory_persistence: persistenceInventory = None,
                  payment_service: servicePayment = None, document_service: serviceDocument = None,
-                 customer_persistence: persistenceCustomer = None, email_service=None):
+                 customer_persistence: persistenceCustomer = None, email_service=None,
+                 milestone_service=None, milestone_persistence: persistenceMilestone = None):
         self._persistence = persistence or persistenceBooking()
         self._inventory_persistence = inventory_persistence or persistenceInventory()
         self._payment_service = payment_service or servicePayment()
         self._document_service = document_service or serviceDocument()
         self._customer_persistence = customer_persistence or persistenceCustomer()
+        self._milestone_persistence = milestone_persistence or persistenceMilestone()
         self._email_service_override = email_service
+        self._milestone_service_override = milestone_service
 
     def _email(self):
         """Lazily built, same reasoning as serviceVisit/servicePayment's lazy
@@ -63,6 +66,20 @@ class serviceBookingKyc:
             logger.warning("booking_kyc.email_service_init_failed error=%s", e)
             self._email_service_override = None
         return self._email_service_override
+
+    def _milestones(self):
+        """Lazily built, same reasoning as _email() - a plain queue read never
+        needs the milestone stack, only get_detail/record_installment_payment do."""
+        if self._milestone_service_override is not None:
+            return self._milestone_service_override
+        try:
+            from DivineService.service_milestones import serviceMilestones
+            self._milestone_service_override = serviceMilestones()
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning("booking_kyc.milestone_service_init_failed error=%s", e)
+            self._milestone_service_override = None
+        return self._milestone_service_override
+
 
     def _format_customer_name(self, customer) -> str:
         if not customer:
@@ -241,11 +258,13 @@ class serviceBookingKyc:
                     else getattr(payment, "razorpay_payment_id", None) if payment else None
                 ),
                 "utr_number": getattr(payment, "utr_number", None) if payment else None,
+                "cheque_number": getattr(payment, "cheque_number", None) if payment else None,
                 "documents": self._document_checklist(booking.customer_id),
                 "decision_history": [
                     {"actor": d.actor, "action": d.action, "note": d.note, "created_at": d.created_date}
                     for d in decisions
                 ],
+                **self._payment_schedule_fields(booking),
                 "created_at": booking.created_date,
                 "last_activity_at": booking.last_updated_date,
             }
@@ -254,6 +273,101 @@ class serviceBookingKyc:
         except Exception:
             logger.exception("booking_kyc.get_detail_failed booking_id=%s", booking_id)
             raise RuntimeError("get_detail_failed")
+
+    def _payment_schedule_fields(self, booking) -> dict:
+        """payment_schedule/next_due/amount_received for get_detail - [] until a
+        booking-application document with a payment schedule has been uploaded
+        (ensure_for_customer backfills from it lazily on first read). A
+        milestone-service hiccup must never break the whole booking-detail page,
+        so this degrades to empty/None on any failure rather than raising.
+
+        NOTE: serviceMilestones' "booking_id" is the booking-APPLICATION
+        DOCUMENT's own id, never divine_bookings.id (see
+        service_document.py::get_booking_application_document_id) - these are
+        different id spaces. Looked up here via booking.payment_id, the one
+        column both a divine_bookings row and its booking-application document
+        agree on."""
+        empty = {"payment_schedule": [], "next_due": None, "amount_received": None}
+        try:
+            svc = self._milestones()
+            if svc is None:
+                return empty
+            document_id = self._document_service.get_booking_application_document_id(booking.payment_id)
+            if not document_id:
+                # Nothing uploaded against this specific booking yet - do NOT fall
+                # back to an unscoped lookup, which could show a DIFFERENT plot's
+                # schedule for a multi-plot customer.
+                return empty
+            svc.ensure_for_customer(booking.customer_id)
+            schedule = svc.enriched_schedule(booking.customer_id, booking_id=document_id)
+            amount_received = svc.amount_received_rupees(booking.customer_id, booking_id=document_id)
+            return {
+                "payment_schedule": schedule.get("rows", []),
+                "next_due": schedule.get("next_due"),
+                "amount_received": amount_received,
+            }
+        except Exception as e:
+            logger.warning("booking_kyc.payment_schedule_lookup_failed booking_id=%s error=%s", booking.id, e)
+            return empty
+
+    def record_installment_payment(self, booking_id: str, admin_id: str, milestone_id: str, amount: float,
+                                   method: str = "cash", utr_number: str = None, cheque_number: str = None,
+                                   note: str = None) -> dict:
+        """Admin records an installment payment collected outside the gateway
+        (cash/cheque/RTGS) against one milestone of a booking's payment plan,
+        from the Booking Detail screen. Reuses servicePayment.record_cash_payment
+        untouched - owner_id/owner_role are the booking's REAL customer (not the
+        admin), so the milestone settles exactly like a customer-self-recorded
+        payment would; recorded_by_admin_id is the only audit difference.
+        Raises ValueError('not_found') / ValueError('booking_not_booked') /
+        ValueError('milestone_not_found') / whatever record_cash_payment itself
+        raises (invalid_method / utr_number_required / cheque_number_required /
+        the installment guard-rail codes).
+
+        NOTE: a milestone's own "booking_id" column is the booking-APPLICATION
+        DOCUMENT's id, never divine_bookings.id (see
+        service_document.py::get_booking_application_document_id) - the
+        ownership check below resolves THAT id via booking.payment_id before
+        comparing, rather than comparing against the path's booking_id directly."""
+        try:
+            booking = self._persistence.get_by_id(booking_id)
+            if not booking:
+                raise ValueError("not_found")
+            if (getattr(booking, "status", None) or "") != "booked":
+                raise ValueError("booking_not_booked")
+
+            document_id = self._document_service.get_booking_application_document_id(booking.payment_id)
+            milestone = self._milestone_persistence.get(milestone_id)
+            if not milestone or not document_id or getattr(milestone, "booking_id", None) != document_id:
+                raise ValueError("milestone_not_found")
+
+            self._payment_service.record_cash_payment(
+                amount, owner_id=booking.customer_id, owner_role="customer", note=note,
+                purpose="installment", inventory_id=booking.inventory_id,
+                installment_no=milestone.milestone_no, due_date=milestone.due_date,
+                method=method, utr_number=utr_number, cheque_number=cheque_number,
+                recorded_by_admin_id=admin_id,
+            )
+            return self.get_detail(booking_id)
+        except ValueError:
+            raise
+        except Exception:
+            logger.exception("booking_kyc.record_installment_payment_failed booking_id=%s milestone_id=%s",
+                              booking_id, milestone_id)
+            raise RuntimeError("record_installment_payment_failed")
+
+    def get_allotment_letter(self, booking_id: str):
+        """(pdf_bytes, filename) for the booking's allotment letter - the
+        customer's already-uploaded, signed Booking Application Form PDF (the
+        same stored file serviceZoho mirrors to CRM) - for the admin's Booking
+        Detail screen. Raises ValueError('not_found') / ValueError('not_uploaded')."""
+        booking = self._persistence.get_by_id(booking_id)
+        if not booking:
+            raise ValueError("not_found")
+        pdf_bytes, filename = self._document_service.get_booking_application_bytes(booking.payment_id)
+        if not pdf_bytes:
+            raise ValueError("not_uploaded")
+        return pdf_bytes, filename
 
     def _require_reviewable(self, booking):
         """Only a booking still awaiting review can be Approved/Rejected/Cancelled -
@@ -426,6 +540,8 @@ class serviceBookingKyc:
             if method == "cash":
                 office = self._cash_pickup_office(getattr(booking, "project_name", None))
                 return f"Please collect your cash refund from our office at {office} within 5-7 business days."
+            if method == "cheque":
+                return "A cheque refund will be issued by our team within 5-7 business days."
             return ("A manual bank transfer (NEFT/RTGS) refund is being processed by our team and will "
                     "be credited within 5-7 business days.")
         except Exception:  # pragma: no cover - defensive

@@ -311,8 +311,9 @@ class PaymentCashRequestDTO(BaseModel):
     amount: float = Field(..., gt=0, description="Amount in INR (rupees) already collected/transferred")
     # "cash" (default, backward compatible) or "rtgs_neft" - a bank transfer with no
     # gateway transaction, identified instead by the customer-entered utr_number.
-    method: Literal["cash", "rtgs_neft"] = "cash"
+    method: Literal["cash", "rtgs_neft", "cheque"] = "cash"
     utr_number: Optional[str] = Field(None, max_length=50, description="Required when method='rtgs_neft'")
+    cheque_number: Optional[str] = Field(None, max_length=50, description="Required when method='cheque'")
     note: Optional[str] = Field(None, max_length=500)
     purpose: Literal["plot_booking", "installment", "other"] = "other"
     # For "plot_booking": the unit to lock. For "installment" (optional): which
@@ -486,10 +487,39 @@ class BookingDecisionHistoryItemDTO(BaseModel):
     created_at: Optional[datetime]
 
 
+class BookingPaymentScheduleRowDTO(BaseModel):
+    """One milestone row of the installment payment plan, mirroring
+    serviceMilestones.enriched_schedule's row shape exactly."""
+    id: str
+    label: str
+    percent: Optional[float] = None
+    due_days: Optional[int] = None
+    due_date: Optional[str] = None
+    amount: Optional[float] = None
+    status: Literal["paid", "overdue", "due", "upcoming"]
+    pay_enabled_from: Optional[str] = None
+    paid_on: Optional[str] = None
+    paid_payment_id: Optional[str] = None
+
+
+class BookingNextDueDTO(BaseModel):
+    """The customer's next unpaid milestone, mirroring
+    serviceMilestones._next_due's shape exactly - NOT the same shape as a
+    BookingPaymentScheduleRowDTO row (different field names, plus reminder info)."""
+    milestone_id: str
+    label: str
+    amount: Optional[float] = None
+    due_date: Optional[str] = None
+    days_until_due: Optional[int] = None
+    status: Literal["paid", "overdue", "due", "upcoming"]
+    last_reminder_kind: Optional[str] = None
+    last_reminder_at: Optional[str] = None
+
+
 class BookingDetailDTO(BaseModel):
     """GET /admin/bookings/{id} - the full Booking Detail screen: customer +
-    payment details, the KYC document checklist, and the decision-history
-    timeline, in one call."""
+    payment details, the KYC document checklist, the installment payment
+    plan, and the decision-history timeline, in one call."""
     id: str
     status: Literal["pending_kyc_review", "booked", "rejected", "cancelled"]
     kyc_status: Literal["pending", "verified", "needs_resubmission", "rejected"]
@@ -509,10 +539,26 @@ class BookingDetailDTO(BaseModel):
     # razorpay_payment_id for one made before the Zoho cutover - never both.
     gateway_payment_id: Optional[str] = None
     utr_number: Optional[str] = None
+    cheque_number: Optional[str] = None
     documents: List[BookingDocumentChecklistItemDTO]
     decision_history: List[BookingDecisionHistoryItemDTO]
+    # Installment payment plan - [] until a booking-application document with a
+    # payment schedule has been uploaded (see serviceMilestones.ensure_for_customer).
+    payment_schedule: List[BookingPaymentScheduleRowDTO] = []
+    next_due: Optional[BookingNextDueDTO] = None
+    amount_received: Optional[float] = None
     created_at: Optional[datetime]
     last_activity_at: Optional[datetime]
+
+
+class AdminInstallmentPaymentRequestDTO(BaseModel):
+    """POST /admin/bookings/{booking_id}/installments/{milestone_id}/payments -
+    admin recording an installment payment collected outside the gateway."""
+    amount: float = Field(..., gt=0)
+    method: Literal["cash", "cheque", "rtgs_neft"] = "cash"
+    utr_number: Optional[str] = Field(None, max_length=50, description="Required when method='rtgs_neft'")
+    cheque_number: Optional[str] = Field(None, max_length=50, description="Required when method='cheque'")
+    note: Optional[str] = Field(None, max_length=500)
 
 
 class RevenueTransactionItemDTO(BaseModel):

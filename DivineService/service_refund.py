@@ -11,7 +11,7 @@ REFUND_STATUSES = (
     "cash_refund_pending", "cash_collected",
     "bank_transfer_pending", "bank_transfer_completed",
 )
-PAYMENT_METHODS = ("zoho", "cash", "rtgs_neft", "razorpay")
+PAYMENT_METHODS = ("zoho", "cash", "rtgs_neft", "razorpay", "cheque")
 # cash/rtgs_neft never had a gateway; 'razorpay' no longer does either - that
 # gateway was retired at the Zoho Payments cutover, so any pre-cutover payment's
 # refund is now confirmed manually the same way, via mark_collected.
