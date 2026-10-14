@@ -258,10 +258,19 @@ def _render_demand_letter_pdf(form_data: dict, customer_id: str, issued_on=None)
     lead = col[0] + col[1] + col[2] + col[3]
 
     def _total_row(label, value, in_words=False):
+        # The in-words value spans every column after Particulars so long amounts
+        # stay inside the table; it still shrinks if even that is too narrow.
+        label_w = col[0] if in_words else lead
+        value_w = sum(col) - label_w
         pdf.set_font("Helvetica", "B", 8)
-        pdf.cell(lead, 7, _latin(label), border=1)
+        pdf.cell(label_w, 7, _latin(label), border=1)
         pdf.set_font("Helvetica", "" if in_words else "B", 7.5 if in_words else 8)
-        pdf.cell(col[4], 7, _latin(value if in_words else _inr(value)),
+        if in_words:
+            size = 7.5
+            while size > 4.5 and pdf.get_string_width(_latin(value)) > value_w - 2:
+                size -= 0.25
+                pdf.set_font_size(size)
+        pdf.cell(value_w, 7, _latin(value if in_words else _inr(value)),
                  border=1, align="L" if in_words else "R")
         pdf.ln()
 

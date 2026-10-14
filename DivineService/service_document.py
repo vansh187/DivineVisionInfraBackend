@@ -705,7 +705,13 @@ class serviceDocument:
         if not isinstance(form_data, dict):
             form_data = {}
 
-        from DivineService.service_demand_letter import generate_demand_letter_pdf
+        from DivineService.service_demand_letter import _PLOT_KEYS, _first, generate_demand_letter_pdf
+        if not _first(form_data, _PLOT_KEYS):
+            # The application form doesn't always carry the plot number - the
+            # booking row for the same payment does.
+            unit_number = self._booking_unit_number(getattr(doc, "payment_id", None))
+            if unit_number:
+                form_data = {**form_data, "unit_number": unit_number}
         pdf_bytes = generate_demand_letter_pdf(form_data, doc.owner_id)
         return pdf_bytes, f"demand-letter-{document_id}.pdf"
 
@@ -721,6 +727,17 @@ class serviceDocument:
         signed_url = self._sign_url(doc.storage_path, bucket=bucket)
         return doc, signed_url, DEFAULT_SIGNED_URL_EXPIRY_SECONDS
 
+    def _booking_unit_number(self, payment_id: str):
+        """Plot/unit number of the divine_bookings row for a payment, or None. Never raises."""
+        try:
+            if not payment_id or self._booking_persistence is None:
+                return None
+            booking = self._booking_persistence.get_by_payment_id(payment_id)
+            return getattr(booking, "unit_number", None) if booking else None
+        except Exception as e:
+            logger.warning("booking_unit_number_lookup_failed payment_id=%s error=%s", payment_id, e)
+            return None
+
     def get_booking_application_document_id(self, payment_id: str):
         """The booking-application document's own id for a given plot-booking
         payment - this, NOT divine_bookings.id, is what serviceMilestones calls
@@ -729,13 +746,19 @@ class serviceDocument:
         id so a multi-plot customer's separate booking-application documents each
         get their own isolated milestone plan). Returns None when nothing has
         been uploaded against this payment yet. Never raises."""
+        doc = self.get_booking_application_document(payment_id)
+        return getattr(doc, "id", None) if doc else None
+
+    def get_booking_application_document(self, payment_id: str):
+        """The latest booking-application document row for a given plot-booking
+        payment (form_data included), or None when nothing has been uploaded
+        against it yet. Never raises."""
         try:
             if not payment_id:
                 return None
-            doc = self._persistence.get_latest_by_payment_id(payment_id)
-            return getattr(doc, "id", None) if doc else None
+            return self._persistence.get_latest_by_payment_id(payment_id)
         except Exception as e:
-            logger.warning("get_booking_application_document_id_failed payment_id=%s error=%s", payment_id, e)
+            logger.warning("get_booking_application_document_failed payment_id=%s error=%s", payment_id, e)
             return None
 
     def get_booking_application_bytes(self, payment_id: str):
