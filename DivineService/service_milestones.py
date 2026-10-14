@@ -93,6 +93,8 @@ class serviceMilestones:
                  profile_persistence: persistenceCustomerProfile = None,
                  payment_persistence: persistencePayment = None):
         self._persistence = milestone_persistence or persistenceMilestone()
+        from Divinepersistence import persistenceOfflineSubmission
+        self._offline_submissions = persistenceOfflineSubmission()
         self._profile = profile_persistence or persistenceCustomerProfile()
         self._payments = payment_persistence or persistencePayment()
 
@@ -286,12 +288,17 @@ class serviceMilestones:
         today = ist_today()
         records = sorted(records, key=lambda r: (getattr(r, "milestone_no", 0) or 0))
         self._sync_statuses(records, today)
+        pending_ids = self._offline_submissions.pending_milestones(
+            list({getattr(r, "booking_id", None) for r in records if getattr(r, "booking_id", None)})
+        )
 
         rows = []
         for r in records:
             is_paid = (getattr(r, "status", None) == "paid")
             due = getattr(r, "due_date", None)
-            status = "paid" if is_paid else compute_status(due, False, today)
+            status = "paid" if is_paid else (
+                "pending_review" if getattr(r, "id", None) in pending_ids else compute_status(due, False, today)
+            )
             rows.append({
                 "id": getattr(r, "id", None),
                 "label": getattr(r, "label", None),

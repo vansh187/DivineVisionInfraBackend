@@ -4,7 +4,7 @@ import os
 import re
 import uuid
 from datetime import datetime, timezone
-from Divinepersistence import persistencePayment, persistenceInventory, persistenceBooking
+from Divinepersistence import persistencePayment, persistenceInventory, persistenceBooking, persistenceOfflineSubmission
 from DivineService.service_payment_gateway import servicePaymentGateway
 
 logger = logging.getLogger(__name__)
@@ -35,6 +35,62 @@ class servicePayment:
         self._booking_persistence = booking_persistence or persistenceBooking()
         self._milestone_service_override = milestone_service
         self._gateway = gateway or servicePaymentGateway()
+        self._offline_submissions = persistenceOfflineSubmission()
+
+    def submit_offline_installment(self, customer_id, amount, installment_no, due_date, method, utr_number,
+                                   booking_id=None):
+        self._validate_amount(amount)
+        method = (method or "").strip().lower()
+        utr_number = (utr_number or "").strip() or None
+        if method not in ("cash", "rtgs_neft"):
+            raise ValueError("invalid_method")
+        if method == "rtgs_neft" and not utr_number:
+            raise ValueError("utr_number_required")
+        if method == "cash" and utr_number:
+            raise ValueError("utr_not_allowed_for_cash")
+        due_date = self._clean_due_date(due_date)
+        if not due_date:
+            raise ValueError("invalid_due_date")
+        try:
+            from datetime import date
+            due_date = date.fromisoformat(due_date)
+        except ValueError:
+            raise ValueError("invalid_due_date")
+        svc = self._milestones()
+        if svc is None:
+            raise ValueError("no_booking")
+        milestone, code = svc.validate_installment(
+            customer_id, installment_no, amount, due_date, inventory_id=booking_id,
+        )
+        if code:
+            raise ValueError(code)
+        if not milestone or not getattr(milestone, "booking_id", None):
+            raise ValueError("no_booking")
+        if booking_id and milestone.booking_id != booking_id:
+            raise ValueError("booking_not_owned")
+        actual_due = getattr(milestone, "due_date", None)
+        if actual_due and str(actual_due)[:10] != due_date.isoformat():
+            raise ValueError("installment_due_date_mismatch")
+        return self._offline_submissions.create(customer_id, milestone, amount, method, utr_number, due_date)
+
+    def list_offline_submissions(self, status="pending_review"):
+        return self._offline_submissions.list(status)
+
+    def decide_offline_submission(self, submission_id, reviewer_id, decision, reason=None):
+        if decision not in ("approved", "rejected"):
+            raise ValueError("invalid_decision")
+        result = self._offline_submissions.decide(submission_id, reviewer_id, decision, reason)
+        if decision == "approved":
+            try:
+                payment = self._persistence.get_by_id(result.payment_id)
+                milestones = self._milestones()
+                milestone = milestones.milestone_by_payment(result.customer_id, result.payment_id) if milestones else None
+                if payment and milestone:
+                    self._send_installment_receipt(payment, milestone)
+            except Exception as e:
+                logger.warning("payment.offline_submission.receipt_failed submission_id=%s error=%s",
+                               submission_id, e)
+        return result
 
     def _milestones(self):
         """Lazily built so a plain payment flow never imports the milestone stack,

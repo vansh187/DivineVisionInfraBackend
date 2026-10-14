@@ -10,12 +10,34 @@ from DivineDTO.models import (
     PaymentVerifyRequestDTO,
     PaymentCashRequestDTO,
     PaymentOutDTO,
+    OfflinePaymentSubmissionDTO, OfflinePaymentSubmissionOutDTO,
 )
 from DivineService import servicePayment
 from DivineService.auth import get_current_user
 
 router = APIRouter(prefix="/payments", tags=["payments"])
 _payment_service = servicePayment()
+
+
+@router.post("/offline-submissions", response_model=OfflinePaymentSubmissionOutDTO, status_code=201)
+def submit_offline_installment(dto: OfflinePaymentSubmissionDTO, current_user: dict = Depends(get_current_user)):
+    if current_user.get("role") != "customer":
+        raise HTTPException(status_code=403, detail="customer_only")
+    try:
+        record = _payment_service.submit_offline_installment(
+            current_user["sub"], dto.amount, dto.installment_no, dto.due_date,
+            dto.method, dto.utr_number, dto.booking_id,
+        )
+        return OfflinePaymentSubmissionOutDTO(
+            id=record.id, amount=float(record.amount), method=record.method, status=record.status,
+            installment_no=record.installment_no, utr_number=record.utr_number,
+            created_date=record.created_date,
+        )
+    except ValueError as e:
+        code = str(e)
+        raise HTTPException(status_code=409 if code == "duplicate_pending_submission" else 400, detail=code)
+    except Exception:
+        raise HTTPException(status_code=500, detail="internal_error")
 
 
 def _to_payment_out(record, verified: bool = None) -> PaymentOutDTO:
