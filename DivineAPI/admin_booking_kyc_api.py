@@ -118,8 +118,11 @@ _PDF_ERROR_STATUS = {
 def _pdf_download(build, booking_id: str, failure_code: str):
     """Streams a (pdf_bytes, filename) builder as an attachment, mapping the
     service's ValueError codes onto HTTP statuses."""
+    started = time.perf_counter()
     try:
         pdf_bytes, filename = build(booking_id)
+        logger.info("admin_document_download_ready booking_id=%s kind=%s bytes=%s elapsed_ms=%.2f",
+                    booking_id, failure_code, len(pdf_bytes), (time.perf_counter() - started) * 1000)
         return StreamingResponse(
             io.BytesIO(pdf_bytes), media_type="application/pdf",
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},

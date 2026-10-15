@@ -1,6 +1,8 @@
 import json
 import logging
 import os
+import time
+from types import SimpleNamespace
 from Divinepersistence import persistenceBooking, persistenceInventory, persistenceCustomer, persistenceMilestone
 from DivineService.service_payment import servicePayment
 from DivineService.service_document import serviceDocument
@@ -411,6 +413,7 @@ class serviceBookingKyc:
         (customerProfilePdf.ts ProfilePdfInput): identity from the customer
         profile, plot + schedule from this booking's bookings[] entry, with the
         booking row and the filed form as fallbacks."""
+        started = time.perf_counter()
         booking = self._persistence.get_by_id(booking_id)
         if not booking:
             raise ValueError("not_found")
@@ -428,22 +431,122 @@ class serviceBookingKyc:
                 form = {}
         form = form if isinstance(form, dict) else {}
 
-        profile, entry = self._customer_booking(booking.customer_id, getattr(doc, "id", None))
+        profile, entry = self._customer_booking(
+            booking.customer_id, getattr(doc, "id", None), form
+        )
+        logger.debug("booking_kyc.letter_context_ms booking_id=%s elapsed=%.2f",
+                     booking_id, (time.perf_counter() - started) * 1000)
         return booking, form, self._letter_fields(booking, form, profile, entry)
 
-    def _customer_booking(self, customer_id: str, document_id: str):
-        """(profile, bookings[] entry for this application document) exactly as
-        GET /customer/profile assembles them. Either may be None - a profile
-        hiccup degrades the letter to booking/form data instead of failing it."""
+    def _customer_booking(self, customer_id: str, document_id: str, form: dict):
+        """Load just the customer fields and milestones needed by one letter.
+
+        Building the full customer profile here used to enumerate every booking,
+        ensure/backfill milestones, and sync due statuses on the download request.
+        Those side effects are unnecessary for rendering a letter and made its
+        latency grow with the customer's booking history.
+        """
         try:
             from DivineService.service_customer_profile import serviceCustomerProfile
-            profile = serviceCustomerProfile().get_profile(customer_id, "customer")
+            from DivineService.service_demand_letter import _AREA_KEYS, _NAME_KEYS
+
+            profile_service = serviceCustomerProfile()
+            persistence = profile_service._persistence
+            customer = persistence.get_customer(customer_id)
+            identity = persistence.get_identity_extract(customer_id) or {}
+
+            if customer is None and not identity:
+                profile = None
+            else:
+                first = profile_service._text(getattr(customer, "first_name", None)) or ""
+                last = profile_service._text(getattr(customer, "last_name", None)) or ""
+                full_name = " ".join(part for part in (first, last) if part)
+                full_name = full_name or profile_service._text(identity.get("name"))
+
+                care_of = profile_service._text(identity.get("careof") or identity.get("care_of"))
+                house = profile_service._text(identity.get("house"))
+                street = profile_service._text(identity.get("street"))
+                line1 = ", ".join(str(part) for part in (care_of, house, street) if part)
+                landmark = profile_service._text(identity.get("landmark"))
+                location = profile_service._text(identity.get("location"))
+                line2 = ", ".join(dict.fromkeys(
+                    str(part) for part in (landmark, location) if part
+                ))
+                city = (profile_service._text(identity.get("vtc"))
+                        or profile_service._text(identity.get("subdistrict"))
+                        or profile_service._text(identity.get("district")))
+                address = profile_service._compose_address_text(
+                    line1 or None, line2 or None, city, profile_service._text(identity.get("state")),
+                    profile_service._text(identity.get("pincode") or identity.get("pc")),
+                )
+                profile = SimpleNamespace(
+                    full_name=full_name,
+                    gender=profile_service._normalise_gender(profile_service._text(identity.get("gender"))),
+                    address_text=address,
+                    email=getattr(customer, "email", None),
+                    phone=getattr(customer, "phone", None),
+                )
+
+            def first_present(keys):
+                return next((form.get(key) for key in keys
+                             if form.get(key) not in (None, "", [])), None)
+
+            total = first_present(("total_consideration", "totalConsideration", "total_price",
+                                   "totalPrice", "consideration", "sale_value", "saleValue",
+                                   "total_amount", "totalAmount"))
+            plot_area = first_present(_AREA_KEYS)
+            unit_number = first_present(("unit_number", "unitNumber", "unit_no", "unitNo",
+                                         "plot_number", "plotNumber", "plot_no", "plotNo"))
+            township = first_present(("township_label", "townshipLabel", "township", "townshipName",
+                                      "township_name", "project_name", "projectName", "project"))
+            unit_type = first_present(("unit_type", "unitType"))
+            raw_schedule = first_present(("payment_schedule", "paymentSchedule", "payment_plan",
+                                          "paymentPlan", "installments", "schedule")) or []
+
+            rows = []
+            try:
+                rows = self._milestone_persistence.list_for_booking(document_id) if document_id else []
+            except Exception as exc:
+                logger.warning("booking_kyc.letter_milestones_lookup_failed booking_id=%s error=%s",
+                               document_id, exc)
+            schedule = [SimpleNamespace(
+                label=getattr(row, "label", None), percent=getattr(row, "percent", None),
+                due_date=getattr(row, "due_date", None),
+                amount=profile_service._to_int_rupees(getattr(row, "amount", None)),
+                status=getattr(row, "status", None),
+            ) for row in rows]
+            if not schedule and isinstance(raw_schedule, list):
+                schedule = [SimpleNamespace(
+                    label=row.get("label"), percent=row.get("percent"),
+                    due_date=row.get("due_date"),
+                    amount=profile_service._to_int_rupees(row.get("amount")),
+                    status=row.get("status"),
+                ) for row in raw_schedule if isinstance(row, dict)]
+            paid_total = sum(
+                getattr(row, "amount", 0) or 0
+                for row in schedule if getattr(row, "status", None) == "paid"
+            )
+            form_amount_received = profile_service._to_int_rupees(
+                first_present(("amount_received", "amountReceived", "received_amount",
+                               "receivedAmount", "paid_amount", "paidAmount"))
+            )
+
+            entry = SimpleNamespace(
+                document_id=document_id,
+                full_name=(profile.full_name if profile else first_present(_NAME_KEYS)),
+                township_label=township,
+                project_name=first_present(("project_name", "projectName", "project")),
+                unit_number=unit_number,
+                plot_area_sq_yd=plot_area,
+                unit_type=unit_type,
+                total_consideration=profile_service._to_int_rupees(total),
+                amount_received=paid_total if rows else form_amount_received,
+                payment_schedule=schedule,
+            )
+            return profile, entry
         except Exception as e:
             logger.warning("booking_kyc.letter_profile_lookup_failed customer_id=%s error=%s", customer_id, e)
             return None, None
-        entries = list(profile.bookings or []) + [profile.booking]
-        entry = next((b for b in entries if b is not None and b.document_id == document_id), None)
-        return profile, entry
 
     def _letter_fields(self, booking, form: dict, profile, entry) -> dict:
         from DivineService.service_demand_letter import _ADDRESS_KEYS, _AREA_KEYS, _NAME_KEYS, _first

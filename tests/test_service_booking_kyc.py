@@ -621,13 +621,37 @@ def _letter_profile(document_id="DOC-APP-1"):
 def _letter_service(monkeypatch, profile=None, booking_status="booked", form_data=None):
     svc, persistence, inventory, payment_service, document_service, customer_persistence, *_ = _service()
     persistence.get_by_id.return_value = _booking(status=booking_status, unit_number="B2-A")
+    profile = profile or _letter_profile()
+    entry = profile.booking
+    if form_data is None:
+        form_data = {
+            "applicant_name": "vansh duggal",
+            "township_label": entry.township_label,
+            "plot_area_sq_yd": entry.plot_area_sq_yd,
+            "total_consideration": entry.total_consideration,
+            "amount_received": entry.amount_received,
+            "payment_schedule": [row.model_dump() for row in entry.payment_schedule],
+        }
     document_service.get_booking_application_document.return_value = SimpleNamespace(
-        id="DOC-APP-1", form_data=form_data if form_data is not None else {"applicant_name": "vansh duggal"},
+        id="DOC-APP-1", form_data=form_data,
     )
     import DivineService.service_customer_profile as profile_module
-    fake = MagicMock()
-    fake.return_value.get_profile.return_value = profile or _letter_profile()
+    profile_persistence = MagicMock()
+    profile_persistence.get_customer.return_value = SimpleNamespace(
+        first_name=profile.full_name.split(" ")[0], last_name=" ".join(profile.full_name.split(" ")[1:]),
+        email=profile.email, phone=profile.phone,
+    )
+    profile_persistence.get_identity_extract.return_value = {
+        "gender": profile.gender,
+        "house": "B-1050", "vtc": "Gurgaon", "state": "Haryana", "pincode": "122017",
+    }
+    fake = MagicMock(return_value=profile_module.serviceCustomerProfile(persistence=profile_persistence))
     monkeypatch.setattr(profile_module, "serviceCustomerProfile", fake)
+    svc._milestone_persistence.list_for_booking.return_value = [
+        SimpleNamespace(label=row.label, percent=row.percent, due_date=row.due_date,
+                        amount=row.amount, status=row.status)
+        for row in entry.payment_schedule
+    ]
     return svc, document_service, customer_persistence
 
 
@@ -695,7 +719,7 @@ def test_allotment_letter_still_renders_when_profile_lookup_fails(monkeypatch):
     svc, document_service, customer_persistence = _letter_service(monkeypatch)
     import DivineService.service_customer_profile as profile_module
     broken = MagicMock()
-    broken.return_value.get_profile.side_effect = RuntimeError("db down")
+    broken.return_value._persistence.get_customer.side_effect = RuntimeError("db down")
     monkeypatch.setattr(profile_module, "serviceCustomerProfile", broken)
     customer_persistence.get_by_id.return_value = SimpleNamespace(
         first_name="Rehan", last_name="Sharma", email="r@example.com", phone="9000000020")
