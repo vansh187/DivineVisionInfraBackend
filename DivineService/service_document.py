@@ -300,7 +300,10 @@ class serviceDocument:
             raise RuntimeError("storage_not_configured")
         download_url = f"{self._supabase_url}/storage/v1/object/{bucket or self._bucket}/{object_path}"
         try:
-            resp = requests.get(
+            # Reuse the service's pooled HTTP session. The previous top-level
+            # requests.get opened a fresh connection for every form download,
+            # adding a TCP/TLS handshake to the storage round trip.
+            resp = self._http.get(
                 download_url,
                 headers={"Authorization": f"Bearer {self._service_key}"},
                 timeout=30,

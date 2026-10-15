@@ -336,7 +336,7 @@ def test_download_from_storage_raises_when_not_configured():
         assert str(e) == "storage_not_configured"
 
 
-@patch("DivineService.service_document.requests.get")
+@patch("requests.Session.get")
 def test_download_from_storage_raises_on_non_200(mock_get):
     mock_get.return_value = MagicMock(status_code=404)
     svc, _ = _service()
@@ -347,7 +347,7 @@ def test_download_from_storage_raises_on_non_200(mock_get):
         assert str(e) == "storage_download_failed:404"
 
 
-@patch("DivineService.service_document.requests.get")
+@patch("requests.Session.get")
 def test_download_from_storage_raises_on_network_error(mock_get):
     mock_get.side_effect = requests.exceptions.ConnectionError("boom")
     svc, _ = _service()
@@ -358,7 +358,7 @@ def test_download_from_storage_raises_on_network_error(mock_get):
         assert str(e) == "storage_unreachable"
 
 
-@patch("DivineService.service_document.requests.get")
+@patch("requests.Session.get")
 def test_download_from_storage_returns_bytes_on_success(mock_get):
     mock_get.return_value = MagicMock(status_code=200, content=b"filedata")
     svc, _ = _service()
