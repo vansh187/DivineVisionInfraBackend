@@ -608,20 +608,57 @@ def test_admin_installment_payment_requires_admin_auth():
     assert resp.status_code in (401, 403)
 
 
-# ---------- allotment letter ----------
+# ---------- booking documents: application form, allotment letter, demand letter ----------
 
-def test_allotment_letter_requires_admin_auth():
-    resp = client.get(f"/admin/bookings/{_BOOKING_ID}/allotment-letter")
-    assert resp.status_code in (401, 403)
+_DOCUMENT_PATHS = ("application-form", "allotment-letter", "demand-letter")
 
 
-def test_allotment_letter_404s_when_no_booking_application_uploaded():
-    resp = client.get(f"/admin/bookings/{_BOOKING_ID}/allotment-letter", headers=_admin_headers())
+def test_booking_documents_require_admin_auth():
+    for path in _DOCUMENT_PATHS:
+        resp = client.get(f"/admin/bookings/{_BOOKING_ID}/{path}")
+        assert resp.status_code in (401, 403), path
+
+
+def test_booking_documents_404_for_unknown_booking():
+    for path in _DOCUMENT_PATHS:
+        resp = client.get(f"/admin/bookings/BKG-DOES-NOT-EXIST/{path}", headers=_admin_headers())
+        assert resp.status_code == 404, path
+        assert resp.json()["detail"] == "not_found"
+
+
+def test_application_form_404s_when_no_booking_application_uploaded():
+    resp = client.get(f"/admin/bookings/{_BOOKING_ID}/application-form", headers=_admin_headers())
     assert resp.status_code == 404
     assert resp.json()["detail"] == "not_uploaded"
 
 
-def test_allotment_letter_404s_for_unknown_booking():
-    resp = client.get("/admin/bookings/BKG-DOES-NOT-EXIST/allotment-letter", headers=_admin_headers())
-    assert resp.status_code == 404
-    assert resp.json()["detail"] == "not_found"
+def test_generated_letters_409_until_booking_is_booked():
+    # A fresh booking - _BOOKING_ID itself gets approved by earlier tests.
+    customer = persistenceCustomer().create_user(
+        username=f"letters_pending_{uuid.uuid4().hex[:8]}", password_hash="not-used",
+        phone="9000000098", email="letters.pending@example.com", first_name="Neha", last_name="Rao",
+    )
+    unit_id = str(uuid.uuid4())
+    persistenceInventory().upsert_unit(
+        id=unit_id, project_name="Green Meadows", city="Karnal", unit_number=f"C-{uuid.uuid4().hex[:8]}",
+        area_sqmt=200, area_sqyd=239, status="available",
+    )
+    pending_id = servicePayment().record_cash_payment(
+        amount=200000, owner_id=customer.id, owner_role="customer",
+        purpose="plot_booking", inventory_id=unit_id, method="rtgs_neft", utr_number="UTR_LETTERS_1",
+    ).booking_id
+
+    for path in ("allotment-letter", "demand-letter"):
+        resp = client.get(f"/admin/bookings/{pending_id}/{path}", headers=_admin_headers())
+        assert resp.status_code == 409, path
+        assert resp.json()["detail"] == "booking_not_booked"
+
+
+def test_generated_letters_download_as_pdf_for_booked_plot():
+    booking_id, customer_id, rows = _setup_booked_booking_with_payment_schedule()
+    for path, filename in (("allotment-letter", "Allotment-Letter"), ("demand-letter", "Demand-Letter")):
+        resp = client.get(f"/admin/bookings/{booking_id}/{path}", headers=_admin_headers())
+        assert resp.status_code == 200, resp.text
+        assert resp.headers["content-type"] == "application/pdf"
+        assert f'filename="{filename}-{booking_id}.pdf"' in resp.headers["content-disposition"]
+        assert resp.content.startswith(b"%PDF")

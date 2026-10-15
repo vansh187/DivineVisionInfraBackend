@@ -100,6 +100,8 @@ app.add_middleware(
     # needed - dropping it closes that gap without affecting how the frontend calls this API.
     allow_methods=["*"],
     allow_headers=["*"],
+    # Lets browser clients read the server-chosen filename on PDF downloads.
+    expose_headers=["Content-Disposition"],
 )
 
 

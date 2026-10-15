@@ -108,24 +108,49 @@ def reject_booking(booking_id: str, dto: BookingDecisionRequestDTO, current_admi
         logger.debug("admin_reject_booking_latency_ms=%.2f", (time.monotonic() - start) * 1000)
 
 
-@router.get("/{booking_id}/allotment-letter")
-def get_allotment_letter(booking_id: str, current_admin: dict = Depends(get_current_admin)):
-    """The customer's already-uploaded, signed Booking Application Form PDF -
-    the "allotment letter" for this booking - for admin download from the
-    Booking Detail screen."""
+_PDF_ERROR_STATUS = {
+    "not_found": 404,
+    "not_uploaded": 404,
+    "booking_not_booked": 409,
+}
+
+
+def _pdf_download(build, booking_id: str, failure_code: str):
+    """Streams a (pdf_bytes, filename) builder as an attachment, mapping the
+    service's ValueError codes onto HTTP statuses."""
     try:
-        pdf_bytes, filename = _booking_service.get_allotment_letter(booking_id)
+        pdf_bytes, filename = build(booking_id)
         return StreamingResponse(
             io.BytesIO(pdf_bytes), media_type="application/pdf",
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
     except ValueError as e:
-        if str(e) == "not_uploaded":
-            raise HTTPException(status_code=404, detail="not_uploaded")
-        raise HTTPException(status_code=404, detail="not_found")
+        code = str(e)
+        raise HTTPException(status_code=_PDF_ERROR_STATUS.get(code, 404),
+                            detail=code if code in _PDF_ERROR_STATUS else "not_found")
     except Exception:
-        logger.exception("admin_get_allotment_letter_failed booking_id=%s", booking_id)
-        raise HTTPException(status_code=500, detail="allotment_letter_failed")
+        logger.exception("admin_%s booking_id=%s", failure_code, booking_id)
+        raise HTTPException(status_code=500, detail=failure_code)
+
+
+@router.get("/{booking_id}/application-form")
+def get_application_form(booking_id: str, current_admin: dict = Depends(get_current_admin)):
+    """The customer's own uploaded, signed Booking Application Form PDF, as stored."""
+    return _pdf_download(_booking_service.get_application_form, booking_id, "application_form_failed")
+
+
+@router.get("/{booking_id}/allotment-letter")
+def get_allotment_letter(booking_id: str, current_admin: dict = Depends(get_current_admin)):
+    """Generated Provisional Allotment Letter for a booked plot (409
+    booking_not_booked otherwise)."""
+    return _pdf_download(_booking_service.get_allotment_letter, booking_id, "allotment_letter_failed")
+
+
+@router.get("/{booking_id}/demand-letter")
+def get_demand_letter(booking_id: str, current_admin: dict = Depends(get_current_admin)):
+    """Generated Demand Letter for a booked plot, from its live payment schedule
+    (409 booking_not_booked otherwise)."""
+    return _pdf_download(_booking_service.get_demand_letter, booking_id, "demand_letter_failed")
 
 
 _INSTALLMENT_PAYMENT_ERROR_STATUS = {

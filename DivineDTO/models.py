@@ -323,6 +323,46 @@ class PaymentCashRequestDTO(BaseModel):
     due_date: Optional[str] = Field(None, max_length=10)
 
 
+class OfflinePaymentSubmissionDTO(BaseModel):
+    amount: float = Field(..., gt=0)
+    purpose: Literal["installment"]
+    installment_no: int = Field(..., ge=1)
+    booking_id: Optional[str] = Field(None, max_length=36)
+    due_date: str = Field(..., min_length=10, max_length=10)
+    method: Literal["cash", "rtgs_neft"]
+    utr_number: Optional[str] = Field(None, max_length=50)
+
+
+class OfflinePaymentSubmissionOutDTO(BaseModel):
+    id: str
+    amount: float
+    method: str
+    status: str
+    installment_no: int
+    utr_number: Optional[str] = None
+    created_date: datetime
+
+
+class OfflinePaymentSubmissionAdminDTO(OfflinePaymentSubmissionOutDTO):
+    customer_id: str
+    customer_name: Optional[str] = None
+    booking_id: str
+    milestone_id: str
+    milestone_label: Optional[str] = None
+    due_date: Optional[str] = None
+    inventory_id: Optional[str] = None
+    project_name: Optional[str] = None
+    unit_number: Optional[str] = None
+    reviewer_id: Optional[str] = None
+    reviewed_at: Optional[datetime] = None
+    decision: Optional[str] = None
+    reason: Optional[str] = None
+
+
+class OfflinePaymentRejectDTO(BaseModel):
+    reason: Optional[str] = Field(None, max_length=500)
+
+
 class PaymentOutDTO(BaseModel):
     id: str
     owner_id: str
@@ -496,7 +536,7 @@ class BookingPaymentScheduleRowDTO(BaseModel):
     due_days: Optional[int] = None
     due_date: Optional[str] = None
     amount: Optional[float] = None
-    status: Literal["paid", "overdue", "due", "upcoming"]
+    status: Literal["paid", "pending_review", "overdue", "due", "upcoming"]
     pay_enabled_from: Optional[str] = None
     paid_on: Optional[str] = None
     paid_payment_id: Optional[str] = None
@@ -1045,7 +1085,7 @@ class PaymentScheduleRowDTO(BaseModel):
     due_days: Optional[int] = None
     due_date: Optional[str] = None
     amount: Optional[int] = None
-    status: Optional[str] = None          # paid | due | overdue | upcoming
+    status: Optional[str] = None          # paid | pending_review | due | overdue | upcoming
     pay_enabled_from: Optional[str] = None  # due_date - 5 days
     paid_on: Optional[str] = None
     paid_payment_id: Optional[str] = None

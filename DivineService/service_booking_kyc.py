@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 from Divinepersistence import persistenceBooking, persistenceInventory, persistenceCustomer, persistenceMilestone
@@ -356,18 +357,131 @@ class serviceBookingKyc:
                               booking_id, milestone_id)
             raise RuntimeError("record_installment_payment_failed")
 
-    def get_allotment_letter(self, booking_id: str):
-        """(pdf_bytes, filename) for the booking's allotment letter - the
-        customer's already-uploaded, signed Booking Application Form PDF (the
-        same stored file serviceZoho mirrors to CRM) - for the admin's Booking
-        Detail screen. Raises ValueError('not_found') / ValueError('not_uploaded')."""
+    def get_application_form(self, booking_id: str):
+        """(pdf_bytes, filename) for the customer's own uploaded, signed Booking
+        Application Form PDF (the same stored file serviceZoho mirrors to CRM),
+        for the admin's Booking Detail screen. Available at any booking status.
+        Raises ValueError('not_found') / ValueError('not_uploaded')."""
         booking = self._persistence.get_by_id(booking_id)
         if not booking:
             raise ValueError("not_found")
-        pdf_bytes, filename = self._document_service.get_booking_application_bytes(booking.payment_id)
+        pdf_bytes, _ = self._document_service.get_booking_application_bytes(booking.payment_id)
         if not pdf_bytes:
             raise ValueError("not_uploaded")
-        return pdf_bytes, filename
+        return pdf_bytes, f"Booking-Application-Form-{booking.id}.pdf"
+
+    def get_allotment_letter(self, booking_id: str):
+        """(pdf_bytes, filename) for a generated Provisional Allotment Letter -
+        the same letter the customer site renders from GET /customer/profile.
+        Booked plots only. Raises ValueError('not_found') /
+        ValueError('booking_not_booked') / ValueError('not_uploaded')."""
+        booking, form, fields = self._letter_context(booking_id)
+        from DivineService.service_allotment_letter import generate_allotment_letter_pdf
+        return generate_allotment_letter_pdf(fields), f"Allotment-Letter-{booking.id}.pdf"
+
+    def get_demand_letter(self, booking_id: str):
+        """(pdf_bytes, filename) for the Demand Letter - the same generator as
+        the customer's GET /documents/{id}/demand-letter, but with the plot
+        number, payment schedule and received total taken from the live booking
+        and its milestones rather than only the form snapshot. Booked plots only.
+        Same error codes as get_allotment_letter."""
+        booking, form, fields = self._letter_context(booking_id)
+        from DivineService.service_demand_letter import (
+            _ADDRESS_KEYS, _AREA_KEYS, _NAME_KEYS, _first, generate_demand_letter_pdf,
+        )
+        merged = dict(form)
+        # Identity/plot fields only fill gaps in what the customer filed.
+        for form_key, keys, field in (("applicant_name", _NAME_KEYS, "name"),
+                                      ("applicant_address", _ADDRESS_KEYS, "address"),
+                                      ("plot_area_sq_yd", _AREA_KEYS, "plot_area_sq_yd")):
+            if not _first(form, keys) and fields.get(field):
+                merged[form_key] = fields[field]
+        # Plot number and money are authoritative from the booking + milestones.
+        for key, value in (("unit_number", fields.get("unit_no")),
+                           ("total_consideration", fields.get("total_amount")),
+                           ("amount_received", fields.get("amount_received")),
+                           ("payment_schedule", fields.get("schedule"))):
+            if value not in (None, "", []):
+                merged[key] = value
+        return generate_demand_letter_pdf(merged, booking.customer_id), f"Demand-Letter-{booking.id}.pdf"
+
+    def _letter_context(self, booking_id: str):
+        """(booking, form_data, fields) shared by the generated letters. ``fields``
+        mirrors the inputs the customer site feeds its own letter generators
+        (customerProfilePdf.ts ProfilePdfInput): identity from the customer
+        profile, plot + schedule from this booking's bookings[] entry, with the
+        booking row and the filed form as fallbacks."""
+        booking = self._persistence.get_by_id(booking_id)
+        if not booking:
+            raise ValueError("not_found")
+        if (getattr(booking, "status", None) or "") != "booked":
+            raise ValueError("booking_not_booked")
+        doc = self._document_service.get_booking_application_document(booking.payment_id)
+        if not doc:
+            raise ValueError("not_uploaded")
+
+        form = getattr(doc, "form_data", None)
+        if isinstance(form, str):
+            try:
+                form = json.loads(form)
+            except ValueError:
+                form = {}
+        form = form if isinstance(form, dict) else {}
+
+        profile, entry = self._customer_booking(booking.customer_id, getattr(doc, "id", None))
+        return booking, form, self._letter_fields(booking, form, profile, entry)
+
+    def _customer_booking(self, customer_id: str, document_id: str):
+        """(profile, bookings[] entry for this application document) exactly as
+        GET /customer/profile assembles them. Either may be None - a profile
+        hiccup degrades the letter to booking/form data instead of failing it."""
+        try:
+            from DivineService.service_customer_profile import serviceCustomerProfile
+            profile = serviceCustomerProfile().get_profile(customer_id, "customer")
+        except Exception as e:
+            logger.warning("booking_kyc.letter_profile_lookup_failed customer_id=%s error=%s", customer_id, e)
+            return None, None
+        entries = list(profile.bookings or []) + [profile.booking]
+        entry = next((b for b in entries if b is not None and b.document_id == document_id), None)
+        return profile, entry
+
+    def _letter_fields(self, booking, form: dict, profile, entry) -> dict:
+        from DivineService.service_demand_letter import _ADDRESS_KEYS, _AREA_KEYS, _NAME_KEYS, _first
+
+        def pick(*values):
+            return next((v for v in values if v not in (None, "", [])), None)
+
+        customer = None
+        if profile is None:
+            try:
+                customer = self._customer_persistence.get_by_id(booking.customer_id)
+            except Exception:
+                customer = None
+
+        schedule = [
+            {"label": r.label, "percent": r.percent, "due_date": r.due_date, "amount": r.amount}
+            for r in (getattr(entry, "payment_schedule", None) or [])
+        ]
+        plot_area = pick(getattr(entry, "plot_area_sq_yd", None), _first(form, _AREA_KEYS))
+        gender = pick(getattr(profile, "gender", None))
+        return {
+            "name": pick(getattr(profile, "full_name", None), self._format_customer_name(customer),
+                         _first(form, _NAME_KEYS)),
+            "gender": str(gender).title() if gender else None,
+            "address": pick(getattr(profile, "address_text", None), _first(form, _ADDRESS_KEYS)),
+            "email": pick(getattr(profile, "email", None), getattr(customer, "email", None)),
+            "phone": pick(getattr(profile, "phone", None), getattr(customer, "phone", None)),
+            "township": pick(getattr(entry, "township_label", None), getattr(entry, "project_name", None),
+                             booking.project_name),
+            "unit_no": pick(booking.unit_number, getattr(entry, "unit_number", None)),
+            "plot_area_sq_yd": plot_area,
+            "plot_area": f"{plot_area} sq. yd." if plot_area else None,
+            "unit_type": pick(getattr(entry, "unit_type", None)),
+            "total_amount": pick(getattr(entry, "total_consideration", None),
+                                 sum((r["amount"] or 0) for r in schedule) or None),
+            "amount_received": getattr(entry, "amount_received", None),
+            "schedule": schedule,
+        }
 
     def _require_reviewable(self, booking):
         """Only a booking still awaiting review can be Approved/Rejected/Cancelled -

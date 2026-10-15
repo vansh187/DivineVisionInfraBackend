@@ -563,22 +563,87 @@ def test_record_installment_payment_propagates_record_cash_payment_errors():
         assert str(e) == "installment_already_paid"
 
 
-# ---------- get_allotment_letter ----------
+# ---------- get_application_form ----------
 
-def test_get_allotment_letter_raises_not_found_for_missing_booking():
+def test_get_application_form_raises_not_found_for_missing_booking():
     svc, persistence, *_ = _service()
     persistence.get_by_id.return_value = None
     try:
-        svc.get_allotment_letter("BKG-X")
+        svc.get_application_form("BKG-X")
         assert False, "expected ValueError"
     except ValueError as e:
         assert str(e) == "not_found"
 
 
-def test_get_allotment_letter_raises_not_uploaded_when_no_application_pdf():
+def test_get_application_form_raises_not_uploaded_when_no_application_pdf():
     svc, persistence, inventory, payment_service, document_service, *_ = _service()
     persistence.get_by_id.return_value = _booking()
     document_service.get_booking_application_bytes.return_value = (None, None)
+    try:
+        svc.get_application_form("BKG-1")
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert str(e) == "not_uploaded"
+
+
+def test_get_application_form_returns_stored_pdf_bytes():
+    svc, persistence, inventory, payment_service, document_service, *_ = _service()
+    persistence.get_by_id.return_value = _booking(payment_id="pay1")
+    document_service.get_booking_application_bytes.return_value = (b"%PDF-...", "booking_application.pdf")
+
+    pdf, filename = svc.get_application_form("BKG-2026-000001")
+
+    document_service.get_booking_application_bytes.assert_called_once_with("pay1")
+    assert pdf == b"%PDF-..."
+    assert filename == "Booking-Application-Form-BKG-2026-000001.pdf"
+
+
+# ---------- generated letters (allotment / demand) ----------
+
+def _letter_profile(document_id="DOC-APP-1"):
+    from DivineDTO.models import CustomerBookingDTO, CustomerProfileDTO, PaymentScheduleRowDTO
+    entry = CustomerBookingDTO(
+        has_booking=True, id=document_id, document_id=document_id, township_label="Suraksha Enclave · Ganaur",
+        unit_number="FORM-UNIT", plot_area_sq_yd="113.69", unit_type="plot", total_consideration=300000,
+        amount_received=30000,
+        payment_schedule=[
+            PaymentScheduleRowDTO(label="On Booking", percent=10, due_date="2026-09-16", amount=30000, status="paid"),
+            PaymentScheduleRowDTO(label="Within 45 days of booking", percent=15, due_date="2026-10-31",
+                                  amount=45000, status="due"),
+        ],
+    )
+    return CustomerProfileDTO(
+        customer_id="C00001", full_name="Vansh Duggal", gender="male", email="v@example.com",
+        phone="7276971875", address_text="B-1050, Gurgaon, Haryana 122017", booking=entry, bookings=[entry],
+    )
+
+
+def _letter_service(monkeypatch, profile=None, booking_status="booked", form_data=None):
+    svc, persistence, inventory, payment_service, document_service, customer_persistence, *_ = _service()
+    persistence.get_by_id.return_value = _booking(status=booking_status, unit_number="B2-A")
+    document_service.get_booking_application_document.return_value = SimpleNamespace(
+        id="DOC-APP-1", form_data=form_data if form_data is not None else {"applicant_name": "vansh duggal"},
+    )
+    import DivineService.service_customer_profile as profile_module
+    fake = MagicMock()
+    fake.return_value.get_profile.return_value = profile or _letter_profile()
+    monkeypatch.setattr(profile_module, "serviceCustomerProfile", fake)
+    return svc, document_service, customer_persistence
+
+
+def test_generated_letters_require_a_booked_plot(monkeypatch):
+    svc, *_ = _letter_service(monkeypatch, booking_status="pending_kyc_review")
+    for build in (svc.get_allotment_letter, svc.get_demand_letter):
+        try:
+            build("BKG-1")
+            assert False, "expected ValueError"
+        except ValueError as e:
+            assert str(e) == "booking_not_booked"
+
+
+def test_generated_letters_raise_not_uploaded_without_application(monkeypatch):
+    svc, document_service, _ = _letter_service(monkeypatch)
+    document_service.get_booking_application_document.return_value = None
     try:
         svc.get_allotment_letter("BKG-1")
         assert False, "expected ValueError"
@@ -586,13 +651,59 @@ def test_get_allotment_letter_raises_not_uploaded_when_no_application_pdf():
         assert str(e) == "not_uploaded"
 
 
-def test_get_allotment_letter_returns_stored_pdf_bytes():
-    svc, persistence, inventory, payment_service, document_service, *_ = _service()
-    persistence.get_by_id.return_value = _booking(payment_id="pay1")
-    document_service.get_booking_application_bytes.return_value = (b"%PDF-...", "booking_application.pdf")
+def test_allotment_letter_fields_come_from_profile_and_booking(monkeypatch):
+    svc, *_ = _letter_service(monkeypatch)
+    booking, form, fields = svc._letter_context("BKG-1")
 
-    pdf, filename = svc.get_allotment_letter("BKG-1")
+    assert fields["name"] == "Vansh Duggal"
+    assert fields["gender"] == "Male"
+    assert fields["township"] == "Suraksha Enclave · Ganaur"
+    assert fields["unit_no"] == "B2-A"  # booking row wins over the form snapshot
+    assert fields["plot_area"] == "113.69 sq. yd."
+    assert fields["total_amount"] == 300000
+    assert [r["amount"] for r in fields["schedule"]] == [30000, 45000]
 
-    document_service.get_booking_application_bytes.assert_called_once_with("pay1")
-    assert pdf == b"%PDF-..."
-    assert filename == "booking_application.pdf"
+    pdf, filename = svc.get_allotment_letter("BKG-2026-000001")
+    assert pdf.startswith(b"%PDF")
+    assert filename == "Allotment-Letter-BKG-2026-000001.pdf"
+
+
+def test_demand_letter_uses_live_plot_number_and_schedule(monkeypatch):
+    svc, *_ = _letter_service(monkeypatch)
+    captured = {}
+    import DivineService.service_demand_letter as demand_module
+
+    def fake_generate(form, customer_id, issued_on=None):
+        captured.update(form=form, customer_id=customer_id)
+        return b"%PDF-demand"
+
+    monkeypatch.setattr(demand_module, "generate_demand_letter_pdf", fake_generate)
+    pdf, filename = svc.get_demand_letter("BKG-2026-000001")
+
+    assert pdf == b"%PDF-demand"
+    assert filename == "Demand-Letter-BKG-2026-000001.pdf"
+    form = captured["form"]
+    assert form["unit_number"] == "B2-A"
+    assert form["applicant_name"] == "vansh duggal"  # what the customer filed is kept
+    assert form["applicant_address"] == "B-1050, Gurgaon, Haryana 122017"  # gap filled from profile
+    assert form["amount_received"] == 30000
+    assert [r["label"] for r in form["payment_schedule"]] == ["On Booking", "Within 45 days of booking"]
+    assert captured["customer_id"] == "C00001"
+
+
+def test_allotment_letter_still_renders_when_profile_lookup_fails(monkeypatch):
+    svc, document_service, customer_persistence = _letter_service(monkeypatch)
+    import DivineService.service_customer_profile as profile_module
+    broken = MagicMock()
+    broken.return_value.get_profile.side_effect = RuntimeError("db down")
+    monkeypatch.setattr(profile_module, "serviceCustomerProfile", broken)
+    customer_persistence.get_by_id.return_value = SimpleNamespace(
+        first_name="Rehan", last_name="Sharma", email="r@example.com", phone="9000000020")
+
+    booking, form, fields = svc._letter_context("BKG-1")
+
+    assert fields["name"] == "Rehan Sharma"
+    assert fields["township"] == "Green Meadows"
+    assert fields["schedule"] == []
+    pdf, _ = svc.get_allotment_letter("BKG-1")
+    assert pdf.startswith(b"%PDF")
