@@ -279,32 +279,18 @@ class PaymentOrderRequestDTO(BaseModel):
 
 class PaymentOrderOutDTO(BaseModel):
     payment_id: str
-    zoho_payments_session_id: str
-    # Full hosted-checkout URL to redirect the customer's browser to
-    # (https://payments.zoho.in/hostedcheckout/<access_key>) - a full-page
-    # redirect, unlike Razorpay's embedded JS checkout modal.
-    checkout_url: str
-    access_key: str
+    razorpay_order_id: str
+    razorpay_key_id: str
     amount: float
+    amount_paise: int
     currency: str
     status: str
 
 
 class PaymentVerifyRequestDTO(BaseModel):
-    """Fields Zoho's hosted checkout appends to success_url/failure_url on
-    redirect - the frontend forwards them here unchanged. udf1-5 are only
-    required if this backend's create_order set them (owner_id/purpose today);
-    include whichever ones the redirect actually carried."""
-    payments_session_id: str
-    payment_id: str
-    payment_status: str
-    amount: str
-    signature: str
-    udf1: Optional[str] = None
-    udf2: Optional[str] = None
-    udf3: Optional[str] = None
-    udf4: Optional[str] = None
-    udf5: Optional[str] = None
+    razorpay_order_id: str
+    razorpay_payment_id: str
+    razorpay_signature: str
 
 
 class PaymentCashRequestDTO(BaseModel):
@@ -372,10 +358,8 @@ class PaymentOutDTO(BaseModel):
     status: str
     method: str
     verified: bool
-    # zoho_payments_session_id/zoho_payment_id for a payment made via Zoho
-    # Payments; both null for cash/rtgs_neft or a legacy razorpay-era payment.
-    zoho_payments_session_id: Optional[str]
-    zoho_payment_id: Optional[str]
+    razorpay_order_id: Optional[str]
+    razorpay_payment_id: Optional[str]
     created_date: Optional[datetime]
     # Booking linkage. inventory_status is "pending_kyc_review" when this call put
     # the plot on hold for admin review (an Approve/Reject decision - see
@@ -398,12 +382,12 @@ class PaymentOutDTO(BaseModel):
 
 class RefundStatusDTO(BaseModel):
     """Response for POST /admin/payments/{payment_id}/refund/retry - the payment's
-    refund bookkeeping after a retried Zoho Payments gateway attempt."""
+    refund bookkeeping after a retried Razorpay gateway attempt."""
     id: str
     method: str
     refund_status: Literal["none", "pending", "processing", "completed", "failed"]
     refund_amount: Optional[float] = None
-    zoho_refund_id: Optional[str] = None
+    razorpay_refund_id: Optional[str] = None
     refund_initiated_date: Optional[datetime] = None
     refund_completed_date: Optional[datetime] = None
     refund_note: Optional[str] = None
@@ -575,9 +559,7 @@ class BookingDetailDTO(BaseModel):
     payment_id: str
     payment_method: Optional[str] = None
     payment_status: Optional[str] = None
-    # zoho_payment_id for a payment made via Zoho Payments, or the legacy
-    # razorpay_payment_id for one made before the Zoho cutover - never both.
-    gateway_payment_id: Optional[str] = None
+    razorpay_payment_id: Optional[str] = None
     utr_number: Optional[str] = None
     cheque_number: Optional[str] = None
     documents: List[BookingDocumentChecklistItemDTO]
@@ -622,9 +604,7 @@ class RevenueTransactionListResponseDTO(BaseModel):
 
 
 class RevenueTransactionDetailDTO(RevenueTransactionItemDTO):
-    # zoho_payment_id for a payment made via Zoho Payments, or the legacy
-    # razorpay_payment_id for one made before the Zoho cutover - never both.
-    gateway_payment_id: Optional[str] = None
+    razorpay_payment_id: Optional[str] = None
     utr_number: Optional[str] = None
 
 
@@ -655,7 +635,7 @@ class RefundListItemDTO(BaseModel):
     unit_number: Optional[str] = None
     amount: float
     currency: str
-    method: Literal["zoho", "cash", "rtgs_neft", "razorpay"]
+    method: Literal["razorpay", "cash", "rtgs_neft"]
     status: Literal["processing", "completed", "failed", "cash_refund_pending", "cash_collected",
                     "bank_transfer_pending", "bank_transfer_completed"]
     refund_initiated_date: Optional[datetime] = None
@@ -670,10 +650,8 @@ class RefundListResponseDTO(BaseModel):
 class RefundDetailDTO(RefundListItemDTO):
     """GET /admin/refunds/{payment_id} - adds the gateway/manual-reference
     fields and the internal refund_note not needed by the list view."""
-    # zoho_payment_id for a payment made via Zoho Payments, or the legacy
-    # razorpay_payment_id for one made before the Zoho cutover - never both.
-    gateway_payment_id: Optional[str] = None
-    zoho_refund_id: Optional[str] = None
+    razorpay_payment_id: Optional[str] = None
+    razorpay_refund_id: Optional[str] = None
     utr_number: Optional[str] = None
     refund_note: Optional[str] = None
     created_at: Optional[datetime] = None
@@ -830,10 +808,10 @@ class BrokerCommissionOutDTO(BaseModel):
 
 
 class BrokerCommissionPaymentOutDTO(BaseModel):
-    zohoPaymentsSessionId: str
-    zohoAccessKey: str
-    zohoCheckoutUrl: str
+    razorpayOrderId: str
+    razorpayKeyId: str
     amount: float
+    amountPaise: int
     currency: str
     status: str
 
@@ -1119,10 +1097,8 @@ class CustomerBookingDTO(BaseModel):
     payment_id: Optional[str] = None
     booking_payment_amount: Optional[int] = None
     payment_method: Optional[str] = None
-    # zoho_payments_session_id/zoho_payment_id for a payment made via Zoho
-    # Payments; both null for cash/rtgs_neft or a legacy razorpay-era payment.
-    zoho_payments_session_id: Optional[str] = None
-    zoho_payment_id: Optional[str] = None
+    razorpay_order_id: Optional[str] = None
+    razorpay_payment_id: Optional[str] = None
     payment_created_date: Optional[str] = None
     payment_schedule: Optional[List[PaymentScheduleRowDTO]] = None
     next_due: Optional[CustomerNextDueDTO] = None

@@ -19,5 +19,6 @@ cryptography
 signxml
 python-multipart
 defusedxml
+razorpay
 google-genai
 groq

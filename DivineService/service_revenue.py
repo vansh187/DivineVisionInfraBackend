@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 # these buckets - see admin_revenue_queries.yaml's CASE expression, which this
 # list must stay in sync with.
 REVENUE_STATUSES = ("captured", "cash_recorded", "refund_pending", "refunded")
-PAYMENT_METHODS = ("zoho", "cash", "rtgs_neft", "razorpay", "cheque")
+PAYMENT_METHODS = ("razorpay", "cash", "rtgs_neft", "cheque")
 
 
 class serviceRevenue:
@@ -136,11 +136,7 @@ class serviceRevenue:
             if not row:
                 raise ValueError("not_found")
             item = self._as_transaction_item(row)
-            method = (getattr(row, "method", None) or "zoho").lower()
-            # zoho_payment_id for a live-gateway payment, or the legacy
-            # razorpay_payment_id for a pre-cutover one - never both.
-            item["gateway_payment_id"] = (getattr(row, "zoho_payment_id", None) if method != "razorpay"
-                                          else getattr(row, "razorpay_payment_id", None))
+            item["razorpay_payment_id"] = getattr(row, "razorpay_payment_id", None)
             item["utr_number"] = getattr(row, "utr_number", None)
             return item
         except ValueError:
