@@ -20,16 +20,10 @@ divine_payments.refund_status != "none"
 
 Use this screen for:
 
-- tracking Zoho Payments refunds while they are processing, completed, or failed
-- retrying eligible Zoho Payments refunds
-- tracking cash, RTGS/NEFT, and legacy Razorpay refunds that must be paid manually
+- tracking Razorpay refunds while they are processing, completed, or failed
+- retrying eligible Razorpay refunds
+- tracking cash and RTGS/NEFT refunds that must be paid manually
 - marking manual refunds as collected/completed after payout
-
-> **Legacy Razorpay payments:** payments made before the Zoho Payments cutover have
-> `method: "razorpay"`. That gateway's credentials were retired at cutover, so there is
-> no automatic retry path for them anymore - they are refunded the same manual way as
-> cash/RTGS-NEFT (via Mark Collected, section 4), and display under the
-> `bank_transfer_pending` / `bank_transfer_completed` statuses below, not `processing`.
 
 ## API Base
 
@@ -40,7 +34,7 @@ Use this screen for:
 ## 1. List Refunds
 
 ```http
-GET /admin/refunds?page=1&page_size=20&search=Verma&status=processing&method=zoho
+GET /admin/refunds?page=1&page_size=20&search=Verma&status=processing&method=razorpay
 Authorization: Bearer <admin_access_token>
 ```
 
@@ -52,7 +46,7 @@ Authorization: Bearer <admin_access_token>
 | `page_size` | int | `1` to `100` | `20` | Rows per page |
 | `search` | string | any text, max `200` chars | none | Matches payment id, booking id, project, unit, or customer name |
 | `status` | enum | see status table below | none | Filters display status |
-| `method` | enum | `zoho`, `cash`, `rtgs_neft`, `razorpay` | none | Filters payment method. `razorpay` is legacy-only (payments made before the Zoho cutover) |
+| `method` | enum | `razorpay`, `cash`, `rtgs_neft` | none | Filters payment method |
 
 ### Response
 
@@ -93,7 +87,7 @@ Authorization: Bearer <admin_access_token>
 | Project | `project_name` | Can be `null` |
 | Unit | `unit_number` | Can be `null` |
 | Amount | `amount` + `currency` | Format as INR in the UI |
-| Method | `method` | Render as Zoho, Cash, RTGS/NEFT, or Razorpay (legacy) |
+| Method | `method` | Render as Razorpay, Cash, or RTGS/NEFT |
 | Status | `status` | Use the status vocabulary below |
 | Initiated | `refund_initiated_date` | Can be `null` for old/imported rows |
 | Completed | `refund_completed_date` | Usually null until final status |
@@ -119,19 +113,17 @@ Authorization: Bearer <admin_access_token>
   "unit_number": "C-9",
   "amount": 900000,
   "currency": "INR",
-  "method": "zoho",
+  "method": "razorpay",
   "status": "processing",
   "refund_initiated_date": "2026-09-16T11:05:00Z",
   "refund_completed_date": null,
-  "gateway_payment_id": "pay_abc123",
-  "zoho_refund_id": null,
+  "razorpay_payment_id": "pay_abc123",
+  "razorpay_refund_id": null,
   "utr_number": null,
   "refund_note": "Automatic refund failed (gateway timeout) - needs manual retry.",
   "created_at": "2026-01-01T10:00:00Z"
 }
 ```
-
-`gateway_payment_id` holds the `zoho_payment_id` for a `method: "zoho"` payment, or the legacy `razorpay_payment_id` for a pre-cutover `method: "razorpay"` payment - never both.
 
 Unknown payment ids and payments with no refund return:
 
@@ -141,9 +133,9 @@ Unknown payment ids and payments with no refund return:
 
 with HTTP `404`.
 
-## 3. Retry Zoho Refund
+## 3. Retry Razorpay Refund
 
-Use this action only for Zoho Payments rows stuck in processing.
+Use this action only for Razorpay rows stuck in processing.
 
 ```http
 POST /admin/refunds/{payment_id}/retry
@@ -153,12 +145,8 @@ Authorization: Bearer <admin_access_token>
 Show the Retry action when:
 
 ```js
-refund.method === "zoho" && refund.status === "processing"
+refund.method === "razorpay" && refund.status === "processing"
 ```
-
-Do **not** show Retry for `method === "razorpay"` - that gateway's credentials were
-retired at the Zoho cutover, so a legacy Razorpay refund can never be retried
-automatically. Use Mark Collected (section 4) for those instead.
 
 The endpoint is double-click safe. It returns the latest refund detail.
 
@@ -167,10 +155,10 @@ The endpoint is double-click safe. It returns the latest refund detail.
 ```json
 {
   "id": "b1e2b6b0-71b1-4e0a-9d3a-1a2b3c4d5e6f",
-  "method": "zoho",
+  "method": "razorpay",
   "status": "completed",
-  "gateway_payment_id": "pay_abc123",
-  "zoho_refund_id": "rfnd_admin_refunds",
+  "razorpay_payment_id": "pay_abc123",
+  "razorpay_refund_id": "rfnd_admin_refunds",
   "refund_note": "Refund retry completed.",
   "refund_completed_date": "2026-09-16T11:10:00Z"
 }
@@ -184,8 +172,7 @@ The real response includes all fields from `GET /admin/refunds/{payment_id}`.
 |---|---|---|
 | `404` | `not_found` | Unknown payment id |
 | `409` | `payment_not_paid` | Payment was never captured |
-| `409` | `not_a_zoho_refund` | Cash/RTGS/NEFT refunds cannot use gateway retry |
-| `409` | `razorpay_gateway_retired` | Legacy Razorpay payment - that gateway has no live credentials anymore; use Mark Collected instead |
+| `409` | `not_a_razorpay_refund` | Cash/RTGS/NEFT refunds cannot use gateway retry |
 | `409` | `refund_not_retryable` | Refund is not in a retryable state |
 | `500` | `internal_error` | Server-side failure |
 
@@ -202,12 +189,9 @@ Authorization: Bearer <admin_access_token>
 Show the Mark Collected action when:
 
 ```js
-["cash", "rtgs_neft", "razorpay"].includes(refund.method) &&
+["cash", "rtgs_neft"].includes(refund.method) &&
 ["cash_refund_pending", "bank_transfer_pending"].includes(refund.status)
 ```
-
-Note that `razorpay` (legacy, pre-cutover payments) now goes through this same manual
-flow, not an automatic gateway retry - it has no live gateway credentials anymore.
 
 ### Request
 
@@ -235,7 +219,7 @@ Returns the latest refund detail. Status transitions:
 | HTTP | `detail` | Meaning |
 |---|---|---|
 | `404` | `not_found` | Unknown payment id |
-| `409` | `not_a_manual_refund` | Zoho refunds cannot be manually marked collected (use Retry instead) |
+| `409` | `not_a_manual_refund` | Razorpay refunds cannot be manually marked collected |
 | `409` | `refund_not_pending` | Already completed, failed, or not pending |
 | `422` | standard FastAPI validation body | Invalid request body |
 | `500` | `internal_error` | Server-side failure |
@@ -246,18 +230,18 @@ The backend returns display-ready status values. Do not derive status on the fro
 
 | `status` | Method | UI label | Suggested badge |
 |---|---|---|---|
-| `processing` | `zoho` | Processing | Amber |
-| `completed` | `zoho` | Completed | Green |
-| `failed` | `zoho` | Failed | Red |
+| `processing` | `razorpay` | Processing | Amber |
+| `completed` | `razorpay` | Completed | Green |
+| `failed` | `razorpay` | Failed | Red |
 | `cash_refund_pending` | `cash` | Cash Refund Pending | Amber |
 | `cash_collected` | `cash` | Cash Collected | Green |
-| `bank_transfer_pending` | `rtgs_neft` or `razorpay` (legacy) | Bank Transfer Pending | Amber |
-| `bank_transfer_completed` | `rtgs_neft` or `razorpay` (legacy) | Bank Transfer Completed | Green |
+| `bank_transfer_pending` | `rtgs_neft` | Bank Transfer Pending | Amber |
+| `bank_transfer_completed` | `rtgs_neft` | Bank Transfer Completed | Green |
 
 ## Frontend Integration Example
 
 ```ts
-type RefundMethod = "zoho" | "cash" | "rtgs_neft" | "razorpay";
+type RefundMethod = "razorpay" | "cash" | "rtgs_neft";
 
 type RefundStatus =
   | "processing"

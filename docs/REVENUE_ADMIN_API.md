@@ -23,15 +23,13 @@ Every transaction is bucketed into exactly one of these four values — this is 
 
 | `status` value | Meaning | Screenshot label |
 |---|---|---|
-| `captured` | Settled online (Zoho Payments, or a legacy Razorpay payment made before the cutover), no refund in flight | **Captured** |
+| `captured` | Settled online (Razorpay), no refund in flight | **Captured** |
 | `cash_recorded` | Settled as cash (or RTGS/NEFT) self-reported, no refund in flight | **Cash Recorded** |
 | `refund_pending` | Settled, but a refund has been initiated and hasn't completed yet | *(not in the screenshot — treat like "Refunded" with a "pending" qualifier if you want to distinguish it in the UI; safe to render as an amber "Refund Pending" badge)* |
 | `refunded` | Settled, and the refund has completed | **Refunded** |
 
-`method` is the underlying payment method and is independent of `status`: `zoho`,
-`cash`, `rtgs_neft`, or `razorpay` (legacy - payments made before the Zoho Payments
-cutover; that gateway has no live credentials anymore, so those refunds go through
-the same manual/admin-confirms-payout flow as cash/rtgs_neft).
+`method` is the underlying payment method and is independent of `status`: `razorpay`,
+`cash`, or `rtgs_neft`.
 
 ---
 
@@ -90,7 +88,7 @@ service. `date_from` after `date_to` is rejected with `400 {"detail": "date_from
 | `page_size` | int | 1–100 | 20 |
 | `search` | string | matches booking id, customer name, or project name | — |
 | `status` | enum | `captured`, `cash_recorded`, `refund_pending`, `refunded` | — (all) |
-| `method` | enum | `zoho`, `cash`, `rtgs_neft`, `razorpay` (legacy) | — (all) |
+| `method` | enum | `razorpay`, `cash`, `rtgs_neft` | — (all) |
 | `date_from` | string | `YYYY-MM-DD`, inclusive | — |
 | `date_to` | string | `YYYY-MM-DD`, inclusive | — |
 
@@ -116,7 +114,7 @@ Authorization: Bearer eyJ...
       "unit_number": "A-112",
       "amount": 3120000,
       "currency": "INR",
-      "method": "zoho",
+      "method": "razorpay",
       "status": "captured",
       "created_at": "2026-09-14T18:10:00Z"
     }
@@ -174,16 +172,13 @@ Authorization: Bearer eyJ...
   "unit_number": "A-112",
   "amount": 3120000,
   "currency": "INR",
-  "method": "zoho",
+  "method": "razorpay",
   "status": "captured",
   "created_at": "2026-09-14T18:10:00Z",
-  "gateway_payment_id": "pay_Nc9k2xLmQaZ1Yv",
+  "razorpay_payment_id": "pay_Nc9k2xLmQaZ1Yv",
   "utr_number": null
 }
 ```
-
-`gateway_payment_id` holds the `zoho_payment_id` for a `method: "zoho"` payment, or the
-legacy `razorpay_payment_id` for a pre-cutover `method: "razorpay"` payment - never both.
 
 `404 {"detail": "not_found"}` for an unknown id **or** for a payment id that exists but never
 actually settled (a `created`/`failed` payment) — deliberately the same response either way,
