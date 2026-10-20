@@ -33,6 +33,32 @@ SIGNUP_OTP_RESEND_COOLDOWN_SECONDS = 30
 SIGNUP_OTP_MAX_ATTEMPTS = 5
 SIGNUP_OTP_LOCKOUT_MINUTES = 15
 
+# After the email OTP is confirmed, a new admin stays 'pending' until a super
+# admin approves it. Super admins are identified by email AND employee id (both
+# must match the stored row), configurable as "email:EMPLOYEE_ID,..." via
+# ADMIN_SUPER_ADMINS. A super admin is auto-approved on verifying their email,
+# since there is nobody above them to approve it.
+DEFAULT_SUPER_ADMINS = "himanshu@divinevisioninfra.com:DV0001,ea@divinevisioninfra.com:DV0011"
+APPROVAL_PENDING = "pending"
+APPROVAL_APPROVED = "approved"
+APPROVAL_REJECTED = "rejected"
+APPROVAL_STATUSES = (APPROVAL_PENDING, APPROVAL_APPROVED, APPROVAL_REJECTED)
+
+
+def _parse_super_admins(raw: str) -> dict:
+    """"a@x.com:DV0001, b@x.com:DV0011" -> {"a@x.com": "DV0001", "b@x.com": "DV0011"}.
+    Entries without an employee id are ignored - email alone is not enough."""
+    result = {}
+    try:
+        for entry in (raw or "").split(","):
+            email, sep, employee_id = entry.strip().partition(":")
+            email, employee_id = email.strip().lower(), employee_id.strip().upper()
+            if sep and email and employee_id:
+                result[email] = employee_id
+    except Exception as e:  # pragma: no cover - defensive
+        logger.warning("admin_approval.super_admin_config_invalid error=%s", e)
+    return result
+
 
 def _as_aware(value):
     if value is None:
@@ -48,10 +74,28 @@ def _as_aware(value):
         return None
 
 
+def _approval_item(row) -> dict:
+    return {
+        "id": row.id,
+        "full_name": row.full_name,
+        "employee_id": row.employee_id,
+        "email": row.email,
+        "approval_status": getattr(row, "approval_status", None),
+        "approval_decided_by": getattr(row, "approval_decided_by", None),
+        "approval_decided_date": getattr(row, "approval_decided_date", None),
+        "approval_note": getattr(row, "approval_note", None),
+        "created_date": getattr(row, "created_date", None),
+    }
+
+
 class serviceAdmin:
     def __init__(self, persistence: persistenceAdmin = None, secret_key: str = None,
-                 otp_persistence: persistencePasswordReset = None, email: serviceEmail = None):
+                 otp_persistence: persistencePasswordReset = None, email: serviceEmail = None,
+                 super_admins: str = None):
         self._persistence = persistence or persistenceAdmin()
+        self._super_admins = _parse_super_admins(
+            super_admins if super_admins is not None else os.getenv("ADMIN_SUPER_ADMINS", DEFAULT_SUPER_ADMINS)
+        )
         self._otp_persistence = otp_persistence or persistencePasswordReset()
         try:
             self._email = email or serviceEmail()
@@ -115,10 +159,12 @@ class serviceAdmin:
             raise ValueError("already_verified")
         self._send_signup_otp(user.email, user.full_name)
 
-    def verify_signup(self, email: str, otp: str) -> None:
-        """Verifies the signup OTP and activates the admin account. Raises
-        ValueError with one of: otp_not_requested / too_many_attempts / otp_expired /
-        invalid_otp / not_found - the API layer maps these to 400/429 responses."""
+    def verify_signup(self, email: str, otp: str) -> str:
+        """Verifies the signup OTP. A super admin is approved straight away and
+        "approved" is returned; anyone else is left pending, the super admins are
+        emailed, and "pending_approval" is returned. Raises ValueError with one of:
+        otp_not_requested / too_many_attempts / otp_expired / invalid_otp /
+        not_found - the API layer maps these to 400/429 responses."""
         email = (email or "").strip().lower()
         row = self._otp_persistence.get_by_role_email(SIGNUP_OTP_ROLE, email)
         if row is None:
@@ -147,18 +193,152 @@ class serviceAdmin:
         except Exception as e:
             logger.warning("admin_signup.otp_cleanup_failed error=%s", e)
 
+        try:
+            if self.is_super_admin(user):
+                # login() treats a configured super admin as approved regardless, so
+                # a failed write here is logged rather than failing the verification.
+                try:
+                    self._persistence.set_approval_status(user.id, APPROVAL_APPROVED, decided_by="system:super_admin")
+                except Exception:
+                    logger.exception("admin_approval.super_admin_auto_approve_failed admin_id=%s", user.id)
+                return APPROVAL_APPROVED
+            if getattr(user, "approval_status", None) == APPROVAL_APPROVED:
+                return APPROVAL_APPROVED
+            self._notify_super_admins(user)
+            return "pending_approval"
+        except Exception:
+            logger.exception("admin_approval.post_verify_failed email=%s", email)
+            return "pending_approval"
+
     def login(self, dto: AdminLoginDTO) -> dict:
         """Returns {"access_token", "refresh_token", "expires_in"} on success, else
-        raises ValueError("invalid_credentials") or ValueError("email_not_verified")."""
-        email = (dto.email or "").strip().lower()
-        user = self._persistence.get_by_email(email)
-        if not user:
-            raise ValueError("invalid_credentials")
-        if not self._verify_password(dto.password, user.password_hash):
-            raise ValueError("invalid_credentials")
-        if not getattr(user, "email_verified", False):
-            raise ValueError("email_not_verified")
-        return self._issue_tokens(user.id, user.email)
+        raises ValueError with one of: invalid_credentials / email_not_verified /
+        approval_pending / approval_rejected, or RuntimeError("login_failed") on an
+        unexpected error."""
+        try:
+            email = (dto.email or "").strip().lower()
+            user = self._persistence.get_by_email(email)
+            if not user:
+                raise ValueError("invalid_credentials")
+            if not self._verify_password(dto.password, user.password_hash):
+                raise ValueError("invalid_credentials")
+            if not getattr(user, "email_verified", False):
+                raise ValueError("email_not_verified")
+            self._require_approved(user)
+            return self._issue_tokens(user.id, user.email)
+        except ValueError:
+            raise
+        except Exception:
+            logger.exception("admin_login_unexpected_error")
+            raise RuntimeError("login_failed")
+
+    # ------------------------------------------------------- super admin approval
+
+    def is_super_admin(self, user) -> bool:
+        try:
+            if not user:
+                return False
+            email = (getattr(user, "email", None) or "").strip().lower()
+            employee_id = (getattr(user, "employee_id", None) or "").strip().upper()
+            return bool(email) and self._super_admins.get(email) == employee_id
+        except Exception:
+            # Fail closed: an unreadable row is never treated as a super admin.
+            logger.exception("admin_approval.super_admin_check_failed")
+            return False
+
+    def _require_approved(self, user) -> None:
+        if self.is_super_admin(user):
+            return
+        status = getattr(user, "approval_status", None)
+        if status == APPROVAL_APPROVED:
+            return
+        if status == APPROVAL_REJECTED:
+            raise ValueError("approval_rejected")
+        raise ValueError("approval_pending")
+
+    def _require_super_admin(self, admin_id: str):
+        user = self._persistence.get_by_id((admin_id or "").strip())
+        if not self.is_super_admin(user):
+            raise PermissionError("super_admin_required")
+        return user
+
+    def list_approval_requests(self, admin_id: str, status: str = APPROVAL_PENDING) -> list:
+        """Email-verified admin accounts in the given approval status, newest first.
+        Super admins only - raises PermissionError("super_admin_required"),
+        ValueError("invalid_status"), or RuntimeError("approval_list_failed")."""
+        try:
+            self._require_super_admin(admin_id)
+            if status not in APPROVAL_STATUSES:
+                raise ValueError("invalid_status")
+            return [
+                _approval_item(row)
+                for row in self._persistence.list_by_approval_status(status)
+                if not self.is_super_admin(row)
+            ]
+        except (PermissionError, ValueError):
+            raise
+        except Exception:
+            logger.exception("admin_approval.list_failed admin_id=%s status=%s", admin_id, status)
+            raise RuntimeError("approval_list_failed")
+
+    def decide_approval(self, admin_id: str, target_id: str, decision: str, note: str = None) -> dict:
+        """Approves or rejects a pending admin account. Raises
+        PermissionError("super_admin_required"), ValueError with one of:
+        invalid_decision / not_found / email_not_verified / already_decided, or
+        RuntimeError("approval_decision_failed") on an unexpected error."""
+        try:
+            approver = self._require_super_admin(admin_id)
+            if decision not in (APPROVAL_APPROVED, APPROVAL_REJECTED):
+                raise ValueError("invalid_decision")
+            target = self._persistence.get_by_id((target_id or "").strip())
+            if not target or self.is_super_admin(target):
+                raise ValueError("not_found")
+            if not getattr(target, "email_verified", False):
+                raise ValueError("email_not_verified")
+            clean_note = (note or "").strip() or None
+            updated = self._persistence.set_approval_status(
+                target.id, decision, decided_by=f"admin:{approver.id}", note=clean_note,
+            )
+            if not updated:
+                raise ValueError("already_decided")
+            result = _approval_item(updated)
+        except (PermissionError, ValueError):
+            raise
+        except Exception:
+            logger.exception("admin_approval.decide_failed target=%s decision=%s", target_id, decision)
+            raise RuntimeError("approval_decision_failed")
+
+        # The decision is committed from here on; the email is best effort.
+        try:
+            if self._email and getattr(self._email, "enabled", False):
+                self._email.send_admin_approval_decision_async(
+                    updated.email, decision=decision,
+                    first_name=(updated.full_name or "").split(" ")[0] or None, note=clean_note,
+                )
+            logger.info("admin_approval.decided target=%s decision=%s by=%s", target.id, decision, approver.id)
+        except Exception as e:
+            logger.warning("admin_approval.decision_email_failed admin_id=%s error=%s", target.id, e)
+        return result
+
+    def _notify_super_admins(self, applicant) -> None:
+        """Best effort: a failed notification must not fail the OTP verification -
+        the request still shows up in GET /admin/approvals."""
+        try:
+            if not (self._email and getattr(self._email, "enabled", False)):
+                return
+        except Exception:
+            logger.exception("admin_approval.notify_setup_failed")
+            return
+        for email in self._super_admins:
+            try:
+                approver = self._persistence.get_by_email(email)
+                approver_name = (getattr(approver, "full_name", None) or "").split(" ")[0] or None
+                self._email.send_admin_approval_request_async(
+                    email, approver_name=approver_name, applicant_name=applicant.full_name,
+                    applicant_email=applicant.email, applicant_employee_id=applicant.employee_id,
+                )
+            except Exception as e:
+                logger.warning("admin_approval.notify_failed to=%s error=%s", email, e)
 
     # ------------------------------------------------------------ signup OTP
 
@@ -248,6 +428,8 @@ class serviceAdmin:
                 "phone": None,
                 "avatar_url": getattr(user, "profile_photo_url", None),
                 "initials": initials,
+                "is_super_admin": self.is_super_admin(user),
+                "approval_status": getattr(user, "approval_status", None),
                 "created_by": getattr(user, "created_by", None),
                 "created_date": getattr(user, "created_date", None),
                 "last_updated_by": getattr(user, "last_updated_by", None),
@@ -388,12 +570,18 @@ class serviceAdmin:
         if not admin_id:
             raise ValueError("invalid_refresh_token")
 
-        user = self._persistence.get_by_id(admin_id)
-        if not user:
+        try:
+            user = self._persistence.get_by_id(admin_id)
+            if not user:
+                raise ValueError("invalid_refresh_token")
+            self._require_approved(user)
+            access_token, expires_in = self._access_token(user.id, user.email)
+            return {"access_token": access_token, "expires_in": expires_in}
+        except ValueError:
             raise ValueError("invalid_refresh_token")
-
-        access_token, expires_in = self._access_token(user.id, user.email)
-        return {"access_token": access_token, "expires_in": expires_in}
+        except Exception:
+            logger.exception("admin_refresh_unexpected_error admin_id=%s", admin_id)
+            raise RuntimeError("refresh_failed")
 
     def _issue_tokens(self, admin_id: str, email: str) -> dict:
         access_token, expires_in = self._access_token(admin_id, email)

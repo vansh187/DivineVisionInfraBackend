@@ -8,6 +8,7 @@ from sqlalchemy.exc import IntegrityError
 from DivineDTO.models import (
     AdminCreateDTO, AdminLoginDTO, AdminOutDTO, AdminProfileDTO, AdminTokenDTO, AdminAccessTokenDTO, AdminRefreshDTO,
     AdminVerifySignupDTO, AdminResendSignupOtpDTO,
+    AdminApprovalItemDTO, AdminApprovalListResponseDTO, AdminApprovalDecisionDTO,
     CustomerListResponseDTO, CustomerListItemDTO, CustomerCreateDTO, BrokerListResponseDTO,
     AdminVisitListResponseDTO, AdminVisitListItemDTO,
     ForgotPasswordDTO, ResetPasswordDTO, MessageDTO,
@@ -65,8 +66,9 @@ def admin_signup(request: Request, dto: AdminCreateDTO):
 def admin_verify_signup(dto: AdminVerifySignupDTO):
     start = time.monotonic()
     try:
-        _admin_service.verify_signup(dto.email, dto.otp)
-        return MessageDTO(message="email_verified")
+        # "pending_approval": a super admin must approve before login works.
+        # "approved": a super admin's own account, active immediately.
+        return MessageDTO(message=_admin_service.verify_signup(dto.email, dto.otp))
     except ValueError as e:
         status_code = 429 if str(e) == "too_many_attempts" else 400
         raise HTTPException(status_code=status_code, detail=str(e))
@@ -104,8 +106,8 @@ def admin_login(dto: AdminLoginDTO):
             expires_in=tokens["expires_in"],
         )
     except ValueError as e:
-        if str(e) == "email_not_verified":
-            raise HTTPException(status_code=403, detail="email_not_verified")
+        if str(e) in ("email_not_verified", "approval_pending", "approval_rejected"):
+            raise HTTPException(status_code=403, detail=str(e))
         raise HTTPException(status_code=401, detail="invalid_credentials")
     except Exception:
         logger.exception("admin_login_failed")
@@ -166,6 +168,64 @@ def upload_admin_profile_photo(
         raise HTTPException(status_code=500, detail="internal_error")
     finally:
         logger.debug("admin_profile_photo_upload_latency_ms=%.2f", (time.monotonic() - start) * 1000)
+
+
+@router.get("/approvals", response_model=AdminApprovalListResponseDTO)
+def list_admin_approvals(
+    status: Literal["pending", "approved", "rejected"] = Query("pending"),
+    current_admin: dict = Depends(get_current_admin),
+):
+    """Super admins only: email-verified admin accounts awaiting (or past) approval."""
+    start = time.monotonic()
+    try:
+        return {"items": _admin_service.list_approval_requests(current_admin.get("sub"), status=status)}
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="super_admin_required")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError:
+        logger.exception("admin_list_approvals_failed")
+        raise HTTPException(status_code=500, detail="internal_error")
+    except Exception:
+        logger.exception("admin_list_approvals_failed")
+        raise HTTPException(status_code=500, detail="internal_error")
+    finally:
+        logger.debug("admin_list_approvals_latency_ms=%.2f", (time.monotonic() - start) * 1000)
+
+
+def _decide_admin_approval(admin_id: str, target_id: str, decision: str, note: Optional[str]):
+    start = time.monotonic()
+    try:
+        return _admin_service.decide_approval(admin_id, target_id, decision, note=note)
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="super_admin_required")
+    except ValueError as e:
+        code = str(e)
+        if code == "not_found":
+            raise HTTPException(status_code=404, detail=code)
+        if code == "already_decided":
+            raise HTTPException(status_code=409, detail=code)
+        raise HTTPException(status_code=400, detail=code)
+    except RuntimeError:
+        logger.exception("admin_decide_approval_failed target=%s", target_id)
+        raise HTTPException(status_code=500, detail="internal_error")
+    except Exception:
+        logger.exception("admin_decide_approval_failed target=%s", target_id)
+        raise HTTPException(status_code=500, detail="internal_error")
+    finally:
+        logger.debug("admin_decide_approval_latency_ms=%.2f", (time.monotonic() - start) * 1000)
+
+
+@router.post("/approvals/{admin_id}/approve", response_model=AdminApprovalItemDTO)
+def approve_admin(admin_id: str, dto: Optional[AdminApprovalDecisionDTO] = None,
+                  current_admin: dict = Depends(get_current_admin)):
+    return _decide_admin_approval(current_admin.get("sub"), admin_id, "approved", dto.note if dto else None)
+
+
+@router.post("/approvals/{admin_id}/reject", response_model=AdminApprovalItemDTO)
+def reject_admin(admin_id: str, dto: Optional[AdminApprovalDecisionDTO] = None,
+                 current_admin: dict = Depends(get_current_admin)):
+    return _decide_admin_approval(current_admin.get("sub"), admin_id, "rejected", dto.note if dto else None)
 
 
 @router.post("/forgot-password", response_model=MessageDTO)

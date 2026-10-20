@@ -14,6 +14,12 @@ class AdminModel(Base):
     email = Column(String(255), unique=True, nullable=False)
     password_hash = Column(String(255), nullable=False)
     email_verified = Column(Boolean, nullable=False, default=False)
+    # pending -> approved | rejected, decided by a super admin after the email OTP
+    # is confirmed. Login is refused until it is 'approved'.
+    approval_status = Column(String(20), nullable=False, default="pending")
+    approval_decided_by = Column(String(255))
+    approval_decided_date = Column(DateTime)
+    approval_note = Column(String(500))
     profile_photo_url = Column(String(1000))
     profile_photo_path = Column(String(500))
     profile_photo_bucket = Column(String(100))
@@ -28,8 +34,21 @@ class persistenceAdmin:
         self._session_factory = session_factory
         queries = load_queries("admin_queries.yaml")
         queries.setdefault("create_admin", (
-            'INSERT INTO divine_admin_users(id, full_name, employee_id, email, password_hash, email_verified, created_by, created_date, last_updated_by, last_updated_date) '
-            'VALUES (:id, :full_name, :employee_id, :email, :password_hash, false, :created_by, :created_date, :last_updated_by, :last_updated_date) RETURNING *;'
+            'INSERT INTO divine_admin_users(id, full_name, employee_id, email, password_hash, email_verified, approval_status, created_by, created_date, last_updated_by, last_updated_date) '
+            "VALUES (:id, :full_name, :employee_id, :email, :password_hash, false, 'pending', :created_by, :created_date, :last_updated_by, :last_updated_date) RETURNING *;"
+        ))
+        queries.setdefault("set_approval_status", (
+            'UPDATE divine_admin_users SET approval_status = :approval_status, '
+            'approval_decided_by = :approval_decided_by, approval_decided_date = :approval_decided_date, '
+            'approval_note = :approval_note, '
+            'last_updated_by = :approval_decided_by, last_updated_date = :approval_decided_date '
+            'WHERE id = :id AND approval_status = :expected_status RETURNING *;'
+        ))
+        queries.setdefault("list_by_approval_status", (
+            'SELECT id, full_name, employee_id, email, email_verified, approval_status, '
+            'approval_decided_by, approval_decided_date, approval_note, created_date '
+            'FROM divine_admin_users WHERE approval_status = :approval_status AND email_verified = true '
+            'ORDER BY created_date DESC;'
         ))
         queries.setdefault("get_by_email", 'SELECT * FROM divine_admin_users WHERE lower(email) = lower(:email) LIMIT 1;')
         queries.setdefault("get_by_employee_id", 'SELECT * FROM divine_admin_users WHERE lower(employee_id) = lower(:employee_id) LIMIT 1;')
@@ -39,7 +58,7 @@ class persistenceAdmin:
             'WHERE lower(email) = lower(:email) RETURNING *;'
         ))
         queries.setdefault("get_profile_by_id", (
-            'SELECT id, full_name, employee_id, email, profile_photo_url, profile_photo_path, '
+            'SELECT id, full_name, employee_id, email, approval_status, profile_photo_url, profile_photo_path, '
             'profile_photo_bucket, created_by, created_date, last_updated_by, last_updated_date '
             'FROM divine_admin_users WHERE id = :id LIMIT 1;'
         ))
@@ -119,6 +138,39 @@ class persistenceAdmin:
                 row = result.mappings().first()
                 db.commit()
                 return RowWrapper(row) if row else None
+            except Exception:
+                db.rollback()
+                raise
+
+    def set_approval_status(self, id: str, approval_status: str, decided_by: str,
+                            note: str = None, expected_status: str = "pending"):
+        """Moves an admin from expected_status to approval_status. Returns None when
+        the row is missing or no longer in expected_status (e.g. another super admin
+        decided it first), so a decision is never silently overwritten."""
+        with self._session_factory() as db:
+            try:
+                query = self._queries.get("set_approval_status")
+                result = db.execute(text(query), {
+                    "id": id,
+                    "approval_status": approval_status,
+                    "approval_decided_by": decided_by,
+                    "approval_decided_date": datetime.now(timezone.utc),
+                    "approval_note": note,
+                    "expected_status": expected_status,
+                })
+                row = result.mappings().first()
+                db.commit()
+                return RowWrapper(row) if row else None
+            except Exception:
+                db.rollback()
+                raise
+
+    def list_by_approval_status(self, approval_status: str) -> list:
+        with self._session_factory() as db:
+            try:
+                query = self._queries.get("list_by_approval_status")
+                result = db.execute(text(query), {"approval_status": approval_status})
+                return [RowWrapper(row) for row in result.mappings().all()]
             except Exception:
                 db.rollback()
                 raise
