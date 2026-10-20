@@ -135,6 +135,29 @@ class AdminProfileDTO(AdminOutDTO):
     phone: Optional[str] = None
     avatar_url: Optional[str] = None
     initials: str
+    is_super_admin: bool = False
+    approval_status: Optional[str] = None
+
+
+class AdminApprovalItemDTO(BaseModel):
+    """One admin account on the super admin's approval screen (GET /admin/approvals)."""
+    id: str
+    full_name: str
+    employee_id: str
+    email: str
+    approval_status: Literal["pending", "approved", "rejected"]
+    approval_decided_by: Optional[str] = None
+    approval_decided_date: Optional[datetime] = None
+    approval_note: Optional[str] = None
+    created_date: Optional[datetime] = None
+
+
+class AdminApprovalListResponseDTO(BaseModel):
+    items: List[AdminApprovalItemDTO]
+
+
+class AdminApprovalDecisionDTO(BaseModel):
+    note: Optional[str] = Field(None, max_length=500)
 
 
 class AdminTokenDTO(BaseModel):

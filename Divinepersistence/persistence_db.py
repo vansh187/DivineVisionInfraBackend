@@ -1,10 +1,13 @@
 import os
+import logging
 import yaml
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker, declarative_base
 from dotenv import load_dotenv
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 # Support explicit Supabase/Postgres URL via SUPABASE_DATABASE_URL or generic DATABASE_URL
 DATABASE_URL = os.getenv("SUPABASE_DATABASE_URL") or os.getenv("DATABASE_URL") or "sqlite:///divine.db"
@@ -53,6 +56,25 @@ class PersistenceDB:
                             "UPDATE divine_admin_users SET email_verified = true "
                             "WHERE email_verified = false;"
                         ))
+                    if "approval_status" not in columns:
+                        # Existing admins predate the approval step - backfill them
+                        # as approved so nobody already working gets locked out.
+                        conn.execute(text(
+                            "ALTER TABLE divine_admin_users "
+                            "ADD COLUMN approval_status varchar(20) NOT NULL DEFAULT 'approved';"
+                        ))
+                        if dialect == "postgresql":
+                            conn.execute(text(
+                                "ALTER TABLE divine_admin_users "
+                                "ALTER COLUMN approval_status SET DEFAULT 'pending';"
+                            ))
+                    for name, ddl in (
+                        ("approval_decided_by", "varchar(255)"),
+                        ("approval_decided_date", "timestamp"),
+                        ("approval_note", "varchar(500)"),
+                    ):
+                        if name not in columns:
+                            conn.execute(text(f"ALTER TABLE divine_admin_users ADD COLUMN {name} {ddl};"))
 
                 if dialect == "postgresql" and "divine_password_reset_otp" in tables:
                     conn.execute(text(
@@ -62,7 +84,7 @@ class PersistenceDB:
         except Exception:
             # Keep health/startup behavior consistent: table creation is best effort
             # in this app today, and request handlers still log concrete DB failures.
-            pass
+            logger.exception("lightweight_migrations_failed")
 
     def test_connection(self) -> bool:
         """Attempt a simple connection to validate DB connectivity. Returns True on success."""

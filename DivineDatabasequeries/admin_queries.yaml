@@ -1,8 +1,21 @@
 # SQL queries for the admin API
 create_admin: |
-  INSERT INTO divine_admin_users(id, full_name, employee_id, email, password_hash, email_verified, created_by, created_date, last_updated_by, last_updated_date)
-  VALUES (:id, :full_name, :employee_id, :email, :password_hash, false, :created_by, :created_date, :last_updated_by, :last_updated_date)
+  INSERT INTO divine_admin_users(id, full_name, employee_id, email, password_hash, email_verified, approval_status, created_by, created_date, last_updated_by, last_updated_date)
+  VALUES (:id, :full_name, :employee_id, :email, :password_hash, false, 'pending', :created_by, :created_date, :last_updated_by, :last_updated_date)
   RETURNING *;
+set_approval_status: |
+  UPDATE divine_admin_users SET approval_status = :approval_status,
+  approval_decided_by = :approval_decided_by, approval_decided_date = :approval_decided_date,
+  approval_note = :approval_note,
+  last_updated_by = :approval_decided_by, last_updated_date = :approval_decided_date
+  WHERE id = :id AND approval_status = :expected_status
+  RETURNING *;
+list_by_approval_status: |
+  SELECT id, full_name, employee_id, email, email_verified, approval_status,
+  approval_decided_by, approval_decided_date, approval_note, created_date
+  FROM divine_admin_users
+  WHERE approval_status = :approval_status AND email_verified = true
+  ORDER BY created_date DESC;
 get_by_email: |
   SELECT * FROM divine_admin_users WHERE lower(email) = lower(:email) LIMIT 1;
 get_by_employee_id: |
@@ -19,6 +32,7 @@ get_profile_by_id: |
     full_name,
     employee_id,
     email,
+    approval_status,
     profile_photo_url,
     profile_photo_path,
     profile_photo_bucket,

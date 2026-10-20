@@ -54,6 +54,7 @@ class serviceEmail:
         self._from_email = (from_email or os.getenv("DIVINE_RESEND_EMAIL") or "").strip()
         self._customer_login_url = (os.getenv("DIVINE_CUSTOMER_LOGIN_URL") or _DEFAULT_CUSTOMER_LOGIN_URL).strip()
         self._partner_login_url = (os.getenv("DIVINE_PARTNER_LOGIN_URL") or _DEFAULT_PARTNER_LOGIN_URL).strip()
+        self._admin_panel_url = (os.getenv("DIVINE_ADMIN_PANEL_URL") or _DEFAULT_CUSTOMER_LOGIN_URL).strip()
         self._logo_b64 = _load_logo_b64(logo_path or os.getenv("DIVINE_LOGO_PATH") or _DEFAULT_LOGO_PATH)
         self._support_ticket_email = (os.getenv("SUPPORT_TICKET_EMAIL") or "").strip()
         # True only when a send could actually succeed. Callers check this before
@@ -319,6 +320,81 @@ class serviceEmail:
             return self._send(to=to, subject="Booking Cancelled — Divine Vision Infra", html=html, text=text)
         except Exception as e:
             logger.warning("booking_cancellation_email_failed email=%s error=%s", email, e)
+            return False
+
+    # ---- admin panel signup approval ------------------------------------
+    def send_admin_approval_request_async(self, email: str, **kwargs) -> None:
+        self._run_async(self.send_admin_approval_request, email, **kwargs)
+
+    def send_admin_approval_request(self, email: str, approver_name: str = None, applicant_name: str = None,
+                                    applicant_email: str = None, applicant_employee_id: str = None) -> bool:
+        """Tells a super admin that a newly verified admin account is waiting for
+        their approval before it can log in. Never raises."""
+        try:
+            to = (email or "").strip()
+            if not to or "@" not in to:
+                return False
+            name = (approver_name or "").strip() or "there"
+            headline = "Admin Access Request"
+            body = [
+                "A new admin panel account has verified its company email and is waiting "
+                "for your approval. It cannot log in until a super admin approves it.",
+            ]
+            rows = [
+                ("Name", applicant_name or "-"),
+                ("Email", applicant_email or "-"),
+                ("Employee ID", applicant_employee_id or "-"),
+            ]
+            html = _luxury_email_html(
+                headline=headline, preheader=headline, greeting_name=name,
+                body_paragraphs=body, detail_rows=rows, cta_label="Review Request",
+                cta_url=self._admin_panel_url,
+                footer_note="You are receiving this because you are a super admin.",
+                has_logo=bool(self._logo_b64),
+            )
+            text = _luxury_email_text(headline, name, body, rows, "Review Request", self._admin_panel_url)
+            return self._send(to=to, subject=f"{headline} — Divine Vision Infra", html=html, text=text)
+        except Exception as e:
+            logger.warning("admin_approval_request_email_failed email=%s error=%s", email, e)
+            return False
+
+    def send_admin_approval_decision_async(self, email: str, **kwargs) -> None:
+        self._run_async(self.send_admin_approval_decision, email, **kwargs)
+
+    def send_admin_approval_decision(self, email: str, decision: str, first_name: str = None,
+                                     note: str = None) -> bool:
+        """Tells the applicant whether their admin panel access was approved or
+        rejected. Never raises."""
+        try:
+            to = (email or "").strip()
+            if not to or "@" not in to:
+                return False
+            name = (first_name or "").strip() or "there"
+            approved = (decision or "").strip().lower() == "approved"
+            if approved:
+                headline = "Admin Access Approved"
+                body = ["Your admin panel account has been approved. You can now log in."]
+                cta_label = "Log In"
+                accent = "#1e8449"
+            else:
+                headline = "Admin Access Not Approved"
+                body = ["Your request for admin panel access was not approved."]
+                cta_label = "Admin Panel"
+                accent = "#c0392b"
+            clean_note = (note or "").strip()
+            if clean_note:
+                body.append(f"Note from the approver: <em>{_escape(clean_note)}</em>")
+            html = _luxury_email_html(
+                headline=headline, preheader=headline, greeting_name=name,
+                body_paragraphs=body, detail_rows=[], cta_label=cta_label,
+                cta_url=self._admin_panel_url,
+                footer_note=f"For assistance, contact {_SUPPORT_LINE}.",
+                has_logo=bool(self._logo_b64), accent=accent,
+            )
+            text = _luxury_email_text(headline, name, body, [], cta_label, self._admin_panel_url)
+            return self._send(to=to, subject=f"{headline} — Divine Vision Infra", html=html, text=text)
+        except Exception as e:
+            logger.warning("admin_approval_decision_email_failed email=%s error=%s", email, e)
             return False
 
     # ---- admin panel "Help & Support" tickets ---------------------------

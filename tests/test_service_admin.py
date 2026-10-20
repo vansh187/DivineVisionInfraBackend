@@ -91,7 +91,7 @@ def test_login_rejects_wrong_password():
     svc, persistence = _service()
     real_hash = svc._hash_password("correct-password")
     persistence.get_by_email.return_value = MagicMock(
-        id="A00001", email="admin1@example.com", password_hash=real_hash, email_verified=True,
+        id="A00001", email="admin1@example.com", password_hash=real_hash, email_verified=True, approval_status="approved",
     )
     with pytest.raises(ValueError):
         svc.login(AdminLoginDTO(email="admin1@example.com", password="wrong-password"))
@@ -101,7 +101,7 @@ def test_login_returns_access_and_refresh_tokens():
     svc, persistence = _service()
     real_hash = svc._hash_password("correct-password")
     persistence.get_by_email.return_value = MagicMock(
-        id="A00001", email="admin1@example.com", password_hash=real_hash, email_verified=True,
+        id="A00001", email="admin1@example.com", password_hash=real_hash, email_verified=True, approval_status="approved",
     )
     tokens = svc.login(AdminLoginDTO(email="admin1@example.com", password="correct-password"))
 
@@ -123,7 +123,7 @@ def test_refresh_rejects_an_access_token():
     svc, persistence = _service()
     real_hash = svc._hash_password("correct-password")
     persistence.get_by_email.return_value = MagicMock(
-        id="A00001", email="admin1@example.com", password_hash=real_hash, email_verified=True,
+        id="A00001", email="admin1@example.com", password_hash=real_hash, email_verified=True, approval_status="approved",
     )
     tokens = svc.login(AdminLoginDTO(email="admin1@example.com", password="correct-password"))
 
@@ -135,7 +135,7 @@ def test_refresh_rejects_a_token_for_a_deleted_admin():
     svc, persistence = _service()
     real_hash = svc._hash_password("correct-password")
     persistence.get_by_email.return_value = MagicMock(
-        id="A00001", email="admin1@example.com", password_hash=real_hash, email_verified=True,
+        id="A00001", email="admin1@example.com", password_hash=real_hash, email_verified=True, approval_status="approved",
     )
     tokens = svc.login(AdminLoginDTO(email="admin1@example.com", password="correct-password"))
 
@@ -148,11 +148,11 @@ def test_refresh_issues_a_new_access_token():
     svc, persistence = _service()
     real_hash = svc._hash_password("correct-password")
     persistence.get_by_email.return_value = MagicMock(
-        id="A00001", email="admin1@example.com", password_hash=real_hash, email_verified=True,
+        id="A00001", email="admin1@example.com", password_hash=real_hash, email_verified=True, approval_status="approved",
     )
     tokens = svc.login(AdminLoginDTO(email="admin1@example.com", password="correct-password"))
 
-    persistence.get_by_id.return_value = MagicMock(id="A00001", email="admin1@example.com")
+    persistence.get_by_id.return_value = MagicMock(id="A00001", email="admin1@example.com", approval_status="approved")
     result = svc.refresh(tokens["refresh_token"])
 
     assert set(result.keys()) == {"access_token", "expires_in"}
@@ -165,3 +165,57 @@ def test_refresh_rejects_garbage_token():
     svc, persistence = _service()
     with pytest.raises(ValueError):
         svc.refresh("not.a.valid.jwt")
+
+
+def test_refresh_rejects_an_admin_whose_approval_is_pending():
+    svc, persistence = _service()
+    token = svc._refresh_token("A00001")
+    persistence.get_by_id.return_value = MagicMock(id="A00001", email="admin1@example.com", approval_status="pending")
+    with pytest.raises(ValueError, match="invalid_refresh_token"):
+        svc.refresh(token)
+
+
+def test_login_rejects_a_pending_admin():
+    svc, persistence = _service()
+    persistence.get_by_email.return_value = MagicMock(
+        id="A00001", email="admin1@example.com", password_hash=svc._hash_password("pw-123456"),
+        email_verified=True, approval_status="pending",
+    )
+    with pytest.raises(ValueError, match="approval_pending"):
+        svc.login(AdminLoginDTO(email="admin1@example.com", password="pw-123456"))
+
+
+def test_login_wraps_unexpected_errors():
+    svc, persistence = _service()
+    persistence.get_by_email.side_effect = Exception("db down")
+    with pytest.raises(RuntimeError, match="login_failed"):
+        svc.login(AdminLoginDTO(email="admin1@example.com", password="pw"))
+
+
+def test_verify_signup_leaves_regular_admin_pending_and_notifies_super_admins():
+    svc, persistence = _service()
+    svc._otp_persistence.get_by_role_email.return_value = MagicMock(
+        locked_until=None, otp_hash=svc._hash_otp("123456"),
+        expires_at="2999-01-01T00:00:00+00:00",
+    )
+    persistence.get_by_email.return_value = MagicMock(
+        id="A00002", email="arjun@divinevisioninfra.com", employee_id="DV1024",
+        full_name="Arjun Mehta", approval_status="pending",
+    )
+    assert svc.verify_signup("arjun@divinevisioninfra.com", "123456") == "pending_approval"
+    persistence.set_approval_status.assert_not_called()
+    assert svc._email.send_admin_approval_request_async.call_count == 2
+
+
+def test_verify_signup_auto_approves_super_admin():
+    svc, persistence = _service()
+    svc._otp_persistence.get_by_role_email.return_value = MagicMock(
+        locked_until=None, otp_hash=svc._hash_otp("123456"),
+        expires_at="2999-01-01T00:00:00+00:00",
+    )
+    persistence.get_by_email.return_value = MagicMock(
+        id="A00003", email="ea@divinevisioninfra.com", employee_id="DV0011",
+        full_name="EA", approval_status="pending",
+    )
+    assert svc.verify_signup("ea@divinevisioninfra.com", "123456") == "approved"
+    persistence.set_approval_status.assert_called_once()

@@ -15,7 +15,7 @@ class CapturingOtpEmail:
         return True
 
 
-def signup_and_verify_admin(client, payload):
+def signup_and_verify_admin(client, payload, approve=True):
     import DivineAPI.admin_api as admin_api
 
     original_email = admin_api._admin_service._email
@@ -31,6 +31,12 @@ def signup_and_verify_admin(client, payload):
     otp = fake_email.otps[email]
     verify = client.post("/admin/verify-signup", json={"email": email, "otp": otp})
     assert verify.status_code == 200, verify.text
+    if approve:
+        # Stand-in for a super admin clicking approve - the approval flow itself
+        # is covered in test_admin_approval_api.py.
+        admin_api._admin_service._persistence.set_approval_status(
+            signup.json()["id"], "approved", decided_by="test",
+        )
     return signup
 
 
