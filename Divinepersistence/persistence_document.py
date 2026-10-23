@@ -67,34 +67,47 @@ class persistenceDocument:
     ) -> DocumentModel:
         with self._session_factory() as db:
             try:
-                now = datetime.now(timezone.utc)
-                query = self._queries.get("create_document")
-                params = {
-                    "id": id,
-                    "owner_id": owner_id,
-                    "owner_role": owner_role,
-                    "document_type": document_type,
-                    "form_data": json.dumps(form_data),
-                    "storage_path": storage_path,
-                    "status": status,
-                    "storage_bucket": storage_bucket,
-                    "project_id": project_id,
-                    "payment_id": payment_id,
-                    "razorpay_order_id": razorpay_order_id,
-                    "razorpay_payment_id": razorpay_payment_id,
-                    "created_date": now,
-                    "last_updated_date": now,
-                }
-                result = db.execute(text(query), params)
-                row = result.mappings().first()
+                row = self.insert_document(
+                    db, id=id, owner_id=owner_id, owner_role=owner_role, document_type=document_type,
+                    form_data=form_data, storage_path=storage_path, status=status,
+                    storage_bucket=storage_bucket, project_id=project_id, payment_id=payment_id,
+                    razorpay_order_id=razorpay_order_id, razorpay_payment_id=razorpay_payment_id,
+                )
                 db.commit()
-                return RowWrapper(row)
+                return row
             except IntegrityError:
                 db.rollback()
                 raise
             except Exception:
                 db.rollback()
                 raise
+
+    def insert_document(self, db, id: str, owner_id: str, owner_role: str, document_type: str,
+                        form_data: dict, storage_path: str, status: str = "generated",
+                        storage_bucket: str = None, project_id: str = None, payment_id: str = None,
+                        razorpay_order_id: str = None, razorpay_payment_id: str = None):
+        """Executes the create_document INSERT inside the caller's session WITHOUT
+        committing - lets another persistence write a document row as part of its
+        own transaction (e.g. persistenceBooking's admin KYC upload) without
+        duplicating this SQL."""
+        now = datetime.now(timezone.utc)
+        result = db.execute(text(self._queries.get("create_document")), {
+            "id": id,
+            "owner_id": owner_id,
+            "owner_role": owner_role,
+            "document_type": document_type,
+            "form_data": json.dumps(form_data),
+            "storage_path": storage_path,
+            "status": status,
+            "storage_bucket": storage_bucket,
+            "project_id": project_id,
+            "payment_id": payment_id,
+            "razorpay_order_id": razorpay_order_id,
+            "razorpay_payment_id": razorpay_payment_id,
+            "created_date": now,
+            "last_updated_date": now,
+        })
+        return RowWrapper(result.mappings().first())
 
     def get_by_id(self, id: str):
         with self._session_factory() as db:
@@ -105,14 +118,17 @@ class persistenceDocument:
                 return None
             return RowWrapper(row)
 
-    def get_latest_by_owner_and_type(self, owner_id: str, document_type: str):
+    def get_latest_by_owner_and_type(self, owner_id: str, document_type: str, db=None):
+        """`db`: optionally read inside the caller's open session/transaction."""
+        if db is not None:
+            return self._latest_by_owner_and_type(db, owner_id, document_type)
         with self._session_factory() as db:
-            query = self._queries.get("get_latest_by_owner_and_type")
-            result = db.execute(text(query), {"owner_id": owner_id, "document_type": document_type})
-            row = result.mappings().first()
-            if not row:
-                return None
-            return RowWrapper(row)
+            return self._latest_by_owner_and_type(db, owner_id, document_type)
+
+    def _latest_by_owner_and_type(self, db, owner_id: str, document_type: str):
+        query = self._queries.get("get_latest_by_owner_and_type")
+        row = db.execute(text(query), {"owner_id": owner_id, "document_type": document_type}).mappings().first()
+        return RowWrapper(row) if row else None
 
     def get_latest_by_owner_and_types(self, owner_id: str, document_types) -> list:
         """Batched sibling of get_latest_by_owner_and_type - one query for several

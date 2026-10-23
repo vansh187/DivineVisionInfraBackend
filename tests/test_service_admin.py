@@ -219,3 +219,37 @@ def test_verify_signup_auto_approves_super_admin():
     )
     assert svc.verify_signup("ea@divinevisioninfra.com", "123456") == "approved"
     persistence.set_approval_status.assert_called_once()
+
+
+# ---------- get_active_admin (live approval check for write endpoints) ----------
+
+def _active_admin_service(row):
+    persistence = MagicMock()
+    persistence.get_by_id.return_value = row
+    svc = serviceAdmin(persistence, secret_key="testsecret", otp_persistence=MagicMock(), email=MagicMock(),
+                       super_admins="boss@divinevisioninfra.com:DV0001")
+    return svc, persistence
+
+
+@pytest.mark.parametrize("row,allowed", [
+    (MagicMock(approval_status="approved", email="a@divinevisioninfra.com", employee_id="DV0005"), True),
+    (MagicMock(approval_status="pending", email="a@divinevisioninfra.com", employee_id="DV0005"), False),
+    (MagicMock(approval_status="rejected", email="a@divinevisioninfra.com", employee_id="DV0005"), False),
+    # Super admin is let in by login even while 'pending' - the live check must agree.
+    (MagicMock(approval_status="pending", email="Boss@divinevisioninfra.com", employee_id="dv0001"), True),
+    # Email alone is not enough to be a super admin.
+    (MagicMock(approval_status="pending", email="boss@divinevisioninfra.com", employee_id="DV0009"), False),
+    (None, False),
+])
+def test_get_active_admin_matches_login_rule(row, allowed):
+    svc, persistence = _active_admin_service(row)
+    result = svc.get_active_admin(" DV0005 ")
+    assert result is (row if allowed else None)
+    persistence.get_by_id.assert_called_with("DV0005")
+
+
+def test_get_active_admin_propagates_lookup_errors():
+    svc, persistence = _active_admin_service(None)
+    persistence.get_by_id.side_effect = RuntimeError("db down")
+    with pytest.raises(RuntimeError):
+        svc.get_active_admin("DV0005")

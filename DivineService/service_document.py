@@ -87,6 +87,15 @@ def _safe_path_segment(value: str, fallback: str = "document") -> str:
     return slug or fallback
 
 
+def is_decodable_image(file_bytes: bytes) -> bool:
+    """True when the bytes really decode as an image - Content-Type and file
+    signatures are claims; decoding is the proof."""
+    try:
+        return cv2.imdecode(np.frombuffer(file_bytes, dtype=np.uint8), cv2.IMREAD_COLOR) is not None
+    except cv2.error:
+        return False
+
+
 def _pdf_safe_text(value) -> str:
     """FPDF's core Helvetica font only supports Latin-1; replace anything outside it rather than crash."""
     return str(value).encode("latin-1", errors="replace").decode("latin-1")
@@ -219,6 +228,20 @@ class serviceDocument:
             )
         except Exception:
             pass
+
+    @property
+    def bucket(self) -> str:
+        """The bucket identity documents (KYC photos/scans) are stored in."""
+        return self._bucket
+
+    def store_object(self, object_path: str, file_bytes: bytes, content_type: str) -> None:
+        """Public entry point for writing a KYC object to the default bucket.
+        Raises RuntimeError('storage_*') when storage is unconfigured/unreachable."""
+        self._upload_to_storage(object_path, file_bytes, content_type)
+
+    def delete_object(self, object_path: str) -> None:
+        """Best-effort removal of an object store_object wrote. Never raises."""
+        self._delete_from_storage(object_path)
 
     def _sign_url(self, object_path: str, expires_in: int = DEFAULT_SIGNED_URL_EXPIRY_SECONDS, bucket: str = None) -> str:
         if not self._supabase_url or not self._service_key:
@@ -373,12 +396,7 @@ class serviceDocument:
         # actually are - decoding confirms this is a real, readable image (matching how
         # the QR KYC flow validates uploads) rather than trusting the header alone, which
         # would let an arbitrary file through mislabeled as image/jpeg or image/png.
-        arr = np.frombuffer(file_bytes, dtype=np.uint8)
-        try:
-            img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-        except cv2.error:
-            img = None
-        if img is None:
+        if not is_decodable_image(file_bytes):
             raise ValueError("unsupported_file_type")
 
         document_id = str(uuid.uuid4())
