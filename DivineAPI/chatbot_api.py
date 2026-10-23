@@ -11,16 +11,17 @@ from DivineDTO.models import (
 )
 from DivineService import serviceChatbot
 from DivineService.auth import get_current_admin_or_broker
+from DivineService.client_ip import client_ip
 
 router = APIRouter(prefix="/chatbot", tags=["chatbot"])
 _chatbot_service = serviceChatbot()
 
 
 def _client_ip(request: Request) -> str:
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    return request.client.host if request.client else None
+    """Lead-attribution IP via the shared trusted-proxy rules; None (not the
+    string "unknown") when it can't be determined, as stored before."""
+    ip = client_ip(request)
+    return None if ip == "unknown" else ip
 
 
 @router.post("/session/init", response_model=SessionInitResponseDTO)

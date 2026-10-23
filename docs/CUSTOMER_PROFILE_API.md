@@ -227,7 +227,7 @@ Body is always `{ "detail": "<code>" }`.
 | 401 | `invalid_token` | Bad signature / not a customer-or-broker token | Prompt re-login |
 | 403 | `customer_only` | Valid token but not a customer (e.g. a broker token) | Show access message |
 | 404 | `profile_not_found` | No account matches the token's subject | Treat as "not ready" → local fallback |
-| 429 | `rate_limited` | > 10 requests/60s from the same IP to this path | Back off and retry |
+| 429 | `rate_limited` | > 60 requests/60s per user (or per IP when not logged in) to this path | Back off and retry |
 | 500 | `internal_error` | Unexpected server error | Generic error / local fallback |
 
 ```json

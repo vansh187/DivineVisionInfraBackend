@@ -1,4 +1,7 @@
 import os
+import threading
+import time
+from collections import OrderedDict
 from typing import Optional
 import jwt
 from fastapi import Header, HTTPException
@@ -49,6 +52,52 @@ def _secrets_for_roles(allowed_roles) -> list:
     return secrets
 
 
+_VERIFY_CACHE_MAX = 4096
+_verify_cache = OrderedDict()
+_verify_cache_lock = threading.Lock()
+_BAD_SIGNATURE = object()
+
+
+def _verify(token: str, secret: str) -> dict:
+    """jwt.decode(token, secret, HS256), memoized per (token, secret) so the rate
+    limiter and the route's auth dependency share one HMAC verification per
+    request. Whether a signature is valid for a given pair never changes, so that
+    result (including "bad signature") is cached; the time-based claims are
+    re-checked on every call exactly as PyJWT would (exp <= now -> expired,
+    nbf/iat in the future -> immature). The secret is part of the key, so a token
+    is never accepted under a secret it wasn't verified with."""
+    key = (token, secret)
+    with _verify_cache_lock:
+        payload = _verify_cache.get(key)
+        if payload is not None:
+            _verify_cache.move_to_end(key)
+    if payload is None:
+        try:
+            payload = jwt.decode(token, secret, algorithms=["HS256"],
+                                 options={"verify_exp": False, "verify_nbf": False, "verify_iat": False})
+        except jwt.PyJWTError:
+            payload = _BAD_SIGNATURE
+        with _verify_cache_lock:
+            _verify_cache[key] = payload
+            while len(_verify_cache) > _VERIFY_CACHE_MAX:
+                _verify_cache.popitem(last=False)
+    if payload is _BAD_SIGNATURE:
+        raise jwt.InvalidSignatureError("invalid token")
+
+    now = time.time()
+    for claim in ("exp", "nbf", "iat"):
+        value = payload.get(claim)
+        if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))):
+            raise jwt.DecodeError(f"{claim} must be a number")
+    if payload.get("exp") is not None and payload["exp"] <= now:
+        raise jwt.ExpiredSignatureError("token expired")
+    if payload.get("nbf") is not None and payload["nbf"] > now:
+        raise jwt.ImmatureSignatureError("token not yet valid")
+    if payload.get("iat") is not None and payload["iat"] > now:
+        raise jwt.ImmatureSignatureError("token issued in the future")
+    return payload
+
+
 def _decode_current_user(authorization: str, allowed_roles, reject_refresh: bool = False) -> dict:
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="missing_token")
@@ -62,7 +111,7 @@ def _decode_current_user(authorization: str, allowed_roles, reject_refresh: bool
     expired = False
     for secret in candidate_secrets:
         try:
-            payload = jwt.decode(token, secret, algorithms=["HS256"])
+            payload = _verify(token, secret)
             break
         except jwt.ExpiredSignatureError:
             # Signature matched this secret - the token is genuinely expired
@@ -87,6 +136,22 @@ def _decode_current_user(authorization: str, allowed_roles, reject_refresh: bool
     if reject_refresh and payload.get("type") == "refresh":
         raise HTTPException(status_code=401, detail="invalid_token")
     return {"sub": sub, "username": payload.get("username"), "role": role}
+
+
+def rate_limit_identity(authorization: Optional[str]) -> Optional[str]:
+    """"<role>:<sub>" for a validly SIGNED, unexpired token of any role, else None.
+    Lets the rate limiter key logged-in callers by who they are rather than by
+    IP. The signature check matters: an unverified decode would let a caller
+    mint a fresh bucket per request just by inventing a new `sub`. Never raises -
+    any problem (missing/expired/forged token, unconfigured secret) just means
+    "anonymous" and the caller falls back to IP."""
+    if not authorization:
+        return None
+    try:
+        user = _decode_current_user(authorization, ("admin", "customer", "broker"))
+    except HTTPException:
+        return None
+    return f"{user['role']}:{user['sub']}"
 
 
 def get_current_user(authorization: str = Header(None)) -> dict:

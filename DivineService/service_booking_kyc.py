@@ -56,6 +56,14 @@ class serviceBookingKyc:
         self._email_service_override = email_service
         self._milestone_service_override = milestone_service
 
+    @property
+    def persistence(self) -> persistenceBooking:
+        return self._persistence
+
+    @property
+    def document_service(self) -> serviceDocument:
+        return self._document_service
+
     def _email(self):
         """Lazily built, same reasoning as serviceVisit/servicePayment's lazy
         sub-service getters: a plain queue/detail read never needs to import or

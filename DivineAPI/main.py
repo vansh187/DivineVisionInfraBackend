@@ -1,4 +1,6 @@
 import logging
+import uuid
+import weakref
 from collections import OrderedDict
 from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
@@ -33,17 +35,10 @@ from DivineAPI.admin_payments_api import router as admin_payments_router
 from DivineAPI.admin_refunds_api import router as admin_refunds_router
 from DivineAPI.admin_help_support_api import router as admin_help_support_router
 from DivineService import serviceHealth
-
-
-def _client_ip(request: Request) -> str:
-    # Behind a reverse proxy (this app's deployment target, Render), request.client.host
-    # is the proxy's own IP for every request, not the real caller's - that would collapse
-    # every distinct external client onto one shared rate-limit bucket. X-Forwarded-For's
-    # first entry (nearest to the original client) is used when present.
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
+# Anonymous callers only - logged-in ones are keyed by verified user id.
+from DivineService.client_ip import client_ip
+from DivineService.env_config import positive_int_env
+from DivineService.auth import rate_limit_identity
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
@@ -59,23 +54,49 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     # hit keeps this bounded without needing a background sweep thread.
     MAX_TRACKED_KEYS = 5000
 
-    def __init__(self, app, calls: int = 10, per_seconds: int = 60):
+    # Credential endpoints - password guessing / OTP brute force targets - keep
+    # the strict budget; everything else gets the general one.
+    AUTH_PATHS = frozenset(
+        f"/{role}/{action}"
+        for role in ("admin", "customer", "broker")
+        for action in ("login", "signup", "forgot-password", "reset-password")
+    ) | {"/admin/verify-signup", "/admin/resend-signup-otp", "/admin/refresh"}
+
+    # Live instances, so tests (and an ops hook) can reset counters through a
+    # supported API instead of walking Starlette's private middleware stack.
+    _instances = weakref.WeakSet()
+
+    def __init__(self, app, calls: int = 60, per_seconds: int = 60, auth_calls: int = 10):
         super().__init__(app)
         self.calls = calls
+        self.auth_calls = auth_calls
         self.per_seconds = per_seconds
         self.storage = OrderedDict()
+        RateLimitMiddleware._instances.add(self)
+
+    @classmethod
+    def reset_all(cls) -> None:
+        """Clears every live limiter's counters."""
+        for instance in list(cls._instances):
+            instance.storage.clear()
 
     async def dispatch(self, request: Request, call_next):
-        if request.method == "GET" and request.url.path in self.RATE_LIMIT_EXEMPT_PATHS:
+        path = request.url.path
+        if request.method == "GET" and path in self.RATE_LIMIT_EXEMPT_PATHS:
             return await call_next(request)
 
-        client = _client_ip(request)
-        key = f"{client}:{request.url.path}"
+        # Logged-in callers are bucketed by their verified identity - unspoofable
+        # and independent of proxy headers, and colleagues behind one office IP
+        # no longer share a budget. Only anonymous requests fall back to IP.
+        identity = rate_limit_identity(request.headers.get("authorization"))
+        client = f"user:{identity}" if identity else f"ip:{client_ip(request)}"
+        key = f"{client}:{path}"
+        limit = self.auth_calls if path in self.AUTH_PATHS else self.calls
         now = time()
         bucket = self.storage.get(key, [])
         # remove old
         bucket = [ts for ts in bucket if ts > now - self.per_seconds]
-        if len(bucket) >= self.calls:
+        if len(bucket) >= limit:
             self.storage[key] = bucket
             self.storage.move_to_end(key)
             return JSONResponse({"detail": "rate_limited"}, status_code=status.HTTP_429_TOO_MANY_REQUESTS)
@@ -87,8 +108,34 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
+class RequestIdMiddleware(BaseHTTPMiddleware):
+    """Correlation id for every request, always minted server-side - an inbound
+    X-Request-ID is ignored, so ids are unique and can't be chosen by the caller
+    (they land in audit rows and logs). Exposed to routes as
+    request.state.request_id and returned as the X-Request-ID response header."""
+
+    async def dispatch(self, request: Request, call_next):
+        request_id = str(uuid.uuid4())
+        request.state.request_id = request_id
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = request_id
+        return response
+
+
+DEFAULT_RATE_LIMIT_CALLS = 60
+DEFAULT_RATE_LIMIT_AUTH_CALLS = 10
+DEFAULT_RATE_LIMIT_WINDOW_SECONDS = 60
+
+
 app = FastAPI(title="DivineAPI")
-app.add_middleware(RateLimitMiddleware, calls=10, per_seconds=60)
+app.add_middleware(
+    RateLimitMiddleware,
+    calls=positive_int_env("RATE_LIMIT_CALLS", DEFAULT_RATE_LIMIT_CALLS),
+    auth_calls=positive_int_env("RATE_LIMIT_AUTH_CALLS", DEFAULT_RATE_LIMIT_AUTH_CALLS),
+    per_seconds=positive_int_env("RATE_LIMIT_WINDOW_SECONDS", DEFAULT_RATE_LIMIT_WINDOW_SECONDS),
+)
+# Added after the rate limiter so it wraps it - a 429 still carries the id.
+app.add_middleware(RequestIdMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -100,8 +147,9 @@ app.add_middleware(
     # needed - dropping it closes that gap without affecting how the frontend calls this API.
     allow_methods=["*"],
     allow_headers=["*"],
-    # Lets browser clients read the server-chosen filename on PDF downloads.
-    expose_headers=["Content-Disposition"],
+    # Lets browser clients read the server-chosen filename on PDF downloads, the
+    # correlation id, and upload back-off/replay signals.
+    expose_headers=["Content-Disposition", "X-Request-ID", "Retry-After", "Idempotent-Replayed"],
 )
 
 

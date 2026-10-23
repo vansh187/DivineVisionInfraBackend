@@ -246,6 +246,20 @@ class serviceAdmin:
             logger.exception("admin_approval.super_admin_check_failed")
             return False
 
+    def get_active_admin(self, admin_id: str):
+        """The admin row when that admin may act right now under the same rule
+        login enforces (_require_approved: super admin, or approved), else None.
+        For write endpoints that must not trust a still-unexpired token minted
+        before a rejection. Lookup errors propagate - callers fail closed."""
+        user = self._persistence.get_by_id((admin_id or "").strip())
+        if not user:
+            return None
+        try:
+            self._require_approved(user)
+        except ValueError:
+            return None
+        return user
+
     def _require_approved(self, user) -> None:
         if self.is_super_admin(user):
             return

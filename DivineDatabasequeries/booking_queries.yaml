@@ -70,3 +70,60 @@ insert_decision: |
 
 list_decisions: |
   SELECT * FROM divine_booking_decisions WHERE booking_id = :booking_id ORDER BY created_date ASC;
+
+# --- Admin KYC document upload (POST /admin/bookings/{id}/documents/{type}) ---
+
+# Same optimistic lock as update_decision, plus the booking must still be in
+# :status - re-checked atomically at commit time. Leaves status/kyc_status
+# untouched: uploading a document never approves anything.
+bump_version_if_status: |
+  UPDATE divine_bookings
+  SET version = version + 1, last_updated_date = :last_updated_date
+  WHERE id = :id AND version = :expected_version AND status = :status
+  RETURNING *;
+
+# No-op UPDATEs used purely as portable row locks (Postgres holds the row lock
+# until commit; no FOR UPDATE, which SQLite lacks). Serializes concurrent
+# uploads by one admin / for one customer so the in-transaction rate-limit
+# counts and previous-document lookup are exact.
+lock_admin_row: |
+  UPDATE divine_admin_users SET last_updated_date = last_updated_date WHERE id = :id;
+
+lock_customer_row: |
+  UPDATE divine_customer_users SET last_updated_date = last_updated_date WHERE id = :id;
+
+lock_broker_row: |
+  UPDATE divine_broker_users SET last_updated_date = last_updated_date WHERE id = :id;
+
+# KYC documents belong to the customer, not to one booking - a document
+# uploaded via booking A is also what the owner's other bookings under review
+# now show. Bump their versions too, so an admin approving one of them from a
+# page loaded before the change gets a version_conflict instead of approving
+# documents they never saw.
+bump_sibling_pending_bookings: |
+  UPDATE divine_bookings
+  SET version = version + 1, last_updated_date = :last_updated_date
+  WHERE customer_id = :customer_id AND status = :status AND id <> :id
+  RETURNING id;
+
+insert_document_upload: |
+  INSERT INTO divine_booking_document_uploads(
+    id, booking_id, admin_id, document_type, document_id, previous_document_id, idempotency_key,
+    request_fingerprint, request_id, note, byte_size, content_sha256, created_date
+  )
+  VALUES (
+    :id, :booking_id, :admin_id, :document_type, :document_id, :previous_document_id, :idempotency_key,
+    :request_fingerprint, :request_id, :note, :byte_size, :content_sha256, :created_date
+  )
+  RETURNING *;
+
+get_document_upload_by_key: |
+  SELECT * FROM divine_booking_document_uploads
+  WHERE admin_id = :admin_id AND idempotency_key = :idempotency_key LIMIT 1;
+
+count_recent_document_uploads: |
+  SELECT
+    (SELECT count(*) FROM divine_booking_document_uploads
+     WHERE admin_id = :admin_id AND created_date >= :admin_since) AS by_admin,
+    (SELECT count(*) FROM divine_booking_document_uploads
+     WHERE booking_id = :booking_id AND created_date >= :booking_since) AS by_booking;

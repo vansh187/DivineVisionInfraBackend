@@ -4,6 +4,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 import jwt
+import pytest
 from fastapi.testclient import TestClient
 
 os.environ["DATABASE_URL"] = "sqlite:///./test_db.sqlite"
@@ -13,11 +14,19 @@ os.environ["ADMIN_JWT_SECRET_KEY"] = "admintestsecret"
 from Divinepersistence.persistence_db import PersistenceDB
 from Divinepersistence.persistence_admin import persistenceAdmin
 from DivineService.service_email import serviceEmail
-from DivineAPI.main import app
+from DivineAPI.main import app, RateLimitMiddleware
 
 client = TestClient(app)
 
 _ADMIN_ID = None
+
+
+@pytest.fixture(autouse=True)
+def _fresh_rate_limit_budget():
+    """The global limiter buckets logged-in callers by user, so every test here
+    (same admin, same path) shares one per-minute budget with the rest of the
+    suite - start each test with empty counters instead."""
+    RateLimitMiddleware.reset_all()
 
 
 def setup_module(module):
@@ -44,9 +53,8 @@ def _admin_headers(admin_id: str = None, ip: str = None):
     }
     headers = {"Authorization": f"Bearer {jwt.encode(payload, 'admintestsecret', algorithm='HS256')}"}
     if ip:
-        # The endpoint's own rate limiter buckets by (client ip, path); each test
-        # uses its own fake forwarded-for IP so it gets a fresh bucket instead of
-        # tripping over calls made by other tests in this module.
+        # Only affects anonymous/invalid-token requests now (logged-in callers are
+        # rate-limited by user) - see _fresh_rate_limit_budget.
         headers["X-Forwarded-For"] = ip
     return headers
 

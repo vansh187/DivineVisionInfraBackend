@@ -193,6 +193,64 @@ already acted" case surfacing correctly, not a bug.
 
 ---
 
+## 4. `POST /admin/bookings/{booking_id}/documents/{document_type}` — upload/replace a KYC document
+
+Lets an admin upload or replace one checklist document on a booking that is still
+`pending_kyc_review`. The path has **no `/api/v1` prefix** — same as every other route here.
+
+`document_type`: `aadhaar_front` | `aadhaar_back` | `pan_card` | `applicant_photo` | `cancelled_cheque`.
+
+Headers: `Authorization: Bearer <admin token>`, `Idempotency-Key: <UUID>` (generate a new one per
+upload; reuse it **only** when retrying that same upload). Don't set `Content-Type` yourself —
+let the HTTP client add the multipart boundary.
+
+`multipart/form-data` parts:
+
+| Part | Required | Rules |
+|---|---|---|
+| `file` | yes | JPG/JPEG or PNG, max 10 MiB. **PDF is accepted only for `cancelled_cheque`** — Aadhaar, PAN and the applicant photo are embedded as images into the generated booking application, so they must be images. The server checks the file's real content: extension, declared MIME and actual bytes must all match. Encrypted PDFs are rejected. |
+| `expected_version` | yes | the booking `version` you last loaded (integer ≥ 1) |
+| `note` | no | plain text, max 500 characters, trimmed; shown in Decision History |
+
+**200** returns the refreshed Booking Detail (same shape as §2) with `version` bumped by 1, the
+new file in `documents[]` (fresh `preview_url`), and a `kyc_document_uploaded` entry in
+`decision_history`. Uploading **never** changes `status` or `kyc_status` — the admin still uses
+Approve. A retry with the same `Idempotency-Key` and identical content returns the same result
+with the `Idempotent-Replayed: true` header and writes nothing new.
+
+The file becomes the customer's latest document of that type; the prior file is kept (not
+deleted) and referenced in the audit record.
+
+Documents belong to the customer, not to one booking, so the customer's **other** bookings
+still in `pending_kyc_review` show the new file too. Their `version` is bumped as well and
+their Decision History gets a `kyc_document_uploaded` entry naming the booking it was uploaded
+through — so a page loaded before the upload gets `409 version_conflict` on Approve instead of
+approving documents the admin never saw. Re-fetch on 409 as usual.
+
+### Errors (this endpoint only)
+Errors use an object `detail`: `{"detail": {"code": "...", "message": "..."}}`. `message` is safe
+to show. Every response carries a server-generated `X-Request-ID` (any value the client sends is
+ignored) — include it in support reports.
+
+| Status | `detail.code` | Meaning |
+|---|---|---|
+| 400 | `invalid_multipart` | body isn't valid multipart, `Idempotency-Key` isn't a UUID, or the request has no `Content-Length` (chunked uploads are refused; browsers always send it for `FormData`) |
+| 401 | `unauthorized` | missing/invalid/expired admin token |
+| 403 | `forbidden` | the admin account isn't (or is no longer) approved — same rule as login, so super admins are always allowed |
+| 404 | `booking_not_found` | unknown booking id |
+| 409 | `version_conflict` | stale `expected_version`; `detail.current_version` is included — re-fetch |
+| 409 | `booking_not_uploadable` | booking is no longer `pending_kyc_review` |
+| 409 | `idempotency_conflict` | that `Idempotency-Key` was already used for a different upload |
+| 413 | `file_too_large` | over 10 MiB |
+| 415 | `unsupported_media_type` | not a matching PDF/JPG/PNG |
+| 422 | `validation_error` | missing file/`expected_version`/`Idempotency-Key`, bad document type, note too long |
+| 429 | `rate_limited` | over 10 uploads/minute per admin or 20/hour per booking; honour `Retry-After` (seconds) |
+| 500 | `internal_error` | unexpected — retry with the **same** `Idempotency-Key` |
+| 503 | `document_storage_unavailable` | storage is down; nothing was saved — retry with the same key |
+| 503 | `document_saved_refresh_failed` | the upload **was saved** (`detail.saved: true`) but the booking couldn't be reloaded — retry with the same key (replays without a second upload) or re-fetch the booking |
+
+---
+
 ## Known limitations (phase 1 — flag to your PM, not bugs to chase)
 - There is no per-document "Verified" / "Needs Resubmission" flag yet — the admin makes
   **one** overall Approve/Reject decision per booking after reviewing the document set.
