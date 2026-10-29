@@ -40,16 +40,13 @@ class servicePayment:
         self._offline_submissions = persistenceOfflineSubmission()
 
     def submit_offline_installment(self, customer_id, amount, installment_no, due_date, method, utr_number,
-                                   booking_id=None):
+                                   booking_id=None, cheque_number=None):
         self._validate_amount(amount)
-        method = (method or "").strip().lower()
-        utr_number = (utr_number or "").strip() or None
-        if method not in ("cash", "rtgs_neft"):
-            raise ValueError("invalid_method")
-        if method == "rtgs_neft" and not utr_number:
-            raise ValueError("utr_number_required")
-        if method == "cash" and utr_number:
-            raise ValueError("utr_not_allowed_for_cash")
+        method, utr_number, cheque_number = self._clean_manual_method(method, utr_number, cheque_number)
+        # Stricter than record_cash_payment: a customer's self-submitted UTR on a
+        # cash/cheque payment is a mistake an admin would otherwise approve blind.
+        if method != "rtgs_neft" and utr_number:
+            raise ValueError("utr_only_for_rtgs_neft")
         due_date = self._clean_due_date(due_date)
         if not due_date:
             raise ValueError("invalid_due_date")
@@ -73,7 +70,8 @@ class servicePayment:
         actual_due = getattr(milestone, "due_date", None)
         if actual_due and str(actual_due)[:10] != due_date.isoformat():
             raise ValueError("installment_due_date_mismatch")
-        return self._offline_submissions.create(customer_id, milestone, amount, method, utr_number, due_date)
+        return self._offline_submissions.create(customer_id, milestone, amount, method, utr_number, due_date,
+                                                cheque_number=cheque_number)
 
     def list_offline_submissions(self, status="pending_review"):
         return self._offline_submissions.list(status)
@@ -310,7 +308,7 @@ class servicePayment:
 
     _INSTALLMENT_GUARD_CODES = (
         "no_booking", "installment_not_found", "installment_already_paid",
-        "installment_out_of_order", "installment_not_payable", "installment_amount_mismatch",
+        "installment_out_of_order", "installment_amount_mismatch",
     )
 
     def _guard_installment(self, owner_id: str, installment_no, amount, due_date,
@@ -501,6 +499,22 @@ class servicePayment:
 
     _MANUAL_METHODS = ("cash", "rtgs_neft", "cheque")
 
+    def _clean_manual_method(self, method, utr_number, cheque_number):
+        """Shared by record_cash_payment and submit_offline_installment: normalizes
+        a manual method and its reference numbers -> (method, utr, cheque_number).
+        A cheque number is kept only on a cheque payment. Raises
+        ValueError("invalid_method") / ("utr_number_required") / ("cheque_number_required")."""
+        method = (method or "").strip().lower()
+        if method not in self._MANUAL_METHODS:
+            raise ValueError("invalid_method")
+        utr_number = (utr_number or "").strip() or None
+        if method == "rtgs_neft" and not utr_number:
+            raise ValueError("utr_number_required")
+        cheque_number = (cheque_number or "").strip() or None
+        if method == "cheque" and not cheque_number:
+            raise ValueError("cheque_number_required")
+        return method, utr_number, (cheque_number if method == "cheque" else None)
+
     def record_cash_payment(self, amount: float, owner_id: str, owner_role: str, note: str = None,
                             purpose: str = "other", inventory_id: str = None,
                             installment_no: int = None, due_date=None, method: str = "cash",
@@ -524,15 +538,9 @@ class servicePayment:
         inventory_id = (inventory_id or "").strip() or None
         installment_no = self._clean_installment_no(installment_no)
         due_date = self._clean_due_date(due_date)
-        clean_method = (method or "cash").strip().lower()
-        if clean_method not in self._MANUAL_METHODS:
-            raise ValueError("invalid_method")
-        clean_utr = (utr_number or "").strip() or None
-        if clean_method == "rtgs_neft" and not clean_utr:
-            raise ValueError("utr_number_required")
-        clean_cheque_number = (cheque_number or "").strip() or None
-        if clean_method == "cheque" and not clean_cheque_number:
-            raise ValueError("cheque_number_required")
+        clean_method, clean_utr, clean_cheque_number = self._clean_manual_method(
+            method or "cash", utr_number, cheque_number,
+        )
         if purpose == INSTALLMENT_PURPOSE:
             self._guard_installment(owner_id, installment_no, amount, due_date, inventory_id)
 

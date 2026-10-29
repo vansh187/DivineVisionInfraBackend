@@ -18,7 +18,7 @@ from DivineService.service_payment_schedule import build_payment_schedule
 logger = logging.getLogger(__name__)
 
 IST = timezone(timedelta(hours=5, minutes=30))
-PAY_WINDOW_DAYS = 5      # "Pay now" unlocks this many days before due_date
+PAY_WINDOW_DAYS = 5      # T_MINUS_5 reminder window; payment itself is not gated on it
 REMINDER_LEAD_DAYS = 20  # "due" status / first reminder starts this many days before
 
 _BOOKING_DOC_HINT = "booking"
@@ -74,11 +74,6 @@ def compute_status(due_date, is_paid: bool, today=None) -> str:
     if d - timedelta(days=REMINDER_LEAD_DAYS) <= today <= d:
         return "due"
     return "upcoming"
-
-
-def pay_enabled_from(due_date):
-    d = _to_date(due_date)
-    return (d - timedelta(days=PAY_WINDOW_DAYS)).isoformat() if d else None
 
 
 def _row_is_on_booking(row: dict, index: int) -> bool:
@@ -292,9 +287,16 @@ class serviceMilestones:
             list({getattr(r, "booking_id", None) for r in records if getattr(r, "booking_id", None)})
         )
 
+        # No pay window: an instalment is payable from its plot's booking date (the
+        # On Booking milestone's due date); out-of-order payment is still refused.
+        booking_dates = {}
+        for r in records:
+            booking_dates.setdefault(getattr(r, "booking_id", None), _to_date(getattr(r, "due_date", None)))
+
         rows = []
         for r in records:
             is_paid = (getattr(r, "status", None) == "paid")
+            payable_from = booking_dates.get(getattr(r, "booking_id", None))
             due = getattr(r, "due_date", None)
             status = "paid" if is_paid else (
                 "pending_review" if getattr(r, "id", None) in pending_ids else compute_status(due, False, today)
@@ -307,7 +309,7 @@ class serviceMilestones:
                 "due_date": _to_date(due).isoformat() if _to_date(due) else None,
                 "amount": int(round(_to_num(getattr(r, "amount", None)) or 0)),
                 "status": status,
-                "pay_enabled_from": pay_enabled_from(due),
+                "pay_enabled_from": payable_from.isoformat() if payable_from else None,
                 "paid_on": self._iso(getattr(r, "paid_on", None)),
                 "paid_payment_id": getattr(r, "paid_payment_id", None),
             })
@@ -457,11 +459,8 @@ class serviceMilestones:
         if earlier_unpaid:
             return target, "installment_out_of_order"
 
-        due = _to_date(getattr(target, "due_date", None))
-        if due is not None:
-            window_open = due - timedelta(days=PAY_WINDOW_DAYS)
-            if ist_today() < window_open:
-                return target, "installment_not_payable"
+        # No pay-window check: customers may pay the next-in-order instalment any
+        # time after booking (enrich() reports pay_enabled_from = booking date).
 
         milestone_amount = _to_num(getattr(target, "amount", None)) or 0
         paid_amount = _to_num(amount) or 0

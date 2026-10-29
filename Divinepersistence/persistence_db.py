@@ -86,6 +86,20 @@ class PersistenceDB:
             # in this app today, and request handlers still log concrete DB failures.
             logger.exception("lightweight_migrations_failed")
 
+        # Own transaction: the offline-submission INSERT/SELECT hard-require this
+        # column, so a failure in the admin-user migrations above must not skip it.
+        try:
+            with self.engine.begin() as conn:
+                inspector = inspect(conn)
+                if "divine_offline_payment_submissions" in set(inspector.get_table_names()):
+                    columns = {c["name"] for c in inspector.get_columns("divine_offline_payment_submissions")}
+                    if "cheque_number" not in columns:
+                        conn.execute(text(
+                            "ALTER TABLE divine_offline_payment_submissions ADD COLUMN cheque_number varchar(50);"
+                        ))
+        except Exception:
+            logger.exception("offline_submission_cheque_number_migration_failed")
+
     def test_connection(self) -> bool:
         """Attempt a simple connection to validate DB connectivity. Returns True on success."""
         try:

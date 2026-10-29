@@ -27,8 +27,9 @@ with the last row absorbing rounding so the column foots exactly.
 | `due` | not paid and `due_date − 20 days ≤ today ≤ due_date` |
 | `upcoming` | not paid and `today < due_date − 20 days` |
 
-`pay_enabled_from = due_date − 5 days`. Ordering is enforced: only the **earliest
-unpaid** milestone is payable.
+There is **no pay window**: an instalment can be paid any time after booking, so
+`pay_enabled_from` = the plot's booking date. Ordering is still enforced: only the
+**earliest unpaid** milestone is payable.
 
 ---
 
@@ -69,7 +70,6 @@ Auth: customer bearer token.
 | `installment_not_found` | no milestone at `installment_no` |
 | `installment_already_paid` | that milestone is already `paid` |
 | `installment_out_of_order` | an earlier milestone is still unpaid |
-| `installment_not_payable` | `today < due_date − 5 days` (window not open) |
 | `installment_amount_mismatch` | `amount` ≠ milestone amount (±1) |
 
 The **same** checks re-run at settle time (order + settle can be minutes apart).
@@ -111,6 +111,42 @@ A "duplicate settle" (webhook arriving after `/verify`) is tolerated and returns
 
 ---
 
+## 3a. `POST /payments/offline-submissions` — pay an instalment offline (cash / RTGS-NEFT / cheque)
+
+Auth: customer bearer token. Use this from the payment plan's **Pay now** when the
+customer pays **offline** instead of Razorpay. The instalment is **not** marked paid
+straight away: it shows `status: "pending_review"` in the schedule until an admin
+approves it (then `paid`, with a receipt email) or rejects it.
+
+Offer all three methods next to the online option:
+
+| `method` | Extra field |
+|----------|-------------|
+| `"cash"` | none — do not send `utr_number` |
+| `"rtgs_neft"` | `utr_number` **required** (bank UTR) |
+| `"cheque"` | `cheque_number` **required** — do not send `utr_number` |
+
+```jsonc
+{
+  "amount": 750000,              // exactly the row amount
+  "purpose": "installment",
+  "installment_no": 2,
+  "due_date": "2025-02-15",      // that row's due_date
+  "method": "cash",              // "cash" | "rtgs_neft" | "cheque"
+  "utr_number": null,            // rtgs_neft only
+  "cheque_number": null,         // cheque only
+  "booking_id": null             // optional, multi-plot customers
+}
+```
+
+`201` → `{ id, amount, method, status: "pending_review", installment_no, utr_number, cheque_number, created_date }`
+
+Errors: `400` with the §2 guard codes, plus `invalid_method`, `utr_number_required`,
+`cheque_number_required`, `utr_only_for_rtgs_neft`, `installment_due_date_mismatch`;
+`409 duplicate_pending_submission` (one is already awaiting review for that row).
+
+---
+
 ## 4. `GET /customer/profile` → `booking.payment_schedule[]` + `booking.next_due`
 
 > **Multi-plot:** a customer with more than one plot now also gets `bookings[]`
@@ -127,7 +163,7 @@ Each schedule row now carries:
   "due_date": "2025-04-10",
   "amount": 443576,
   "status": "due",                  // NEW — paid | due | overdue | upcoming
-  "pay_enabled_from": "2025-04-05", // NEW — due_date − 5 days
+  "pay_enabled_from": "2025-01-10", // NEW — the plot's booking date (no pay window)
   "paid_on": null,                  // NEW — ISO timestamp when paid
   "paid_payment_id": null           // NEW
 }
@@ -149,8 +185,8 @@ computing its banner from the schedule and ignore this):
 }
 ```
 
-Partial rollout is safe — the FE re-derives the same status/windows from `due_date`
-when these fields are absent.
+Partial rollout is safe — the FE re-derives the same status from `due_date` when
+these fields are absent.
 
 ---
 
@@ -220,8 +256,10 @@ Subject: `Payment due - ₹4,43,576 for OPS Divine Greens Plot 204 by 10 Apr 202
 2. On `verify` / `cash` success read `installment_status`:
    - `"paid"` → done, refresh the schedule.
    - `"rejected"` → payment received, reconciliation pending — **not** an error.
-3. Read the new per-row `status` / `pay_enabled_from` (or keep deriving them from
-   `due_date`). Enable **Pay now** only on the earliest row whose status is
-   `due` / `overdue` and `today ≥ pay_enabled_from`.
+3. Enable **Pay now** on the earliest unpaid row, whatever its `status`
+   (`upcoming` / `due` / `overdue`) — early payment is allowed. Do not gate it on
+   `due_date − 5 days` any more. Offer **Online (Razorpay)** plus the offline options
+   **Cash**, **RTGS/NEFT** and **Cheque** (§3a); show `pending_review` rows as
+   "Awaiting confirmation" with Pay now disabled.
 4. Offer the receipt from `GET /payments/{payment_id}/receipt` (opens/downloads a PDF).
 5. `booking.next_due` is available if you want it for the banner; not required.

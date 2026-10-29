@@ -17,7 +17,7 @@ from sqlalchemy import text
 from Divinepersistence.persistence_db import PersistenceDB, engine
 from Divinepersistence.persistence_milestone import persistenceMilestone
 from DivineService.service_milestones import (
-    serviceMilestones, compute_status, pay_enabled_from, PAY_WINDOW_DAYS, REMINDER_LEAD_DAYS,
+    serviceMilestones, compute_status, PAY_WINDOW_DAYS, REMINDER_LEAD_DAYS,
 )
 from DivineService.service_payment import servicePayment
 from DivineService.service_payment_reminders import serviceReminders, pick_kind
@@ -32,6 +32,7 @@ client = TestClient(app)
 #  helpers                                                                     #
 # --------------------------------------------------------------------------- #
 _WIPE_TABLES = (
+    "divine_offline_payment_submissions",
     "divine_payment_reminders", "divine_payment_milestones",
     "divine_documents", "divine_payments",
 )
@@ -109,7 +110,6 @@ def test_compute_status_windows():
     assert compute_status((t + timedelta(days=REMINDER_LEAD_DAYS)).isoformat(), False, t) == "due"
     assert compute_status((t + timedelta(days=1)).isoformat(), False, t) == "due"
     assert compute_status((t - timedelta(days=1)).isoformat(), False, t) == "overdue"
-    assert pay_enabled_from("2026-06-20") == (date(2026, 6, 20) - timedelta(days=PAY_WINDOW_DAYS)).isoformat()
 
 
 def test_pick_kind_boundaries():
@@ -141,12 +141,15 @@ def test_ensure_for_customer_builds_10_15_25_25_25_from_booking():
 
 def test_enriched_schedule_has_status_and_next_due():
     _reset_db()
-    _seed_booking(booking_date=(date.today() - timedelta(days=30)).isoformat())
+    bdate = (date.today() - timedelta(days=30)).isoformat()
+    _seed_booking(booking_date=bdate)
     out = serviceMilestones().enriched_schedule("C00001")
     rows = out["rows"]
     assert len(rows) == 5
     assert rows[0]["status"] == "paid"
-    assert all("pay_enabled_from" in r and "id" in r for r in rows)
+    assert all(r["id"] for r in rows)
+    # No pay window: every row is payable from the booking date, not due_date - 5d.
+    assert all(r["pay_enabled_from"] == bdate for r in rows)
     assert out["next_due"]["milestone_id"] == rows[1]["id"]
     assert out["next_due"]["status"] in ("due", "overdue", "upcoming")
 
@@ -168,12 +171,14 @@ def test_validate_installment_guard_rails():
     assert code is None and milestone.milestone_no == 2
 
 
-def test_validate_installment_window_not_open():
+def test_validate_installment_payable_before_due_date():
     _reset_db()
     _seed_booking(booking_date=date.today().isoformat())  # m2 due in 45d
     svc = serviceMilestones()
     rows = svc.ensure_for_customer("C00001")
-    assert svc.validate_installment("C00001", 2, rows[1].amount)[1] == "installment_not_payable"
+    # Early payment of the next instalment is allowed - there is no pay window.
+    milestone, code = svc.validate_installment("C00001", 2, rows[1].amount)
+    assert code is None and milestone.milestone_no == 2
 
 
 def test_mark_paid_updates_amount_received():
@@ -220,15 +225,57 @@ def test_cash_installment_marks_milestone_paid():
 
 def test_cash_installment_guard_failure_at_order_time_raises_code():
     _reset_db()
-    _seed_booking(booking_date=date.today().isoformat())  # window not open for m2
+    _seed_booking(booking_date=date.today().isoformat())  # m2 unpaid, so m3 is out of order
     svc, payments = _pay_service_with_real_milestones()
     try:
-        svc.record_cash_payment(750000, owner_id="C00001", owner_role="customer",
-                                purpose="installment", installment_no=2)
+        svc.record_cash_payment(1250000, owner_id="C00001", owner_role="customer",
+                                purpose="installment", installment_no=3)
         assert False, "expected ValueError"
     except ValueError as e:
-        assert str(e) == "installment_not_payable"
+        assert str(e) == "installment_out_of_order"
     payments.create_payment.assert_not_called()
+
+
+def test_offline_cheque_submission_requires_number_and_carries_it_to_payment():
+    _reset_db()
+    _seed_booking(booking_date=date.today().isoformat())  # m2 due in 45d - early payment allowed
+    rows = serviceMilestones().ensure_for_customer("C00001")
+    m2 = rows[1]
+    svc = servicePayment(MagicMock(), MagicMock())
+    try:
+        svc.submit_offline_installment("C00001", int(m2.amount), 2, str(m2.due_date), "cheque", None)
+        assert False, "expected ValueError"
+    except ValueError as e:
+        assert str(e) == "cheque_number_required"
+
+    sub = svc.submit_offline_installment("C00001", int(m2.amount), 2, str(m2.due_date), "cheque", None,
+                                         cheque_number=" 004512 ")
+    assert sub.method == "cheque" and sub.cheque_number == "004512" and sub.status == "pending_review"
+
+    with patch.object(servicePayment, "_send_installment_receipt"):
+        decided = svc.decide_offline_submission(sub.id, "A0001", "approved")
+    with engine.begin() as c:
+        pay = c.execute(text("SELECT method, cheque_number, recorded_by_admin_id, notes FROM divine_payments "
+                             "WHERE id=:id"), {"id": decided.payment_id}).mappings().first()
+    assert pay["method"] == "cheque" and pay["cheque_number"] == "004512"
+    # Customer-submitted, admin-approved: not recorded as an admin-entered payment.
+    assert pay["recorded_by_admin_id"] is None
+    notes = pay["notes"] if isinstance(pay["notes"], dict) else json.loads(pay["notes"])
+    assert notes == {"offline_submission_id": sub.id, "approved_by": "A0001"}
+
+
+def test_offline_submission_rejects_utr_on_cheque_or_cash():
+    _reset_db()
+    _seed_booking(booking_date=date.today().isoformat())
+    m2 = serviceMilestones().ensure_for_customer("C00001")[1]
+    svc = servicePayment(MagicMock(), MagicMock())
+    for method in ("cheque", "cash"):
+        try:
+            svc.submit_offline_installment("C00001", int(m2.amount), 2, str(m2.due_date), method, "UTR123",
+                                           cheque_number="004512")
+            assert False, "expected ValueError"
+        except ValueError as e:
+            assert str(e) == "utr_only_for_rtgs_neft"
 
 
 def test_installment_settle_guard_failure_keeps_payment_and_flags_review():
@@ -325,12 +372,12 @@ def test_profile_exposes_enriched_schedule_and_next_due():
 
 def test_create_order_installment_guard_returns_400_code():
     cid = _sub(_OTHER)
-    _seed_booking(customer_id=cid, booking_date=date.today().isoformat())  # window closed for m2
+    _seed_booking(customer_id=cid, booking_date=date.today().isoformat())  # m2 unpaid, so m3 is out of order
     r = client.post("/payments/create-order",
-                    json={"amount": 750000, "purpose": "installment", "installment_no": 2},
+                    json={"amount": 1250000, "purpose": "installment", "installment_no": 3},
                     headers=_h(_OTHER))
     assert r.status_code == 400
-    assert r.json()["detail"] == "installment_not_payable"
+    assert r.json()["detail"] == "installment_out_of_order"
 
 
 def test_cash_installment_end_to_end_and_receipt_pdf():
@@ -359,6 +406,43 @@ def test_cash_installment_end_to_end_and_receipt_pdf():
     assert rc.status_code == 200, rc.text
     assert rc.content[:5] == b"%PDF-"
     assert client.get(f"/payments/{payment_id}/receipt", headers=_h(_OTHER)).status_code in (403, 404)
+
+
+def test_offline_cheque_submission_api_forwards_and_echoes_cheque_number():
+    token = _mint("C70003")
+    cid = _sub(token)
+    _seed_booking(customer_id=cid, booking_date=date.today().isoformat())
+    m2 = serviceMilestones().ensure_for_customer(cid)[1]
+    body = {"amount": int(m2.amount), "purpose": "installment", "installment_no": 2,
+            "due_date": str(m2.due_date), "method": "cheque"}
+
+    r = client.post("/payments/offline-submissions", json={**body, "cheque_number": "CHQ7788", "utr_number": "U1"},
+                    headers=_h(token))
+    assert r.status_code == 400 and r.json()["detail"] == "utr_only_for_rtgs_neft"
+
+    r = client.post("/payments/offline-submissions", json=body, headers=_h(token))
+    assert r.status_code == 400 and r.json()["detail"] == "cheque_number_required"
+
+    r = client.post("/payments/offline-submissions", json={**body, "cheque_number": "CHQ7788"}, headers=_h(token))
+    assert r.status_code == 201, r.text
+    assert r.json()["method"] == "cheque" and r.json()["cheque_number"] == "CHQ7788"
+
+
+def test_offline_cash_submission_from_payment_plan_goes_to_admin_review():
+    token = _mint("C70004")
+    cid = _sub(token)
+    _seed_booking(customer_id=cid, booking_date=date.today().isoformat())
+    m2 = serviceMilestones().ensure_for_customer(cid)[1]
+    r = client.post("/payments/offline-submissions", json={
+        "amount": int(m2.amount), "purpose": "installment", "installment_no": 2,
+        "due_date": str(m2.due_date), "method": "cash",
+    }, headers=_h(token))
+    assert r.status_code == 201, r.text
+    out = r.json()
+    assert out["method"] == "cash" and out["status"] == "pending_review"
+    assert out["utr_number"] is None and out["cheque_number"] is None
+    sched = serviceMilestones().enriched_schedule(cid)["rows"]
+    assert sched[1]["status"] == "pending_review"
 
 
 def test_receipt_404_for_unknown_payment():
