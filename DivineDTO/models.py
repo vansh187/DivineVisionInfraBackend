@@ -338,8 +338,9 @@ class OfflinePaymentSubmissionDTO(BaseModel):
     installment_no: int = Field(..., ge=1)
     booking_id: Optional[str] = Field(None, max_length=36)
     due_date: str = Field(..., min_length=10, max_length=10)
-    method: Literal["cash", "rtgs_neft"]
+    method: Literal["cash", "rtgs_neft", "cheque"]
     utr_number: Optional[str] = Field(None, max_length=50)
+    cheque_number: Optional[str] = Field(None, max_length=50, description="Required when method='cheque'")
 
 
 class OfflinePaymentSubmissionOutDTO(BaseModel):
@@ -349,6 +350,7 @@ class OfflinePaymentSubmissionOutDTO(BaseModel):
     status: str
     installment_no: int
     utr_number: Optional[str] = None
+    cheque_number: Optional[str] = None
     created_date: datetime
 
 
@@ -1087,7 +1089,7 @@ class PaymentScheduleRowDTO(BaseModel):
     due_date: Optional[str] = None
     amount: Optional[int] = None
     status: Optional[str] = None          # paid | pending_review | due | overdue | upcoming
-    pay_enabled_from: Optional[str] = None  # due_date - 5 days
+    pay_enabled_from: Optional[str] = None  # the plot's booking date - no pay window
     paid_on: Optional[str] = None
     paid_payment_id: Optional[str] = None
 

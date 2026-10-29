@@ -19,6 +19,7 @@ def _offline_submission_dto(row):
     return OfflinePaymentSubmissionAdminDTO(
         id=row.id, amount=float(row.amount), method=row.method, status=row.status,
         installment_no=row.installment_no, utr_number=row.utr_number,
+        cheque_number=getattr(row, "cheque_number", None),
         created_date=row.created_date, customer_id=row.customer_id,
         customer_name=f"{first} {last}".strip() or None,
         booking_id=row.booking_id, inventory_id=row.inventory_id,

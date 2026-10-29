@@ -26,12 +26,12 @@ def submit_offline_installment(dto: OfflinePaymentSubmissionDTO, current_user: d
     try:
         record = _payment_service.submit_offline_installment(
             current_user["sub"], dto.amount, dto.installment_no, dto.due_date,
-            dto.method, dto.utr_number, dto.booking_id,
+            dto.method, dto.utr_number, dto.booking_id, cheque_number=dto.cheque_number,
         )
         return OfflinePaymentSubmissionOutDTO(
             id=record.id, amount=float(record.amount), method=record.method, status=record.status,
             installment_no=record.installment_no, utr_number=record.utr_number,
-            created_date=record.created_date,
+            cheque_number=getattr(record, "cheque_number", None), created_date=record.created_date,
         )
     except ValueError as e:
         code = str(e)
