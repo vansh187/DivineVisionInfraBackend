@@ -26,7 +26,7 @@ _BOOKING_DATE_KEYS = ("booking_date", "bookingDate", "date")
 
 DEFAULT_SIGNED_URL_EXPIRY_SECONDS = 3600
 MAX_PHOTO_UPLOAD_BYTES = 8 * 1024 * 1024  # 8 MB, matches the KYC upload limit
-MAX_BOOKING_APPLICATION_UPLOAD_BYTES = 15 * 1024 * 1024  # 15 MB, generous for a scanned/signed PDF
+MAX_BOOKING_APPLICATION_UPLOAD_BYTES = 19 * 1024 * 1024  # 19 MB - room for embedded photos, safely under Zoho CRM's 20 MB per-attachment cap
 MAX_FORM_DATA_FIELDS = 200  # guards against a pathological form_data payload bloating the DB row
 
 _UNSAFE_PATH_CHARS = re.compile(r"[^a-zA-Z0-9_-]+")
