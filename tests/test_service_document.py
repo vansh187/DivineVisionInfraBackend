@@ -630,7 +630,7 @@ def test_upload_booking_application_rejects_non_pdf_bytes():
 
 def test_upload_booking_application_rejects_oversized_file():
     svc, _, _ = _booking_service(_paid_payment())
-    huge = _PDF_BYTES + b"0" * (16 * 1024 * 1024)
+    huge = _PDF_BYTES + b"0" * (19 * 1024 * 1024)
     try:
         svc.upload_booking_application(
             huge, "application/pdf", "project_booking_application", "proj1", "pay1", None, None, "{}",
