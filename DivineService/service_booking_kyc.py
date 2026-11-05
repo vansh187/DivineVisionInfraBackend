@@ -391,15 +391,22 @@ class serviceBookingKyc:
         Same error codes as get_allotment_letter."""
         booking, form, fields = self._letter_context(booking_id)
         from DivineService.service_demand_letter import (
-            _ADDRESS_KEYS, _AREA_KEYS, _NAME_KEYS, _first, generate_demand_letter_pdf,
+            _ADDRESS_KEYS, _AREA_KEYS, _GENDER_KEYS, _NAME_KEYS, _PROJECT_KEYS, _first,
+            generate_demand_letter_pdf,
         )
         merged = dict(form)
         # Identity/plot fields only fill gaps in what the customer filed.
         for form_key, keys, field in (("applicant_name", _NAME_KEYS, "name"),
                                       ("applicant_address", _ADDRESS_KEYS, "address"),
-                                      ("plot_area_sq_yd", _AREA_KEYS, "plot_area_sq_yd")):
+                                      ("plot_area_sq_yd", _AREA_KEYS, "plot_area_sq_yd"),
+                                      ("gender", _GENDER_KEYS, "gender"),
+                                      ("project_name", _PROJECT_KEYS, "township")):
             if not _first(form, keys) and fields.get(field):
                 merged[form_key] = fields[field]
+        # The booking row's project decides the company letterhead.
+        booking_project = getattr(booking, "project_name", None)
+        if isinstance(booking_project, str) and booking_project.strip():
+            merged["project_name"] = booking_project.strip()
         # Plot number and money are authoritative from the booking + milestones.
         for key, value in (("unit_number", fields.get("unit_no")),
                            ("total_consideration", fields.get("total_amount")),
@@ -564,7 +571,8 @@ class serviceBookingKyc:
                 customer = None
 
         schedule = [
-            {"label": r.label, "percent": r.percent, "due_date": r.due_date, "amount": r.amount}
+            {"label": r.label, "percent": r.percent, "due_date": r.due_date, "amount": r.amount,
+             "status": getattr(r, "status", None)}
             for r in (getattr(entry, "payment_schedule", None) or [])
         ]
         plot_area = pick(getattr(entry, "plot_area_sq_yd", None), _first(form, _AREA_KEYS))
