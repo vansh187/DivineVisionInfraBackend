@@ -100,6 +100,14 @@ class PersistenceDB:
         except Exception:
             logger.exception("offline_submission_cheque_number_migration_failed")
 
+        # Own transaction: login/password-reset and the inventory sheet sync read
+        # these columns, so they must exist the moment this code is deployed.
+        try:
+            with self.engine.begin() as conn:
+                ensure_offline_import_columns(conn)
+        except Exception:
+            logger.exception("offline_import_columns_migration_failed")
+
     def test_connection(self) -> bool:
         """Attempt a simple connection to validate DB connectivity. Returns True on success."""
         try:
@@ -138,3 +146,50 @@ def load_queries(filename: str) -> dict:
     except Exception:
         pass
     return {}
+
+
+# Columns added for the offline-buyer import + client inventory sheet sync.
+# Shared by PersistenceDB.apply_lightweight_migrations (app startup) and
+# scripts/add_offline_import_support.py. Additive and idempotent.
+OFFLINE_IMPORT_COLUMNS = {
+    "divine_customer_users": (
+        ("source", "varchar(30) NOT NULL DEFAULT 'website'"),
+        ("must_change_password", "boolean NOT NULL DEFAULT false"),
+        ("temp_password_expires_at", "timestamptz"),
+        ("invite_status", "varchar(20)"),
+        ("invite_sent_at", "timestamptz"),
+    ),
+    "divine_project_inventory": (
+        ("sale_source", "varchar(20)"),
+        ("status_note", "varchar(255)"),
+        ("status_updated_at", "timestamptz"),
+    ),
+    # Payment plans (scripts/add_payment_plans.py)
+    "divine_payment_milestones": (
+        ("basic_amount", "numeric(14,2)"),
+        ("charge_head", "varchar(10)"),
+        ("charge_amount", "numeric(14,2)"),
+        ("due_trigger", "varchar(12)"),
+    ),
+}
+
+
+def ensure_offline_import_columns(conn) -> list:
+    """Add any missing OFFLINE_IMPORT_COLUMNS. Returns the 'table.column' names
+    it added. SQLite gets portable types (no timestamptz / boolean literals)."""
+    added = []
+    dialect = conn.engine.dialect.name if hasattr(conn, "engine") else "postgresql"
+    inspector = inspect(conn)
+    tables = set(inspector.get_table_names())
+    for table, columns in OFFLINE_IMPORT_COLUMNS.items():
+        if table not in tables:
+            continue
+        existing = {c["name"] for c in inspector.get_columns(table)}
+        for name, ddl in columns:
+            if name in existing:
+                continue
+            if dialect != "postgresql":
+                ddl = ddl.replace("timestamptz", "timestamp").replace("DEFAULT false", "DEFAULT 0")
+            conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {ddl};"))
+            added.append(f"{table}.{name}")
+    return added

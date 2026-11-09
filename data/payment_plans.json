@@ -1,0 +1,66 @@
+{
+  "_source": "Payment Plan's For Web.docx (client, Nov 2026). PP1 is fully specified there. PP2-PP4: the document gives percentages and due days only - where PLC/IFMS/CAM fall (charge_head) and the instalment wording are ASSUMPTIONS to confirm with the client. To change a plan used by customers, add it again with version+1 (old bookings keep their snapshot). Load with: python scripts/load_payment_plans.py",
+  "plans": [
+    {
+      "code": "PP1/FPP/10-15-25-25-15-10",
+      "short_code": "PP1",
+      "name": "Flexible Payment Plan 10-15-25-25-15-10",
+      "description": "6 instalments over about a year: 10% on booking, then 15%, 25% (+PLC), 25% (+IFMS), 15% (+CAM), and the final 10% on Offer of Possession.",
+      "project_id": "suraksha-enclave",
+      "sort_order": 1,
+      "version": 1,
+      "is_active": true,
+      "instalments": [
+        {"seq": 1, "label": "On Booking", "percent": 10, "due_trigger": "booking", "due_days": 0, "charge_head": null},
+        {"seq": 2, "label": "Within 45 days of booking", "percent": 15, "due_trigger": "booking", "due_days": 45, "charge_head": null},
+        {"seq": 3, "label": "Within 90 days of booking", "percent": 25, "due_trigger": "booking", "due_days": 90, "charge_head": "PLC"},
+        {"seq": 4, "label": "Within 180 days of booking", "percent": 25, "due_trigger": "booking", "due_days": 180, "charge_head": "IFMS"},
+        {"seq": 5, "label": "Within 270 days of booking", "percent": 15, "due_trigger": "booking", "due_days": 270, "charge_head": "CAM"},
+        {"seq": 6, "label": "On Offer of Possession", "percent": 10, "due_trigger": "possession", "due_days": 0, "charge_head": null}
+      ]
+    },
+    {
+      "code": "PP2/FPP/10-90",
+      "short_code": "PP2",
+      "name": "Flexible Payment Plan 10-90",
+      "description": "10% on booking and the balance 90% within 60 days.",
+      "project_id": "suraksha-enclave",
+      "sort_order": 2,
+      "version": 1,
+      "is_active": true,
+      "instalments": [
+        {"seq": 1, "label": "On Booking", "percent": 10, "due_trigger": "booking", "due_days": 0, "charge_head": null},
+        {"seq": 2, "label": "Within 60 days of booking", "percent": 90, "due_trigger": "booking", "due_days": 60, "charge_head": "ALL"}
+      ]
+    },
+    {
+      "code": "PP3/FPP/50-25-15-10",
+      "short_code": "PP3",
+      "name": "Flexible Payment Plan 50-25-15-10",
+      "description": "50% on booking, then 25%, 15% and 10% at 30, 60 and 90 days.",
+      "project_id": "suraksha-enclave",
+      "sort_order": 3,
+      "version": 1,
+      "is_active": true,
+      "instalments": [
+        {"seq": 1, "label": "On Booking", "percent": 50, "due_trigger": "booking", "due_days": 0, "charge_head": null},
+        {"seq": 2, "label": "Within 30 days of booking", "percent": 25, "due_trigger": "booking", "due_days": 30, "charge_head": "PLC"},
+        {"seq": 3, "label": "Within 60 days of booking", "percent": 15, "due_trigger": "booking", "due_days": 60, "charge_head": "IFMS"},
+        {"seq": 4, "label": "Within 90 days of booking", "percent": 10, "due_trigger": "booking", "due_days": 90, "charge_head": "CAM"}
+      ]
+    },
+    {
+      "code": "PP4/FPP/100",
+      "short_code": "PP4",
+      "name": "Full Payment Plan 100",
+      "description": "The full amount, including all charges, on booking.",
+      "project_id": "suraksha-enclave",
+      "sort_order": 4,
+      "version": 1,
+      "is_active": true,
+      "instalments": [
+        {"seq": 1, "label": "On Booking", "percent": 100, "due_trigger": "booking", "due_days": 0, "charge_head": "ALL"}
+      ]
+    }
+  ]
+}

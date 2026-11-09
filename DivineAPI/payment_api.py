@@ -15,6 +15,7 @@ from DivineDTO.models import (
 from DivineService import servicePayment
 from DivineService.auth import get_current_user
 
+from DivineAPI.pdf_headers import PRIVATE_PDF_HEADERS as _PRIVATE_PDF_HEADERS
 router = APIRouter(prefix="/payments", tags=["payments"])
 _payment_service = servicePayment()
 
@@ -78,6 +79,7 @@ def create_order(dto: PaymentOrderRequestDTO, current_user: dict = Depends(get_c
             dto.amount, owner_id=current_user["sub"], owner_role=current_user["role"],
             purpose=dto.purpose, inventory_id=dto.inventory_id,
             installment_no=dto.installment_no, due_date=dto.due_date,
+            booking_plan=dto.booking_plan(),
         )
         return PaymentOrderOutDTO(
             payment_id=record.id,
@@ -128,6 +130,7 @@ def record_cash_payment(dto: PaymentCashRequestDTO, current_user: dict = Depends
             purpose=dto.purpose, inventory_id=dto.inventory_id,
             installment_no=dto.installment_no, due_date=dto.due_date,
             method=dto.method, utr_number=dto.utr_number, cheque_number=dto.cheque_number,
+            booking_plan=dto.booking_plan(),
         )
         return _to_payment_out(record)
     except ValueError as e:
@@ -167,7 +170,7 @@ def get_payment_receipt(payment_id: str, current_user: dict = Depends(get_curren
         pdf_bytes, filename = _payment_service.get_receipt(payment_id, requester_id=current_user["sub"])
         return StreamingResponse(
             io.BytesIO(pdf_bytes), media_type="application/pdf",
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+            headers={"Content-Disposition": f'attachment; filename="{filename}"', **_PRIVATE_PDF_HEADERS},
         )
     except PermissionError:
         raise HTTPException(status_code=403, detail="forbidden")

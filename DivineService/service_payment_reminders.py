@@ -10,6 +10,8 @@ Fully wrapped: one bad customer is counted and skipped, never aborts the run,
 and nothing here raises into the endpoint.
 """
 import logging
+import os
+import time
 import uuid
 from datetime import date
 
@@ -21,7 +23,22 @@ from DivineService.service_email import serviceEmail, dispatch_payment_reminder_
 
 logger = logging.getLogger(__name__)
 
-_UNIT_KEYS = ("unit_number", "unitNumber", "plot_number", "plotNumber", "plot_no", "plotNo")
+_UNIT_KEYS = ("unit_number", "unitNumber", "unit_no", "unitNo", "plot_number", "plotNumber", "plot_no", "plotNo")
+# Offline buyers imported from the client's sheet get no reminders (client decision).
+_NO_REMINDER_SOURCES = ("offline_import",)
+
+
+def reminders_enabled() -> bool:
+    """Global switch: PAYMENT_REMINDERS_ENABLED=false pauses every reminder email."""
+    return (os.getenv("PAYMENT_REMINDERS_ENABLED") or "true").strip().lower() not in ("0", "false", "no", "off")
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        value = int(os.getenv(name) or default)
+        return value if value > 0 else default
+    except ValueError:
+        return default
 _PROJECT_NAME_KEYS = ("project_name", "projectName", "township", "township_name", "project")
 
 
@@ -69,9 +86,18 @@ class serviceReminders:
             logger.warning("reminder_email_init_failed error=%s", e)
             return None
 
-    def run(self, today: date = None) -> dict:
+    def run(self, today: date = None, max_seconds: int = None, max_emails: int = None) -> dict:
+        """One sweep. Bounded so a cron HTTP call can't time out: it stops after
+        ``max_seconds`` (REMINDER_RUN_MAX_SECONDS, default 240) or ``max_emails``
+        sends (REMINDER_RUN_MAX_EMAILS, default 200); the rest go out next run
+        (nothing is lost - dedupe only records what was attempted)."""
         today = today or ist_today()
         summary = {"scanned_customers": 0, "sent": {}, "skipped": 0, "errors": 0, "no_email": 0}
+        self._applications_cache = {}      # customer_id -> booking applications, for this run only
+        if not reminders_enabled():
+            return {**summary, "disabled": True}
+        deadline = time.monotonic() + (max_seconds or _env_int("REMINDER_RUN_MAX_SECONDS", 240))
+        email_cap = max_emails or _env_int("REMINDER_RUN_MAX_EMAILS", 200)
         try:
             unpaid = self._milestones.list_unpaid()
         except Exception as e:
@@ -93,6 +119,9 @@ class serviceReminders:
                 bucket.append(bid)
 
         for cid, booking_ids in booking_ids_by_customer.items():
+            if time.monotonic() > deadline or sum(summary["sent"].values()) >= email_cap:
+                summary["truncated"] = True
+                break
             summary["scanned_customers"] += 1
             try:
                 all_rows = self._milestone_service.ensure_for_customer(cid)
@@ -130,6 +159,10 @@ class serviceReminders:
             logger.warning("reminder_dedupe_check_failed milestone_id=%s error=%s", milestone_id, e)
             summary["errors"] += 1
             return
+        project_name, unit_number, source = self._booking_labels(customer_id, booking_id)
+        if source in _NO_REMINDER_SOURCES:
+            summary["skipped"] += 1
+            return
 
         customer = None
         try:
@@ -141,7 +174,6 @@ class serviceReminders:
             summary["no_email"] += 1
             return
 
-        project_name, unit_number = self._booking_labels(customer_id, booking_id)
         outstanding = self._outstanding_after(enriched, milestone_id)
 
         ok = dispatch_payment_reminder_email(
@@ -149,7 +181,7 @@ class serviceReminders:
             first_name=getattr(customer, "first_name", None),
             project_name=project_name or nd.get("label"),
             unit_number=unit_number,
-            milestone_label=nd.get("label"),
+            milestone_label=self._milestone_label(enriched, milestone_id, nd.get("label")),
             amount=nd.get("amount"),
             due_date=nd.get("due_date"),
             days_remaining=nd.get("days_until_due"),
@@ -175,14 +207,31 @@ class serviceReminders:
         else:
             summary["errors"] += 1
 
+    @staticmethod
+    def _milestone_label(enriched: dict, milestone_id: str, fallback):
+        """'Within 90 days of booking (incl. PLC)' for a plan row carrying a charge."""
+        try:
+            row = next((r for r in (enriched or {}).get("rows") or [] if r.get("id") == milestone_id), None)
+            if row and row.get("charge_head") and (row.get("charge_amount") or 0) > 0:
+                return f"{row.get('label') or fallback} (incl. {row['charge_head']})"
+        except Exception:
+            pass
+        return fallback
+
     def _booking_labels(self, customer_id: str, booking_id: str = None):
-        """Project + unit label for the reminder email. ``booking_id`` picks the
+        """(project, unit, source) for the reminder email. ``booking_id`` picks the
         matching booking for a multi-plot customer; without it (or on any failure)
-        it falls back to the most-recent booking application."""
+        it falls back to the most-recent booking application. ``source`` is the
+        booking form's origin ('offline_import' for imported buyers)."""
         record = None
         try:
             if booking_id:
-                for r in (self._profile.list_booking_applications(customer_id) or []):
+                cache = getattr(self, "_applications_cache", None)
+                if cache is None:
+                    cache = self._applications_cache = {}
+                if customer_id not in cache:
+                    cache[customer_id] = self._profile.list_booking_applications(customer_id) or []
+                for r in cache[customer_id]:
                     if isinstance(r, dict) and r.get("id") == booking_id:
                         record = r
                         break
@@ -194,7 +243,7 @@ class serviceReminders:
             except Exception:
                 record = None
         if not record:
-            return None, None
+            return None, None, None
         form = record.get("form_data") if isinstance(record, dict) else getattr(record, "form_data", None)
         form = form if isinstance(form, dict) else {}
         project = None
@@ -208,7 +257,8 @@ class serviceReminders:
             if form.get(k):
                 unit = str(form[k]).strip()
                 break
-        return project, unit
+        source = str(form.get("source") or "").strip().lower() or None
+        return project, unit, source
 
     def _outstanding_after(self, enriched: dict, milestone_id: str):
         try:

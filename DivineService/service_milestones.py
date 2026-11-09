@@ -77,10 +77,9 @@ def compute_status(due_date, is_paid: bool, today=None) -> str:
 
 
 def _row_is_on_booking(row: dict, index: int) -> bool:
-    try:
-        return index == 0 or int(row.get("due_days") or 0) == 0
-    except (TypeError, ValueError):
-        return index == 0
+    """Only the FIRST row is the on-booking instalment. (A later row with
+    due_days 0 - e.g. 'On Offer of Possession' - is not paid at booking.)"""
+    return index == 0
 
 
 class serviceMilestones:
@@ -99,10 +98,16 @@ class serviceMilestones:
                         booking_date) -> list:
         rows = []
         plan_rows = (plan or {}).get("rows") or []
+        # Legacy bookings: the booking payment (often a token below 10%) always
+        # settles row 1, as it always has. Only a payment-plan booking - whose
+        # booking payment the server checked against the exact first instalment -
+        # honours the row's own status.
+        honour_status = bool((plan or {}).get("payment_plan"))
         for i, r in enumerate(plan_rows):
             if not isinstance(r, dict):
                 continue
-            on_booking = _row_is_on_booking(r, i)
+            on_booking = _row_is_on_booking(r, i) and (
+                not honour_status or r.get("status") in (None, "", "paid"))
             rows.append({
                 "id": f"{booking_id}-m{i + 1}",
                 "booking_id": booking_id,
@@ -116,8 +121,12 @@ class serviceMilestones:
                 "due_date": _to_date(r.get("due_date")),
                 "amount": int(round(_to_num(r.get("amount")) or 0)),
                 "status": "paid" if on_booking else "upcoming",
-                "paid_on": booking_date if on_booking else None,
+                "paid_on": (_to_date(booking_date) or booking_date) if on_booking else None,
                 "paid_payment_id": booking_payment_id if on_booking else None,
+                "basic_amount": _to_num(r.get("basic_amount")),
+                "charge_head": r.get("charge_head") or None,
+                "charge_amount": _to_num(r.get("charge_amount")),
+                "due_trigger": r.get("due_trigger") or None,
             })
         return rows
 
@@ -234,8 +243,18 @@ class serviceMilestones:
                 (record.get("created_date") if isinstance(record, dict) else getattr(record, "created_date", None))
             )
             received = _to_num(form.get("amount_received")) or _to_num(form.get("amount")) or 0
-            plan = build_payment_schedule(total_amount=total, booking_amount=received,
-                                          booking_date=booking_date)
+            stored_rows = form.get("payment_schedule")
+            if isinstance(form.get("payment_plan"), dict) and isinstance(stored_rows, list) and stored_rows:
+                # A payment-plan booking: rebuild from its own frozen schedule,
+                # never from the generic default plan.
+                plan = {"rows": [r for r in stored_rows if isinstance(r, dict)],
+                        "payment_plan": form["payment_plan"]}
+            else:
+                plan = build_payment_schedule(total_amount=total, booking_amount=received,
+                                              booking_date=booking_date)
+                # Legacy backfill: the form rarely records what was received, so
+                # (as before) the on-booking row counts as paid by the booking payment.
+                plan["rows"] = [{**r, "status": None} for r in plan.get("rows") or []]
             project_id = (record.get("project_id") if isinstance(record, dict)
                           else getattr(record, "project_id", None)) or self._first(form, _PROJECT_KEYS)
             payment_id = (record.get("payment_id") if isinstance(record, dict)
@@ -308,6 +327,10 @@ class serviceMilestones:
                 "due_days": getattr(r, "due_days", None),
                 "due_date": _to_date(due).isoformat() if _to_date(due) else None,
                 "amount": int(round(_to_num(getattr(r, "amount", None)) or 0)),
+                "basic_amount": _to_num(getattr(r, "basic_amount", None)),
+                "charge_head": getattr(r, "charge_head", None),
+                "charge_amount": _to_num(getattr(r, "charge_amount", None)),
+                "due_trigger": getattr(r, "due_trigger", None) or "booking",
                 "status": status,
                 "pay_enabled_from": payable_from.isoformat() if payable_from else None,
                 "paid_on": self._iso(getattr(r, "paid_on", None)),

@@ -71,6 +71,15 @@ class UserOutDTO(BaseModel):
 class TokenDTO(BaseModel):
     access_token: str
     token_type: str = "bearer"
+    # True after logging in with an emailed temporary password: the client must
+    # send the user to the "set your new password" screen (POST /customer/change-password).
+    must_change_password: bool = False
+
+
+class ChangePasswordDTO(BaseModel):
+    current_password: str = Field(..., min_length=1)
+    # Length (>= 8) is checked by serviceCustomer.change_password -> 400 password_too_short.
+    new_password: str = Field(..., min_length=1, max_length=256)
 
 
 class AdminCreateDTO(BaseModel):
@@ -187,7 +196,7 @@ class CustomerListItemDTO(BaseModel):
     # phase). No "INACTIVE"/"LEAD" here either: nothing in the CASE expression
     # backing this column (DivineDatabasequeries/admin_customers_queries.yaml)
     # ever produces them - phase 1 only lists real divine_customer_users rows.
-    source: Literal["WEBSITE", "BROKER_CHANNEL"]
+    source: Literal["WEBSITE", "BROKER_CHANNEL", "OFFLINE_IMPORT"]
     status: Literal["ACTIVE", "BOOKED"]
     created_at: Optional[datetime]
     last_activity_at: Optional[datetime]
@@ -287,7 +296,24 @@ class KycVerificationOutDTO(BaseModel):
     created_date: Optional[datetime]
 
 
-class PaymentOrderRequestDTO(BaseModel):
+class BookingPlanFieldsMixin(BaseModel):
+    """Chosen payment plan + prices for a plot_booking payment. When
+    payment_plan_code is sent, the server computes the plan's first instalment
+    from these and the payment amount must equal it (booking_amount_mismatch)."""
+    payment_plan_code: Optional[str] = Field(None, max_length=80)
+    sale_price: Optional[float] = Field(None, gt=0, le=500000000, description="Basic Sale Price in INR")
+    plc_amount: Optional[float] = Field(None, ge=0, le=500000000)
+    ifms_amount: Optional[float] = Field(None, ge=0, le=500000000)
+    cam_amount: Optional[float] = Field(None, ge=0, le=500000000)
+
+    def booking_plan(self):
+        if not self.payment_plan_code:
+            return None
+        return {"payment_plan_code": self.payment_plan_code, "sale_price": self.sale_price,
+                "plc_amount": self.plc_amount, "ifms_amount": self.ifms_amount, "cam_amount": self.cam_amount}
+
+
+class PaymentOrderRequestDTO(BookingPlanFieldsMixin):
     amount: float = Field(..., gt=0, description="Amount in INR (rupees), e.g. 50000.00")
     # "plot_booking" + inventory_id locks that unit to 'booked' when the payment
     # settles. "installment" + installment_no pays a specific payment_schedule
@@ -316,7 +342,7 @@ class PaymentVerifyRequestDTO(BaseModel):
     razorpay_signature: str
 
 
-class PaymentCashRequestDTO(BaseModel):
+class PaymentCashRequestDTO(BookingPlanFieldsMixin):
     amount: float = Field(..., gt=0, description="Amount in INR (rupees) already collected/transferred")
     # "cash" (default, backward compatible) or "rtgs_neft" - a bank transfer with no
     # gateway transaction, identified instead by the customer-entered utr_number.
@@ -549,6 +575,10 @@ class BookingPaymentScheduleRowDTO(BaseModel):
     pay_enabled_from: Optional[str] = None
     paid_on: Optional[str] = None
     paid_payment_id: Optional[str] = None
+    basic_amount: Optional[float] = None
+    charge_head: Optional[str] = None
+    charge_amount: Optional[float] = None
+    due_trigger: Optional[str] = None
 
 
 class BookingNextDueDTO(BaseModel):
@@ -594,6 +624,10 @@ class BookingDetailDTO(BaseModel):
     payment_schedule: List[BookingPaymentScheduleRowDTO] = []
     next_due: Optional[BookingNextDueDTO] = None
     amount_received: Optional[float] = None
+    # The payment plan + prices the customer booked with (code, short_code, name,
+    # version, sale_price, plc, ifms, cam, total, booking_amount) - for the admin
+    # to verify the declared price at KYC review. None for legacy bookings.
+    payment_plan: Optional[Dict[str, Any]] = None
     created_at: Optional[datetime]
     last_activity_at: Optional[datetime]
 
@@ -1092,6 +1126,11 @@ class PaymentScheduleRowDTO(BaseModel):
     pay_enabled_from: Optional[str] = None  # the plot's booking date - no pay window
     paid_on: Optional[str] = None
     paid_payment_id: Optional[str] = None
+    # Payment-plan bookings: amount = basic_amount (share of sale price) + charge_amount.
+    basic_amount: Optional[int] = None
+    charge_head: Optional[str] = None       # PLC | IFMS | CAM | PLC+IFMS+CAM | None
+    charge_amount: Optional[int] = None
+    due_trigger: Optional[str] = None       # booking | possession (possession rows: due_date null until set)
 
 
 class CustomerNextDueDTO(BaseModel):
@@ -1127,6 +1166,15 @@ class CustomerBookingDTO(BaseModel):
     payment_created_date: Optional[str] = None
     payment_schedule: Optional[List[PaymentScheduleRowDTO]] = None
     next_due: Optional[CustomerNextDueDTO] = None
+    # Offline buyer whose price / payment data isn't loaded yet: the client
+    # disables the allotment / demand letter buttons ("payment details pending").
+    finance_pending: Optional[bool] = None
+    # The payment plan the customer chose at booking (snapshot): code, short_code,
+    # name, version, sale_price, plc, ifms, cam, total, booking_amount.
+    payment_plan: Optional[Dict[str, Any]] = None
+    plot_address: Optional[str] = None
+    applicant_name: Optional[str] = None
+    co_applicants: Optional[List[str]] = None
 
 
 class CustomerProfileDTO(BaseModel):

@@ -895,6 +895,7 @@ def is_negative(raw: str) -> bool:
     return text in ("no", "n", "nope", "nah", "nahi", "na", "not now", "later")
 
 
+
 class serviceChatbot:
     def __init__(self, persistence: persistenceChatbot = None, gemini: llmGemini = None, groq: llmGroq = None,
                  customer_service: serviceCustomer = None, broker_service: serviceBroker = None,
@@ -1129,6 +1130,20 @@ class serviceChatbot:
             # from inventory so it never depends on the LLM being up; only fall through
             # to the agent loop when inventory is genuinely empty/unavailable.
             options = self._available_plot_options()
+            if options == []:
+                # Everything is sold / on hold - say so instead of letting the LLM guess.
+                self._persist_turn(session_id, "user", text)
+                reply = ("All plots are currently sold out or on hold. Our sales advisor can tell you "
+                         "about upcoming releases.")
+                self._persist_turn(session_id, "assistant", reply)
+                return {
+                    "session_id": session_id, "reply": reply,
+                    "buttons": [
+                        {"label": "Talk to a sales advisor", "value": "Talk to a sales advisor", "action": "chatbot_message"},
+                        {"label": "Book a site visit", "value": "Book a site visit", "action": "chatbot_message"},
+                        dict(MAIN_MENU_BUTTON),
+                    ],
+                }
             if options:
                 self._persist_turn(session_id, "user", text)
                 lines = "\n".join(
@@ -1951,9 +1966,25 @@ class serviceChatbot:
 
     def _login_auth_account(self, session, role: str, payload: dict):
         session_id = session.id
+        must_change_password = False
         try:
-            token = self._auth_service(role).login_by_email(payload.get("email"), payload.get("password"))
-        except ValueError:
+            service = self._auth_service(role)
+            email, password = (payload.get("email") or "").strip(), payload.get("password") or ""
+            if callable(getattr(type(service), "login_with_status", None)):
+                if not email or not password:
+                    raise ValueError("invalid_credentials")
+                from DivineDTO.models import UserLoginDTO
+                token, must_change_password = service.login_with_status(
+                    UserLoginDTO(username=email, password=password))
+            else:
+                token = service.login_by_email(payload.get("email"), payload.get("password"))
+        except ValueError as e:
+            if str(e) == "temp_password_expired":
+                self._safe_update_session_auth_state(session_id, None, None)
+                reply = ("Your temporary password has expired. Please use \"Forgot password\" on the "
+                         "login screen to set a new one.")
+                self._persist_turn(session_id, "assistant", reply)
+                return {"session_id": session_id, "reply": reply, "buttons": [AUTH_LOGIN_BUTTONS[role]]}
             attempts = self._as_attempt_count(payload.get("login_attempts")) + 1
             if attempts >= MAX_LOGIN_ATTEMPTS:
                 self._safe_update_session_auth_state(session_id, None, None)
@@ -1988,8 +2019,14 @@ class serviceChatbot:
             f"You're logged in as {role}. Taking you to the plots page now."
             if redirect else f"You are logged in as {role}."
         )
+        if must_change_password:
+            reply = ("You're logged in with your temporary password. Please set your own password "
+                     "on the screen that opens - you can continue once it's saved.")
+            redirect = None
         self._persist_turn(session_id, "assistant", reply)
         resp = {"session_id": session_id, "reply": reply, "auth_token": token, "auth_role": role}
+        if must_change_password:
+            resp["must_change_password"] = True
         if redirect:
             resp["redirect_url"] = redirect
             resp["redirect_target"] = "_self"
@@ -2336,13 +2373,15 @@ class serviceChatbot:
             return ""
         return "\n".join(notes)
 
-    def _available_plot_options(self) -> list:
+    def _available_plot_options(self):
         """Clean, size-bucketed plot list for the "Show available plots" reply. Merges
         the raw distinct_plot_sizes rows (which split on exact area+dimension) into one
         entry per rounded sq-yd, summing availability. Each entry carries a book_url
-        that deep-links the frontend booking page. Never raises; [] on failure/empty."""
+        that deep-links the frontend booking page. Never raises.
+        None = inventory unavailable / empty (caller falls back to the agent);
+        [] = plots exist but every one is sold / on hold (caller says "sold out")."""
         if not self._inventory:
-            return []
+            return None
         buckets = {}
         try:
             for r in self._inventory.distinct_plot_sizes():
@@ -2369,8 +2408,12 @@ class serviceChatbot:
                         b["dimensions"] = f"{w} x {length} m"
         except Exception as e:
             logger.warning("available_plot_options_lookup_failed: %s", e)
-            return []
-        options = [b for b in buckets.values() if b["available"] > 0] or list(buckets.values())
+            return None
+        if not buckets or not any(b["total"] > 0 for b in buckets.values()):
+            return None
+        # Only sizes that can actually be booked - when everything is sold the
+        # caller says so instead of offering "Book" links to sold-out sizes.
+        options = [b for b in buckets.values() if b["available"] > 0]
         options.sort(key=lambda o: o["size_sqyd"])
         for o in options:
             o["book_url"] = (

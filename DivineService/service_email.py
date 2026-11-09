@@ -117,6 +117,81 @@ class serviceEmail:
             logger.warning("otp_email_failed email=%s error=%s", email, e)
             return False
 
+    # ---- offline-buyer onboarding (scripts/send_offline_buyer_invites.py) ----
+    def send_offline_buyer_invite(self, email: str, first_name: str = None, temp_password: str = None,
+                                  plots=None, project_name: str = None, expires_on=None) -> bool:
+        """Account invite for a buyer who purchased offline: login email + a
+        temporary password they must change on first login. Synchronous - the
+        invite script only stores the password hash once this returns True.
+        Never raises. The password goes into the message body only; _send logs
+        just the recipient and subject."""
+        try:
+            to = (email or "").strip()
+            if not to or "@" not in to or not temp_password:
+                return False
+            name = (first_name or "").strip() or "Customer"
+            plot_list = ", ".join(str(p) for p in (plots or []) if p) or "-"
+            project = (project_name or "").strip() or "Divine Vision Infra"
+            valid_till = _format_reminder_date(expires_on) if expires_on else ""
+            rows = [("Project", project), ("Your plot(s)", plot_list),
+                    ("Login email", to), ("Temporary password", temp_password)]
+            if valid_till:
+                rows.append(("Valid till", valid_till))
+            body = [
+                f"Your {_escape(project)} plot is now available in your Divine Vision Infra account. "
+                "You can now view your plot details online; your payment details and letters will "
+                "appear there once our team has updated them.",
+                "Log in with the email and temporary password below. For your security you will "
+                "be asked to set your own password the first time you log in.",
+                "If the temporary password has expired, use <strong>Forgot password</strong> on the "
+                "login page to set a new one.",
+            ]
+            html = _luxury_email_html(
+                headline="Your Plot Account Is Ready", preheader=f"Your {project} account is ready",
+                greeting_name=name, body_paragraphs=body, detail_rows=rows,
+                cta_label="Log In", cta_url=self._customer_login_url,
+                footer_note=f"Never share this password. For assistance, contact {_SUPPORT_LINE}.",
+                has_logo=bool(self._logo_b64), accent="#1e8449",
+            )
+            text = _luxury_email_text("Your Plot Account Is Ready", name, body, rows,
+                                      "Log In", self._customer_login_url)
+            return self._send(to=to, subject=f"Your {project} account - Divine Vision Infra",
+                              html=html, text=text)
+        except Exception as e:
+            logger.warning("offline_buyer_invite_failed email=%s error=%s", email, type(e).__name__)
+            return False
+
+    def send_plot_added_to_account(self, email: str, first_name: str = None, plots=None,
+                                   project_name: str = None) -> bool:
+        """For a buyer who already had a website account: the offline-purchased
+        plot(s) now show in it. No password involved. Never raises."""
+        try:
+            to = (email or "").strip()
+            if not to or "@" not in to:
+                return False
+            name = (first_name or "").strip() or "Customer"
+            plot_list = ", ".join(str(p) for p in (plots or []) if p) or "-"
+            project = (project_name or "").strip() or "Divine Vision Infra"
+            rows = [("Project", project), ("Plot(s) added", plot_list), ("Login email", to)]
+            body = [
+                f"Your {_escape(project)} plot(s) have been added to your existing Divine Vision Infra "
+                "account. Log in with your usual password to view them.",
+            ]
+            html = _luxury_email_html(
+                headline="Plot Added To Your Account", preheader="Your plot is now in your account",
+                greeting_name=name, body_paragraphs=body, detail_rows=rows,
+                cta_label="Log In", cta_url=self._customer_login_url,
+                footer_note=f"For assistance, contact {_SUPPORT_LINE}.",
+                has_logo=bool(self._logo_b64), accent="#1e8449",
+            )
+            text = _luxury_email_text("Plot Added To Your Account", name, body, rows,
+                                      "Log In", self._customer_login_url)
+            return self._send(to=to, subject=f"Your {project} plot is in your account - Divine Vision Infra",
+                              html=html, text=text)
+        except Exception as e:
+            logger.warning("plot_added_email_failed email=%s error=%s", email, type(e).__name__)
+            return False
+
     # ---- instalment reminders + receipts --------------------------------
     def send_payment_reminder_async(self, email: str, **kwargs) -> None:
         self._run_async(self.send_payment_reminder, email, **kwargs)

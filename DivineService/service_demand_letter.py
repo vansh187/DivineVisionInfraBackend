@@ -106,7 +106,7 @@ _LOCATION_KEYS = ("project_location", "projectLocation", "site_address")
 _GENDER_KEYS = ("gender", "applicant_gender", "applicantGender")
 _BOOKING_DATE_KEYS = ("booking_date", "bookingDate", "date")
 _TOTAL_KEYS = ("total_consideration", "totalConsideration", "total_amount", "totalAmount",
-               "total_price", "consideration", "sale_value")
+               "total_price", "totalPrice", "consideration", "sale_value", "saleValue")
 _RECEIVED_KEYS = ("amount_received", "amountReceived", "received_amount", "paid_amount")
 _SCHEDULE_KEYS = ("payment_schedule", "paymentSchedule", "payment_plan", "schedule", "installments")
 
@@ -185,6 +185,18 @@ def _words(amount):
     if text.endswith(" Rupees"):
         text = text[: -len(" Rupees")]
     return f"Rupees {text} Only" if text else "-"
+
+
+def finance_pending(form: dict) -> bool:
+    """True for a plot with no price data at all - neither a total nor a payment
+    schedule (e.g. an offline buyer imported before the finance sheet). No
+    demand letter can be issued for it: it would show wrong dues. Deliberately
+    NOT keyed on form_data.finance_status: once a total or schedule is loaded
+    (or the caller overlays live milestones) the plot unblocks by itself."""
+    form = form if isinstance(form, dict) else {}
+    rows = _first(form, _SCHEDULE_KEYS)
+    has_rows = isinstance(rows, list) and any(isinstance(r, dict) for r in rows)
+    return _num(_first(form, _TOTAL_KEYS)) is None and not has_rows
 
 
 def project_profile(form: dict) -> dict:
@@ -290,21 +302,48 @@ def demand_letter_figures(form: dict, issued: date) -> dict:
     overdue = min(overdue, outstanding)
 
     # What we ask for: everything overdue, payable within a week; with nothing
-    # overdue yet, the next unpaid instalment by its own due date.
+    # overdue yet, the next unpaid instalment by its own due date. An instalment
+    # due "On Offer of Possession" whose date isn't set yet is never demanded.
+    demandable = [r for r in unpaid if not _awaiting_possession(r)]
+    awaiting_possession = bool(unpaid) and not demandable
     if overdue > 0:
         demand, payable_by = overdue, issued + timedelta(days=PAYABLE_WITHIN_DAYS)
-    elif unpaid:
-        nxt = min(unpaid, key=lambda r: _to_date(r.get("due_date")) or date.max)
+    elif demandable:
+        nxt = min(demandable, key=lambda r: _to_date(r.get("due_date")) or date.max)
         demand = min(_num(nxt.get("amount")) or 0, outstanding)
         payable_by = _to_date(nxt.get("due_date")) or issued + timedelta(days=PAYABLE_WITHIN_DAYS)
+    elif awaiting_possession:
+        demand, payable_by = 0, issued + timedelta(days=PAYABLE_WITHIN_DAYS)
     else:
         demand, payable_by = outstanding, issued + timedelta(days=PAYABLE_WITHIN_DAYS)
 
     return {
         "rows": unpaid, "total_plot": total_plot, "received": received,
         "outstanding": outstanding, "overdue": overdue,
-        "demand": demand, "payable_by": payable_by,
+        "demand": demand, "payable_by": payable_by, "awaiting_possession": awaiting_possession,
     }
+
+
+def _plan_label(form: dict) -> str:
+    plan = form.get("payment_plan") if isinstance(form, dict) else None
+    if isinstance(plan, dict) and _s(plan.get("code")):
+        return _s(plan.get("code"))
+    return _s((form or {}).get("payment_plan_code"))
+
+
+def _awaiting_possession(row: dict) -> bool:
+    return _s(row.get("due_trigger")).lower() == "possession" and not _to_date(row.get("due_date"))
+
+
+def _head_text(row: dict) -> str:
+    """'Basic Price', or 'BSP + PLC' / 'BSP + IFMS' / 'BSP + CAM' / 'BSP + Charges'."""
+    explicit = _s(row.get("head"))
+    if explicit:
+        return explicit
+    charge = _s(row.get("charge_head"))
+    if not charge or not (_num(row.get("charge_amount")) or 0):
+        return "Basic Price"
+    return f"BSP + {charge}" if "+" not in charge else "BSP + Charges"
 
 
 def _render_demand_letter_pdf(form_data: dict, customer_id: str, issued_on=None) -> bytes:
@@ -383,7 +422,8 @@ def _render_demand_letter_pdf(form_data: dict, customer_id: str, issued_on=None)
     pdf.ln(1)
     pdf.multi_cell(W, 3.4, align="L", text=_latin(
         "This has reference to your booking of above mentioned Plot. This is to inform you that "
-        "the following amount stands due as per the payment plan opted by you."
+        "the following amount stands due as per the payment plan opted by you"
+        + (f" ({_plan_label(form)})." if _plan_label(form) else ".")
     ))
     pdf.ln(7)
 
@@ -404,10 +444,19 @@ def _render_demand_letter_pdf(form_data: dict, customer_id: str, issued_on=None)
         pdf.ln()
     for r in fig["rows"]:
         amt = _num(r.get("amount")) or 0
+        basic = _num(r.get("basic_amount"))
         pdf.cell(col[0], rh, _latin(_s(r.get("label")) or "-"), border=1)
-        pdf.cell(col[1], rh, _latin(_s(r.get("head")) or "Basic Price"), border=1, align="C")
-        pdf.cell(col[2], rh, _latin(_fmt_date(r.get("due_date"))), border=1, align="C")
-        pdf.cell(col[3], rh, _indian(amt), border=1, align="R")
+        head = _latin(_head_text(r))
+        size = 8
+        while size > 5.5 and pdf.get_string_width(head) > col[1] - 1.5:
+            size -= 0.25
+            pdf.set_font_size(size)
+        pdf.cell(col[1], rh, head, border=1, align="C")
+        pdf.set_font_size(8)
+        due_cell = "On Possession" if _awaiting_possession(r) else _fmt_date(r.get("due_date"))
+        pdf.cell(col[2], rh, _latin(due_cell), border=1, align="C")
+        # Installment = share of the sale price; Total Installment = with PLC/IFMS/CAM.
+        pdf.cell(col[3], rh, _indian(basic if basic is not None else amt), border=1, align="R")
         pdf.cell(col[4], rh, _indian(amt), border=1, align="R")
         pdf.ln()
 
@@ -444,6 +493,9 @@ def _render_demand_letter_pdf(form_data: dict, customer_id: str, issued_on=None)
         remit = (f"You are requested to remit the total dues of Rs. {_indian(fig['demand'])}/- "
                  f"({_words(fig['demand'])}) in favour of \"{prof['company']}\" payable on or before "
                  f"{fig['payable_by'].strftime('%d %b %Y')}.")
+    elif fig.get("awaiting_possession"):
+        remit = (f"As on {issued.strftime('%d %b %Y')}, no instalment is due against the above "
+                 f"mentioned Plot. The remaining balance is payable on Offer of Possession.")
     else:
         remit = (f"As on {issued.strftime('%d %b %Y')}, no amount is due against the above "
                  f"mentioned Plot. Thank you for your timely payments.")

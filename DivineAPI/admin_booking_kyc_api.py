@@ -21,6 +21,7 @@ from DivineService.service_booking_document_upload import (
 
 logger = logging.getLogger(__name__)
 
+from DivineAPI.pdf_headers import PRIVATE_PDF_HEADERS as _PRIVATE_PDF_HEADERS
 router = APIRouter(prefix="/admin/bookings", tags=["admin", "bookings"])
 _booking_service = serviceBookingKyc()
 _document_upload_service = serviceBookingDocumentUpload(
@@ -145,7 +146,7 @@ def _pdf_download(build, booking_id: str, failure_code: str):
                     booking_id, failure_code, len(pdf_bytes), (time.perf_counter() - started) * 1000)
         return StreamingResponse(
             io.BytesIO(pdf_bytes), media_type="application/pdf",
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+            headers={"Content-Disposition": f'attachment; filename="{filename}"', **_PRIVATE_PDF_HEADERS},
         )
     except ValueError as e:
         code = str(e)

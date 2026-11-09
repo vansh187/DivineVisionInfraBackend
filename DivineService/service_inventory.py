@@ -442,8 +442,8 @@ class serviceInventory:
 
     def book_unit_repair(self, inventory_id: str, payment_id: str = None,
                          actor_id: str = None) -> dict:
-        """Force an available/held unit to 'booked' (manual reconciliation). 409 if the
-        unit is already booked by a different payment, or sold/reserved."""
+        """Force an available unit to 'booked' (manual reconciliation). 409 if the
+        unit is already booked by a different payment, or sold/held/reserved."""
         if not (inventory_id or "").strip():
             raise ValueError("inventory_id_required")
         record = self._persistence.book_unit(

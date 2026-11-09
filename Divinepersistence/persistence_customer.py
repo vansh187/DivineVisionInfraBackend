@@ -1,5 +1,5 @@
 import random
-from sqlalchemy import Column, String, DateTime, bindparam, text
+from sqlalchemy import Boolean, Column, String, DateTime, bindparam, false, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from datetime import datetime, timezone
@@ -19,6 +19,13 @@ class CustomerModel(Base):
     created_date = Column(DateTime)
     last_updated_by = Column(String(255))
     last_updated_date = Column(DateTime)
+    # Offline-buyer import (scripts/import_offline_buyers.py): where the account
+    # came from, and the temporary-password invite state.
+    source = Column(String(30), nullable=False, default="website", server_default="website")
+    must_change_password = Column(Boolean, nullable=False, default=False, server_default=false())
+    temp_password_expires_at = Column(DateTime(timezone=True))
+    invite_status = Column(String(20))
+    invite_sent_at = Column(DateTime(timezone=True))
 
 
 class persistenceCustomer:
@@ -34,7 +41,8 @@ class persistenceCustomer:
         queries.setdefault("get_by_id", 'SELECT * FROM divine_customer_users WHERE id = :id LIMIT 1;')
         queries.setdefault("get_by_ids", 'SELECT * FROM divine_customer_users WHERE id IN :ids;')
         queries.setdefault("update_password", (
-            'UPDATE divine_customer_users SET password_hash = :password_hash, last_updated_date = :last_updated_date '
+            'UPDATE divine_customer_users SET password_hash = :password_hash, last_updated_date = :last_updated_date, '
+            'must_change_password = false, temp_password_expires_at = NULL '
             'WHERE id = :id RETURNING *;'
         ))
         self._queries = queries

@@ -12,7 +12,14 @@ CREATE TABLE IF NOT EXISTS divine_customer_users (
   created_by varchar(255),
   created_date timestamptz DEFAULT now(),
   last_updated_by varchar(255),
-  last_updated_date timestamptz DEFAULT now()
+  last_updated_date timestamptz DEFAULT now(),
+  -- 'website' (self signup) | 'offline_import' (scripts/import_offline_buyers.py)
+  source varchar(30) NOT NULL DEFAULT 'website',
+  -- Offline buyers get an emailed temporary password and must change it.
+  must_change_password boolean NOT NULL DEFAULT false,
+  temp_password_expires_at timestamptz,
+  invite_status varchar(20),
+  invite_sent_at timestamptz
 );
 
 CREATE TABLE IF NOT EXISTS divine_broker_users (
@@ -323,7 +330,7 @@ CREATE TABLE IF NOT EXISTS divine_project_inventory (
   length_mtr numeric(8,3),
   area_sqmt numeric(10,3) NOT NULL CHECK (area_sqmt > 0),
   area_sqyd numeric(10,2) NOT NULL CHECK (area_sqyd > 0),
-  status varchar(20) NOT NULL DEFAULT 'available' CHECK (status IN ('available','held','booked','sold','reserved')),
+  status varchar(20) NOT NULL DEFAULT 'available' CHECK (status IN ('available','held','booked','sold','reserved','pending_kyc_review')),
   reserved_by_broker_id varchar(6) REFERENCES divine_broker_users(id),
   reserved_at timestamptz,
   reserved_until timestamptz,
@@ -331,6 +338,10 @@ CREATE TABLE IF NOT EXISTS divine_project_inventory (
   booked_at timestamptz,
   booked_payment_id varchar(36),
   booked_by varchar(6),
+  -- Client-sheet sync: 'offline' = sold outside the app, 'app' = our booking flow.
+  sale_source varchar(20),
+  status_note varchar(255),
+  status_updated_at timestamptz,
   created_date timestamptz DEFAULT now(),
   last_updated_date timestamptz DEFAULT now(),
   UNIQUE (project_name, unit_number)
@@ -343,6 +354,28 @@ CREATE INDEX IF NOT EXISTS idx_divine_project_inventory_booked_by
   ON divine_project_inventory (booked_by);
 CREATE INDEX IF NOT EXISTS idx_divine_project_inventory_reserved_until
   ON divine_project_inventory (status, reserved_until);
+
+-- Audit trail of bulk inventory changes (sheet syncs / buyer imports); one
+-- batch_id is what the loaders' --rollback restores.
+CREATE TABLE IF NOT EXISTS divine_inventory_status_history (
+  id varchar(36) PRIMARY KEY,
+  inventory_id varchar(36) NOT NULL,
+  project_name varchar(150),
+  unit_number varchar(20),
+  old_status varchar(20),
+  new_status varchar(20),
+  old_unit_number varchar(20),
+  new_unit_number varchar(20),
+  old_values varchar(2000),
+  source varchar(255),
+  batch_id varchar(40) NOT NULL,
+  note varchar(255),
+  created_date timestamptz DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_divine_inventory_status_history_inventory
+  ON divine_inventory_status_history (inventory_id);
+CREATE INDEX IF NOT EXISTS idx_divine_inventory_status_history_batch
+  ON divine_inventory_status_history (batch_id);
 
 CREATE TABLE IF NOT EXISTS divine_inventory_reservations (
   id varchar(36) PRIMARY KEY,
@@ -387,6 +420,11 @@ CREATE TABLE IF NOT EXISTS divine_payment_milestones (
   status varchar(12) NOT NULL DEFAULT 'upcoming' CHECK (status IN ('paid','due','overdue','upcoming')),
   paid_on timestamptz,
   paid_payment_id varchar(36),
+  -- Payment-plan rows: amount = basic_amount (share of sale price) + charge_amount (PLC/IFMS/CAM)
+  basic_amount numeric(14,2),
+  charge_head varchar(10),
+  charge_amount numeric(14,2),
+  due_trigger varchar(12),          -- booking | possession (possession rows: due_date NULL until set)
   created_date timestamptz DEFAULT now(),
   last_updated_date timestamptz DEFAULT now(),
   UNIQUE (booking_id, milestone_no)
@@ -409,3 +447,47 @@ CREATE TABLE IF NOT EXISTS divine_payment_reminders (
   UNIQUE (milestone_id, kind, week_key)
 );
 CREATE INDEX IF NOT EXISTS idx_divine_payment_reminders_customer ON divine_payment_reminders (customer_id);
+
+
+-- ---------------------------------------------------------------------------
+-- Payment plans (PP1/PP2/...) chosen by a customer at booking. A plan used by
+-- customers is never edited: a change is a new version; only the newest version
+-- is active. Seeded from data/payment_plans.json (scripts/load_payment_plans.py).
+CREATE TABLE IF NOT EXISTS divine_payment_plans (
+  id varchar(36) PRIMARY KEY,
+  code varchar(80) NOT NULL,
+  short_code varchar(20) NOT NULL,
+  name varchar(150) NOT NULL,
+  description text,
+  project_id varchar(100),                -- NULL = every project
+  is_active boolean NOT NULL DEFAULT true,
+  sort_order integer NOT NULL DEFAULT 0,
+  version integer NOT NULL DEFAULT 1,
+  created_date timestamptz DEFAULT now(),
+  last_updated_date timestamptz DEFAULT now(),
+  CONSTRAINT uq_payment_plan_code_version UNIQUE (code, version)
+);
+CREATE INDEX IF NOT EXISTS ix_divine_payment_plans_code ON divine_payment_plans (code);
+CREATE INDEX IF NOT EXISTS ix_divine_payment_plans_project_id ON divine_payment_plans (project_id);
+
+CREATE TABLE IF NOT EXISTS divine_payment_plan_instalments (
+  id varchar(36) PRIMARY KEY,
+  plan_id varchar(36) NOT NULL,
+  seq integer NOT NULL,
+  label varchar(150) NOT NULL,
+  percent numeric(6,3) NOT NULL,          -- % of the Basic Sale Price
+  due_trigger varchar(12) NOT NULL DEFAULT 'booking',   -- booking | possession
+  due_days integer,                       -- days after the trigger date
+  charge_head varchar(10),                -- NULL | PLC | IFMS | CAM | ALL
+  CONSTRAINT uq_payment_plan_instalment_seq UNIQUE (plan_id, seq)
+);
+CREATE INDEX IF NOT EXISTS ix_divine_payment_plan_instalments_plan_id ON divine_payment_plan_instalments (plan_id);
+
+-- Per-project settings: the Offer of Possession date dates every 'On Offer of
+-- Possession' instalment (PUT /admin/projects/{project_id}/possession-date).
+CREATE TABLE IF NOT EXISTS divine_project_settings (
+  project_id varchar(100) PRIMARY KEY,
+  possession_offer_date date,
+  updated_by varchar(255),
+  updated_date timestamptz DEFAULT now()
+);

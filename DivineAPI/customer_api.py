@@ -4,11 +4,11 @@ from sqlalchemy.exc import IntegrityError
 
 from DivineDTO.models import (
     UserCreateDTO, UserLoginDTO, TokenDTO, UserOutDTO, CustomerProfileDTO,
-    ForgotPasswordDTO, ResetPasswordDTO, MessageDTO,
+    ForgotPasswordDTO, ResetPasswordDTO, MessageDTO, ChangePasswordDTO,
 )
 from Divinepersistence import persistenceCustomer
 from DivineService import serviceCustomer, serviceCustomerProfile, servicePasswordReset, PasswordResetError
-from DivineService.auth import get_current_user
+from DivineService.auth import get_current_user, get_current_user_pending_password_change
 
 router = APIRouter(prefix="/customer", tags=["customer"])
 _cust_service = serviceCustomer(secret_key=os.getenv("JWT_SECRET_KEY"))
@@ -44,10 +44,11 @@ def customer_signup(request: Request, dto: UserCreateDTO):
 @router.post("/login", response_model=TokenDTO)
 def customer_login(dto: UserLoginDTO):
     try:
-        token = _cust_service.login(dto)
-        return TokenDTO(access_token=token)
-    except ValueError:
-        raise HTTPException(status_code=401, detail="invalid_credentials")
+        token, must_change = _cust_service.login_with_status(dto)
+        return TokenDTO(access_token=token, must_change_password=must_change)
+    except ValueError as e:
+        detail = "temp_password_expired" if str(e) == "temp_password_expired" else "invalid_credentials"
+        raise HTTPException(status_code=401, detail=detail)
     except Exception:
         raise HTTPException(status_code=500, detail="internal_error")
 
@@ -81,8 +82,30 @@ def customer_reset_password(dto: ResetPasswordDTO):
         raise HTTPException(status_code=500, detail="internal_error")
 
 
+@router.post("/change-password", response_model=TokenDTO)
+def customer_change_password(dto: ChangePasswordDTO,
+                             current_user: dict = Depends(get_current_user_pending_password_change)):
+    """Logged-in password change. Offline buyers land here first to replace the
+    emailed temporary password. Returns a fresh token (the old one may still
+    carry the password-change restriction)."""
+    if current_user.get("role") != "customer":
+        raise HTTPException(status_code=403, detail="customer_only")
+    try:
+        token = _cust_service.change_password(current_user.get("sub"), dto.current_password, dto.new_password)
+        return TokenDTO(access_token=token, must_change_password=False)
+    except ValueError as e:
+        code = str(e)
+        # Never 401: the client treats 401 as an expired session and logs out.
+        raise HTTPException(status_code=400,
+                            detail="invalid_current_password" if code == "invalid_credentials" else code)
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=500, detail="internal_error")
+
+
 @router.get("/profile", response_model=CustomerProfileDTO, response_model_exclude_none=True)
-def customer_profile(current_user: dict = Depends(get_current_user)):
+def customer_profile(current_user: dict = Depends(get_current_user_pending_password_change)):
     # Auth (missing/expired/invalid token -> 401 token_expired / invalid_token) is
     # enforced by the get_current_user dependency before this body runs.
     try:

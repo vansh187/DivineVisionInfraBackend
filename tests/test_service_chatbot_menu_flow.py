@@ -520,7 +520,7 @@ def test_show_available_plots_answers_from_inventory_without_llm():
 
 def test_show_available_plots_falls_back_to_llm_when_inventory_empty():
     service, persistence, _ = _service()
-    service._available_plot_options = MagicMock(return_value=[])
+    service._available_plot_options = MagicMock(return_value=None)   # no inventory at all
     service._run_agent_loop = MagicMock(return_value={"reply": "let me check", "llm_provider": "test"})
     service.handle_message("session-1", text="")
 
@@ -528,6 +528,70 @@ def test_show_available_plots_falls_back_to_llm_when_inventory_empty():
 
     service._run_agent_loop.assert_called_once()
     assert result["reply"] == "let me check"
+
+
+def test_show_available_plots_says_sold_out_without_the_llm():
+    service, persistence, _ = _service()
+    service._available_plot_options = MagicMock(return_value=[])     # plots exist, none available
+    service._run_agent_loop = MagicMock()
+    service.handle_message("session-1", text="")
+
+    result = service.handle_message("session-1", text="Show available plots")
+
+    service._run_agent_loop.assert_not_called()
+    assert "sold out" in result["reply"].lower()
+
+
+def test_available_plot_options_distinguishes_empty_from_sold_out():
+    service, _, _ = _service()
+    row = lambda avail: SimpleNamespace(project_name="Suraksha Enclave", area_sqyd=119.43, width_mtr=7.45,
+                                        length_mtr=13.404, available_count=avail, unit_count=5)
+    service._inventory = MagicMock()
+    service._inventory.distinct_plot_sizes.return_value = []
+    assert service._available_plot_options() is None
+    service._inventory.distinct_plot_sizes.return_value = [row(0)]
+    assert service._available_plot_options() == []
+    service._inventory.distinct_plot_sizes.return_value = [row(2)]
+    assert service._available_plot_options()[0]["available"] == 2
+
+
+class _TempPasswordAuth:
+    """Stands in for serviceCustomer: login_with_status returns the flag itself."""
+    def __init__(self, must_change=True, error=None):
+        self.must_change, self.error, self.calls = must_change, error, []
+
+    def login_with_status(self, dto):
+        self.calls.append(dto)
+        if self.error:
+            raise ValueError(self.error)
+        return "tok-123", self.must_change
+
+
+def _chat_login(auth):
+    service, persistence, _ = _service()
+    service._auth_service = MagicMock(return_value=auth)
+    service.handle_message("session-1", text="")
+    service.handle_message("session-1", text="login_customer")
+    service.handle_message("session-1", text="buyer@gmail.com")
+    return service.handle_message("session-1", text="Temp3pwXyz")
+
+
+def test_chatbot_login_with_temporary_password_asks_for_new_password():
+    auth = _TempPasswordAuth(must_change=True)
+    r = _chat_login(auth)
+    assert auth.calls and auth.calls[0].username == "buyer@gmail.com"
+    assert r["auth_token"] == "tok-123" and r["must_change_password"] is True
+    assert "temporary password" in r["reply"].lower()
+
+
+def test_chatbot_login_reports_expired_temporary_password():
+    r = _chat_login(_TempPasswordAuth(error="temp_password_expired"))
+    assert "expired" in r["reply"].lower() and "auth_token" not in r
+
+
+def test_chatbot_normal_login_has_no_password_change_flag():
+    r = _chat_login(_TempPasswordAuth(must_change=False))
+    assert r["auth_token"] == "tok-123" and "must_change_password" not in r
 
 
 def test_booking_project_selection_offers_both_login_types():

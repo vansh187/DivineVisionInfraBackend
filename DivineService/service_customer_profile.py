@@ -364,6 +364,14 @@ class serviceCustomerProfile:
             booking.razorpay_payment_id = self._text(record.get("razorpay_payment_id"))
             booking.payment_created_date = self._date_only(record.get("payment_created_date"))
             booking.payment_schedule = self._build_payment_schedule(form)
+            plan_snapshot = form.get("payment_plan")
+            booking.payment_plan = dict(plan_snapshot) if isinstance(plan_snapshot, dict) else None
+            booking.plot_address = self._first_present(form, ("plot_address", "plotAddress"))
+            booking.applicant_name = self._first_present(form, ("applicantName", "applicant_name"))
+            co_applicants = [self._text(form.get(k)) for k in
+                             ("coApplicantName", "co_applicant_name", "coApplicant2Name", "co_applicant_2_name")]
+            co_applicants = [c for c in dict.fromkeys(co_applicants) if c]
+            booking.co_applicants = co_applicants or None
             if not booking.payment_schedule and booking.total_consideration:
                 # Booking stored before schedules were derived server-side - compute
                 # it now so the demand / allotment letters still have amounts.
@@ -381,6 +389,11 @@ class serviceCustomerProfile:
         # all scoped to THIS booking. Falls back silently to the form-data schedule
         # built above on any failure.
         self._apply_milestone_schedule(booking, customer_id, booking_id, all_rows)
+        # No price data from any source (form total, derived or milestone
+        # schedule) - e.g. an offline buyer imported before the finance sheet:
+        # the client disables the letter buttons. Clears itself once data lands.
+        if booking.has_booking and not booking.total_consideration and not booking.payment_schedule:
+            booking.finance_pending = True
         return booking
 
     def _apply_milestone_schedule(self, booking, customer_id, booking_id=None, all_rows=None):
@@ -403,6 +416,10 @@ class serviceCustomerProfile:
                         pay_enabled_from=self._text(r.get("pay_enabled_from")),
                         paid_on=self._text(r.get("paid_on")),
                         paid_payment_id=self._text(r.get("paid_payment_id")),
+                        basic_amount=self._to_int_rupees(r.get("basic_amount")),
+                        charge_head=self._text(r.get("charge_head")),
+                        charge_amount=self._to_int_rupees(r.get("charge_amount")),
+                        due_trigger=self._text(r.get("due_trigger")),
                     )
                     for r in rows
                 ]
@@ -494,6 +511,10 @@ class serviceCustomerProfile:
                         due_date=self._text(self._pick(item, "due_date", "dueDate")),
                         amount=self._to_int_rupees(item.get("amount")),
                         status=self._text(item.get("status")),
+                        basic_amount=self._to_int_rupees(item.get("basic_amount")),
+                        charge_head=self._text(item.get("charge_head")),
+                        charge_amount=self._to_int_rupees(item.get("charge_amount")),
+                        due_trigger=self._text(item.get("due_trigger")),
                     )
                 )
             return rows or None
