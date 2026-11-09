@@ -725,15 +725,55 @@ class serviceDocument:
         if not isinstance(form_data, dict):
             form_data = {}
 
-        from DivineService.service_demand_letter import _PLOT_KEYS, _first, generate_demand_letter_pdf
-        if not _first(form_data, _PLOT_KEYS):
-            # The application form doesn't always carry the plot number - the
-            # booking row for the same payment does.
-            unit_number = self._booking_unit_number(getattr(doc, "payment_id", None))
-            if unit_number:
-                form_data = {**form_data, "unit_number": unit_number}
+        from DivineService.service_demand_letter import generate_demand_letter_pdf
+        # The booking row for THIS document's payment is authoritative for the
+        # plot number and project (so a multi-plot customer gets the right plot,
+        # and the right company letterhead even when the form lacks projectId);
+        # the document's own project_id is the next best project source.
+        booking = self._booking_for_payment(getattr(doc, "payment_id", None))
+        unit_number = getattr(booking, "unit_number", None) if booking else None
+        project = (getattr(booking, "project_name", None) if booking else None) \
+            or getattr(doc, "project_id", None)
+        if unit_number:
+            form_data = {**form_data, "unit_number": unit_number}
+        if isinstance(project, str) and project.strip():
+            form_data = {**form_data, "project_name": project.strip()}
+        form_data = self._with_live_milestones(form_data, document_id)
         pdf_bytes = generate_demand_letter_pdf(form_data, doc.owner_id)
         return pdf_bytes, f"demand-letter-{document_id}.pdf"
+
+    def _with_live_milestones(self, form_data: dict, document_id: str) -> dict:
+        """Overlay the live milestone plan (keyed by this document's id) onto the
+        form snapshot, so instalments paid after booking are marked paid - the
+        demand letter leaves those out - and the received total is current.
+        Best-effort: on any failure the snapshot is used as-is."""
+        try:
+            persistence = getattr(self, "_milestone_persistence", None)
+            if persistence is None:
+                from Divinepersistence import persistenceMilestone
+                persistence = self._milestone_persistence = persistenceMilestone()
+            rows = persistence.list_for_booking(document_id) or []
+        except Exception as e:
+            logger.warning("demand_letter_milestones_lookup_failed document_id=%s error=%s", document_id, e)
+            return form_data
+        if not rows:
+            return form_data
+        schedule = []
+        for r in rows:
+            try:
+                amount = float(getattr(r, "amount", None) or 0)
+            except (TypeError, ValueError):
+                amount = 0.0
+            due = getattr(r, "due_date", None)
+            schedule.append({
+                "label": getattr(r, "label", None),
+                "percent": getattr(r, "percent", None),
+                "due_date": due.isoformat() if hasattr(due, "isoformat") else due,
+                "amount": int(round(amount)),
+                "status": getattr(r, "status", None),
+            })
+        received = sum(s["amount"] for s in schedule if (s["status"] or "").lower() == "paid")
+        return {**form_data, "payment_schedule": schedule, "amount_received": received}
 
     def get_latest(self, document_type: str, requester_id: str, requester_role: str = None):
         if not document_type or not document_type.strip():
@@ -747,16 +787,20 @@ class serviceDocument:
         signed_url = self._sign_url(doc.storage_path, bucket=bucket)
         return doc, signed_url, DEFAULT_SIGNED_URL_EXPIRY_SECONDS
 
-    def _booking_unit_number(self, payment_id: str):
-        """Plot/unit number of the divine_bookings row for a payment, or None. Never raises."""
+    def _booking_for_payment(self, payment_id: str):
+        """The divine_bookings row for a payment, or None. Never raises."""
         try:
             if not payment_id or self._booking_persistence is None:
                 return None
-            booking = self._booking_persistence.get_by_payment_id(payment_id)
-            return getattr(booking, "unit_number", None) if booking else None
+            return self._booking_persistence.get_by_payment_id(payment_id)
         except Exception as e:
-            logger.warning("booking_unit_number_lookup_failed payment_id=%s error=%s", payment_id, e)
+            logger.warning("booking_lookup_failed payment_id=%s error=%s", payment_id, e)
             return None
+
+    def _booking_unit_number(self, payment_id: str):
+        """Plot/unit number of the divine_bookings row for a payment, or None. Never raises."""
+        booking = self._booking_for_payment(payment_id)
+        return getattr(booking, "unit_number", None) if booking else None
 
     def get_booking_application_document_id(self, payment_id: str):
         """The booking-application document's own id for a given plot-booking

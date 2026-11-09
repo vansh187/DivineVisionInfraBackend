@@ -712,7 +712,25 @@ def test_demand_letter_uses_live_plot_number_and_schedule(monkeypatch):
     assert form["applicant_address"] == "B-1050, Gurgaon, Haryana 122017"  # gap filled from profile
     assert form["amount_received"] == 30000
     assert [r["label"] for r in form["payment_schedule"]] == ["On Booking", "Within 45 days of booking"]
+    # Live milestone statuses reach the letter, so paid instalments drop out of its table.
+    expected_status = [getattr(r, "status", None) for r in
+                       svc._milestone_persistence.list_for_booking.return_value]
+    assert [r["status"] for r in form["payment_schedule"]] == expected_status
+    assert form["project_name"] == "Green Meadows"   # booking row decides the letterhead
     assert captured["customer_id"] == "C00001"
+
+
+def test_admin_demand_letter_for_suraksha_booking_uses_rama_krishna_letterhead(monkeypatch):
+    import io
+    from pypdf import PdfReader
+    svc, *_ = _letter_service(monkeypatch)
+    svc._persistence.get_by_id.return_value = _booking(status="booked", unit_number="C61",
+                                                       project_name="Suraksha Enclave")
+    pdf, _ = svc.get_demand_letter("BKG-2026-000001")
+    text = "\n".join(p.extract_text() for p in PdfReader(io.BytesIO(pdf)).pages)
+    assert "Plot No. C61" in text
+    assert "Rama Krishna Buildwell Pvt. Ltd." in text and "06AADCR1976J1Z4" in text
+    assert "165105003309" in text and "KCG" not in text
 
 
 def test_allotment_letter_still_renders_when_profile_lookup_fails(monkeypatch):
