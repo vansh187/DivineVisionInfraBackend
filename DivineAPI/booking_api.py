@@ -11,6 +11,7 @@ from DivineService.auth import get_current_user
 
 logger = logging.getLogger(__name__)
 
+from DivineAPI.pdf_headers import PRIVATE_PDF_HEADERS as _PRIVATE_PDF_HEADERS
 router = APIRouter(prefix="/bookings", tags=["bookings"])
 _booking_service = serviceBookingKyc()
 
@@ -47,7 +48,7 @@ def get_booking_receipt(booking_id: str, current_user: dict = Depends(get_curren
         pdf_bytes, filename = _booking_service.get_receipt(booking_id, requester_id=customer_id)
         return StreamingResponse(
             io.BytesIO(pdf_bytes), media_type="application/pdf",
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+            headers={"Content-Disposition": f'attachment; filename="{filename}"', **_PRIVATE_PDF_HEADERS},
         )
     except PermissionError:
         raise HTTPException(status_code=403, detail="forbidden")

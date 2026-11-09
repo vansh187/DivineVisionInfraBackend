@@ -1,7 +1,7 @@
 import os
 import re
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from passlib.context import CryptContext
 import jwt
 from dotenv import load_dotenv
@@ -74,34 +74,75 @@ class serviceCustomer:
         return user
 
     def login(self, dto: UserLoginDTO) -> str:
+        return self.login_with_status(dto)[0]
+
+    def login_with_status(self, dto: UserLoginDTO):
+        """(token, must_change_password). Raises ValueError('invalid_credentials')
+        or ValueError('temp_password_expired') - an emailed temporary password
+        (offline-buyer invite) past its expiry can no longer be used; the
+        customer sets a new one through Forgot password."""
         username = (dto.username or "").strip().replace("\\@", "@")
         if EMAIL_RE.fullmatch(username):
-            return self.login_by_email(username, dto.password)
-        user = self._persistence.get_by_username(username)
-        if not user:
-            raise ValueError("invalid_credentials")
-        if not self._verify_password(dto.password, user.password_hash):
-            raise ValueError("invalid_credentials")
-        return self._token_for_user(user)
+            user = self._authenticate_email(username, dto.password)
+        else:
+            user = self._persistence.get_by_username(username)
+            if not user or not self._verify_password(dto.password, user.password_hash):
+                raise ValueError("invalid_credentials")
+        return self._token_and_status(user)
 
     def login_by_email(self, email: str, password: str) -> str:
+        return self._token_and_status(self._authenticate_email(email, password))[0]
+
+    def _authenticate_email(self, email: str, password: str):
         if not email or not password:
             raise ValueError("invalid_credentials")
-        email = (email or "").strip()
-        user = self._persistence.get_by_email(email)
-        if not user:
+        user = self._persistence.get_by_email((email or "").strip())
+        if not user or not self._verify_password(password, user.password_hash):
             raise ValueError("invalid_credentials")
-        if not self._verify_password(password, user.password_hash):
-            raise ValueError("invalid_credentials")
-        return self._token_for_user(user)
+        return user
 
-    def _token_for_user(self, user) -> str:
-        from datetime import timezone
+    def _token_and_status(self, user):
+        must_change = getattr(user, "must_change_password", False) is True or \
+            str(getattr(user, "must_change_password", "")).lower() in ("1", "true")
+        if must_change:
+            expires = getattr(user, "temp_password_expires_at", None)
+            if isinstance(expires, str):
+                try:
+                    expires = datetime.fromisoformat(expires)
+                except ValueError:
+                    expires = None
+            if isinstance(expires, datetime):
+                if expires.tzinfo is None:
+                    expires = expires.replace(tzinfo=timezone.utc)
+                if expires <= datetime.now(timezone.utc):
+                    raise ValueError("temp_password_expired")
+        return self._token_for_user(user, must_change_password=must_change), must_change
+
+    def change_password(self, customer_id: str, current_password: str, new_password: str) -> str:
+        """Logged-in password change (also how an offline buyer replaces the
+        emailed temporary password). Clears must_change_password and returns a
+        fresh token without the password-change restriction. Raises
+        ValueError('invalid_credentials' | 'password_too_short' | 'password_unchanged')."""
+        user = self._persistence.get_by_id(customer_id)
+        if not user or not self._verify_password(current_password or "", user.password_hash):
+            raise ValueError("invalid_credentials")
+        if len(new_password or "") < 8:
+            raise ValueError("password_too_short")
+        if self._verify_password(new_password, user.password_hash):
+            raise ValueError("password_unchanged")
+        updated = self._persistence.update_password(user.id, self._hash_password(new_password))
+        return self._token_for_user(updated or user, must_change_password=False)
+
+    def _token_for_user(self, user, must_change_password: bool = False) -> str:
         payload = {
             "sub": user.id,
             "username": user.username,
             "exp": (datetime.now(timezone.utc) + timedelta(hours=1)).timestamp(),
             "role": "customer",
         }
+        if must_change_password:
+            # DivineService.auth.get_current_user refuses this token everywhere
+            # except change-password / profile until the password is changed.
+            payload["pwd_change"] = True
         token = jwt.encode(payload, self._secret, algorithm="HS256")
         return token

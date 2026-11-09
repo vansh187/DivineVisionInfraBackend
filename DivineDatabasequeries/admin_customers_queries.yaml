@@ -2,8 +2,8 @@
 #
 # Phase 1: divine_customer_users only - accounts that actually signed up (or were
 # added here by an admin). Chatbot-captured visitors/leads (divine_chatbot_leads)
-# are deliberately out of scope for now (next phase); "source" is therefore always
-# WEBSITE today, and "status" is ACTIVE or BOOKED (booked <=> divine_project_inventory
+# are deliberately out of scope for now (next phase); "source" is WEBSITE, or
+# OFFLINE_IMPORT for buyers loaded by scripts/import_offline_buyers.py, and "status" is ACTIVE or BOOKED (booked <=> divine_project_inventory
 # has a unit with booked_by = this customer's id) - never LEAD.
 #
 # {order_by} is substituted in Python from a fixed allow-list (never from raw
@@ -20,7 +20,7 @@ list_customers: |
       TRIM(COALESCE(cu.first_name,'') || ' ' || COALESCE(cu.last_name,'')) AS full_name,
       cu.email AS email,
       cu.phone AS phone,
-      'WEBSITE' AS source,
+      CASE WHEN cu.source = 'offline_import' THEN 'OFFLINE_IMPORT' ELSE 'WEBSITE' END AS source,
       CASE WHEN EXISTS (
         SELECT 1 FROM divine_project_inventory pi WHERE pi.booked_by = cu.id
       ) THEN 'BOOKED' ELSE 'ACTIVE' END AS status,
@@ -52,7 +52,7 @@ count_customers: |
       TRIM(COALESCE(cu.first_name,'') || ' ' || COALESCE(cu.last_name,'')) AS full_name,
       cu.email AS email,
       cu.phone AS phone,
-      'WEBSITE' AS source,
+      CASE WHEN cu.source = 'offline_import' THEN 'OFFLINE_IMPORT' ELSE 'WEBSITE' END AS source,
       CASE WHEN EXISTS (
         SELECT 1 FROM divine_project_inventory pi WHERE pi.booked_by = cu.id
       ) THEN 'BOOKED' ELSE 'ACTIVE' END AS status,

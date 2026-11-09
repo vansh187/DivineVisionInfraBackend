@@ -292,7 +292,7 @@ class serviceBookingKyc:
         different id spaces. Looked up here via booking.payment_id, the one
         column both a divine_bookings row and its booking-application document
         agree on."""
-        empty = {"payment_schedule": [], "next_due": None, "amount_received": None}
+        empty = {"payment_schedule": [], "next_due": None, "amount_received": None, "payment_plan": None}
         try:
             svc = self._milestones()
             if svc is None:
@@ -310,10 +310,23 @@ class serviceBookingKyc:
                 "payment_schedule": schedule.get("rows", []),
                 "next_due": schedule.get("next_due"),
                 "amount_received": amount_received,
+                "payment_plan": self._booking_plan_snapshot(booking.payment_id),
             }
         except Exception as e:
             logger.warning("booking_kyc.payment_schedule_lookup_failed booking_id=%s error=%s", booking.id, e)
             return empty
+
+    def _booking_plan_snapshot(self, payment_id: str):
+        try:
+            doc = self._document_service.get_booking_application_document(payment_id)
+            form = getattr(doc, "form_data", None) if doc else None
+            if isinstance(form, str):
+                form = json.loads(form)
+            plan = form.get("payment_plan") if isinstance(form, dict) else None
+            return dict(plan) if isinstance(plan, dict) else None
+        except Exception as e:
+            logger.warning("booking_kyc.plan_snapshot_failed payment_id=%s error=%s", payment_id, type(e).__name__)
+            return None
 
     def record_installment_payment(self, booking_id: str, admin_id: str, milestone_id: str, amount: float,
                                    method: str = "cash", utr_number: str = None, cheque_number: str = None,
@@ -523,6 +536,10 @@ class serviceBookingKyc:
                 due_date=getattr(row, "due_date", None),
                 amount=profile_service._to_int_rupees(getattr(row, "amount", None)),
                 status=getattr(row, "status", None),
+                basic_amount=profile_service._to_int_rupees(getattr(row, "basic_amount", None)),
+                charge_head=getattr(row, "charge_head", None),
+                charge_amount=profile_service._to_int_rupees(getattr(row, "charge_amount", None)),
+                due_trigger=getattr(row, "due_trigger", None),
             ) for row in rows]
             if not schedule and isinstance(raw_schedule, list):
                 schedule = [SimpleNamespace(
@@ -530,6 +547,10 @@ class serviceBookingKyc:
                     due_date=row.get("due_date"),
                     amount=profile_service._to_int_rupees(row.get("amount")),
                     status=row.get("status"),
+                    basic_amount=profile_service._to_int_rupees(row.get("basic_amount")),
+                    charge_head=row.get("charge_head"),
+                    charge_amount=profile_service._to_int_rupees(row.get("charge_amount")),
+                    due_trigger=row.get("due_trigger"),
                 ) for row in raw_schedule if isinstance(row, dict)]
             paid_total = sum(
                 getattr(row, "amount", 0) or 0
@@ -572,7 +593,9 @@ class serviceBookingKyc:
 
         schedule = [
             {"label": r.label, "percent": r.percent, "due_date": r.due_date, "amount": r.amount,
-             "status": getattr(r, "status", None)}
+             "status": getattr(r, "status", None), "basic_amount": getattr(r, "basic_amount", None),
+             "charge_head": getattr(r, "charge_head", None), "charge_amount": getattr(r, "charge_amount", None),
+             "due_trigger": getattr(r, "due_trigger", None)}
             for r in (getattr(entry, "payment_schedule", None) or [])
         ]
         plot_area = pick(getattr(entry, "plot_area_sq_yd", None), _first(form, _AREA_KEYS))

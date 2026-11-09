@@ -216,3 +216,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Prod data migration reports/backups (contain customer personal data)
+migration_reports/

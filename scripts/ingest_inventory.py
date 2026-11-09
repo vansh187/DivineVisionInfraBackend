@@ -16,6 +16,10 @@ import sys
 import csv
 import re
 import uuid
+# NOTE: for EXISTING plots this only refreshes city / locality / block / type /
+# dimensions; their status changes only while they are still 'available'
+# (sold / held / booked / reserved plots keep theirs). Use
+# scripts/sync_inventory_from_sheet.py to apply the client's status sheet.
 import argparse
 from decimal import Decimal, InvalidOperation
 

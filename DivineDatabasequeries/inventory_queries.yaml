@@ -17,7 +17,12 @@ upsert_unit: |
     length_mtr = EXCLUDED.length_mtr,
     area_sqmt = EXCLUDED.area_sqmt,
     area_sqyd = EXCLUDED.area_sqyd,
-    status = EXCLUDED.status,
+    -- A re-ingest only sets the status of plots still 'available' (or new).
+    -- Booked / KYC-held / broker-reserved plots, offline sales ('sold') and
+    -- client holds ('held') keep theirs - statuses come from
+    -- scripts/sync_inventory_from_sheet.py and the booking flow, not from here.
+    status = CASE WHEN divine_project_inventory.status = 'available'
+                  THEN EXCLUDED.status ELSE divine_project_inventory.status END,
     last_updated_date = EXCLUDED.last_updated_date
   RETURNING *;
 
@@ -125,7 +130,7 @@ book_unit: |
       last_updated_date = :now
   WHERE id = :id
     AND (
-      status IN ('available', 'held')
+      status = 'available'
       OR (status = 'booked' AND booked_payment_id = :payment_id)
     )
   RETURNING *;
@@ -170,7 +175,7 @@ hold_for_kyc_review: |
       last_updated_date = :now
   WHERE id = :id
     AND (
-      status IN ('available', 'held')
+      status = 'available'
       OR (status = 'pending_kyc_review' AND booked_payment_id = :payment_id)
     )
   RETURNING *;

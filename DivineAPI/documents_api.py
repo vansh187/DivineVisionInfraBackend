@@ -1,3 +1,4 @@
+import logging
 import io
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
@@ -8,6 +9,8 @@ from DivineDTO.models import DocumentGenerateRequestDTO, DocumentOutDTO
 from DivineService import serviceDocument
 from DivineService.auth import get_current_user
 
+from DivineAPI.pdf_headers import PRIVATE_PDF_HEADERS as _PRIVATE_PDF_HEADERS
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/documents", tags=["documents"])
 _doc_service = serviceDocument()
 
@@ -244,6 +247,8 @@ def upload_project_booking_application(
             inventory_status=getattr(doc, "inventory_status", None),
         )
     except ValueError as e:
+        if str(e) == "booking_application_exists":
+            raise HTTPException(status_code=409, detail="booking_application_exists")
         raise HTTPException(status_code=400, detail=str(e))
     except PermissionError:
         raise HTTPException(status_code=403, detail="forbidden")
@@ -296,15 +301,20 @@ def get_demand_letter(document_id: str, current_user: dict = Depends(get_current
         )
         return StreamingResponse(
             io.BytesIO(pdf_bytes), media_type="application/pdf",
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+            headers={"Content-Disposition": f'attachment; filename="{filename}"', **_PRIVATE_PDF_HEADERS},
         )
     except PermissionError:
         raise HTTPException(status_code=403, detail="forbidden")
     except ValueError as e:
         if str(e) == "not_a_booking_application":
             raise HTTPException(status_code=400, detail="not_a_booking_application")
+        if str(e) == "payment_details_pending":
+            # Offline buyer whose price / payment data isn't loaded yet.
+            raise HTTPException(status_code=409, detail="payment_details_pending")
         raise HTTPException(status_code=404, detail="not_found")
     except Exception:
+        # ids only - no personal data in logs
+        logger.exception("demand_letter_failed document_id=%s", document_id)
         raise HTTPException(status_code=500, detail="demand_letter_failed")
 
 
@@ -332,7 +342,9 @@ def get_document(document_id: str, current_user: dict = Depends(get_current_user
             signed_url=signed_url,
             signed_url_expires_in=expires_in,
         )
-    except ValueError:
+    except ValueError as e:
+        if str(e) == "no_file_for_imported_record":
+            raise HTTPException(status_code=404, detail="no_file_for_imported_record")
         raise HTTPException(status_code=404, detail="document_not_found")
     except PermissionError:
         raise HTTPException(status_code=403, detail="forbidden")

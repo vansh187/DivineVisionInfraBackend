@@ -31,8 +31,32 @@ class InventoryUnitModel(Base):
     booked_at = Column(DateTime(timezone=True))
     booked_payment_id = Column(String(36))
     booked_by = Column(String(6), index=True)
+    # Client-sheet sync (scripts/sync_inventory_from_sheet.py): 'offline' = sold
+    # outside the app, 'app' = booked through our flow.
+    sale_source = Column(String(20))
+    status_note = Column(String(255))
+    status_updated_at = Column(DateTime(timezone=True))
     created_date = Column(DateTime(timezone=True))
     last_updated_date = Column(DateTime(timezone=True))
+
+
+class InventoryStatusHistoryModel(Base):
+    """Audit trail of bulk inventory changes (sheet syncs / buyer imports);
+    rows of one batch_id are what --rollback restores."""
+    __tablename__ = "divine_inventory_status_history"
+    id = Column(String(36), primary_key=True)
+    inventory_id = Column(String(36), nullable=False, index=True)
+    project_name = Column(String(150))
+    unit_number = Column(String(20))
+    old_status = Column(String(20))
+    new_status = Column(String(20))
+    old_unit_number = Column(String(20))
+    new_unit_number = Column(String(20))
+    old_values = Column(String(2000))   # JSON snapshot of the row before the change
+    source = Column(String(255))
+    batch_id = Column(String(40), nullable=False, index=True)
+    note = Column(String(255))
+    created_date = Column(DateTime(timezone=True))
 
 
 class InventoryEventModel(Base):

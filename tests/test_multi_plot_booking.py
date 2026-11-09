@@ -316,6 +316,7 @@ def test_two_plot_booking_payments_lock_their_own_units_independently():
             method="cash", owner_role="broker", purpose="plot_booking", inventory_id=inv)
         svc._inventory_persistence.hold_for_kyc_review.return_value = _pay_row(
             id=inv, status="pending_kyc_review", project_name="Test Project", unit_number=inv)
+        svc._inventory_persistence.get_by_id.return_value = _pay_row(id=inv, status="available")
 
         record = svc.record_cash_payment(
             500000, owner_id="B90001", owner_role="broker",

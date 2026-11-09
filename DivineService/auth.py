@@ -135,7 +135,10 @@ def _decode_current_user(authorization: str, allowed_roles, reject_refresh: bool
     # POST /admin/refresh should ever accept one, and it decodes the JWT itself.
     if reject_refresh and payload.get("type") == "refresh":
         raise HTTPException(status_code=401, detail="invalid_token")
-    return {"sub": sub, "username": payload.get("username"), "role": role}
+    user = {"sub": sub, "username": payload.get("username"), "role": role}
+    if payload.get("pwd_change"):
+        user["pwd_change"] = True
+    return user
 
 
 def rate_limit_identity(authorization: Optional[str]) -> Optional[str]:
@@ -155,6 +158,18 @@ def rate_limit_identity(authorization: Optional[str]) -> Optional[str]:
 
 
 def get_current_user(authorization: str = Header(None)) -> dict:
+    user = _decode_current_user(authorization, ("customer", "broker"))
+    if user.get("pwd_change"):
+        # Logged in with an emailed temporary password: only change-password and
+        # the profile read (get_current_user_pending_password_change) are allowed.
+        raise HTTPException(status_code=403, detail="password_change_required")
+    return user
+
+
+def get_current_user_pending_password_change(authorization: str = Header(None)) -> dict:
+    """Like get_current_user but also accepts a token that still has to change
+    its temporary password - for POST /customer/change-password and the
+    profile read the forced change screen sits on."""
     return _decode_current_user(authorization, ("customer", "broker"))
 
 
@@ -182,7 +197,10 @@ def get_optional_customer(authorization: str = Header(None)) -> Optional[dict]:
     if not authorization:
         return None
     try:
-        return _decode_current_user(authorization, ("customer",), reject_refresh=True)
+        user = _decode_current_user(authorization, ("customer",), reject_refresh=True)
+        # A token still bound to an emailed temporary password is not a full
+        # customer identity anywhere but change-password / profile.
+        return None if user.get("pwd_change") else user
     except HTTPException as e:
         if e.status_code == 500:
             raise

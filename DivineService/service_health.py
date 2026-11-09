@@ -10,3 +10,5 @@ class serviceHealth:
 
     def init_db(self) -> None:
         self._db.create_tables()
+        from DivineService.service_payment_plans import seed_plans_if_empty
+        seed_plans_if_empty()

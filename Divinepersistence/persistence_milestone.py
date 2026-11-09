@@ -24,6 +24,12 @@ class PaymentMilestoneModel(Base):
     status = Column(String(12), nullable=False, default="upcoming")  # paid|due|overdue|upcoming
     paid_on = Column(DateTime(timezone=True))
     paid_payment_id = Column(String(36))
+    # Payment-plan rows (DivineService/service_payment_plans.py): amount =
+    # basic_amount (share of the sale price) + charge_amount (PLC/IFMS/CAM).
+    basic_amount = Column(Numeric(14, 2))
+    charge_head = Column(String(10))
+    charge_amount = Column(Numeric(14, 2))
+    due_trigger = Column(String(12))      # booking | possession (NULL = booking)
     created_date = Column(DateTime(timezone=True))
     last_updated_date = Column(DateTime(timezone=True))
 
@@ -57,9 +63,11 @@ class persistenceMilestone:
             "INSERT INTO divine_payment_milestones "
             "(id, booking_id, customer_id, project_id, inventory_id, milestone_no, label, "
             " percent, due_days, due_date, amount, status, paid_on, paid_payment_id, "
+            " basic_amount, charge_head, charge_amount, due_trigger, "
             " created_date, last_updated_date) "
             "VALUES (:id, :booking_id, :customer_id, :project_id, :inventory_id, :milestone_no, "
             " :label, :percent, :due_days, :due_date, :amount, :status, :paid_on, :paid_payment_id, "
+            " :basic_amount, :charge_head, :charge_amount, :due_trigger, "
             " :now, :now) "
             "ON CONFLICT (booking_id, milestone_no) DO NOTHING;"
         ))
@@ -91,7 +99,8 @@ class persistenceMilestone:
         ))
         queries.setdefault("reminder_exists", (
             "SELECT 1 FROM divine_payment_reminders "
-            "WHERE milestone_id = :milestone_id AND kind = :kind AND week_key = :week_key LIMIT 1;"
+            "WHERE milestone_id = :milestone_id AND kind = :kind AND week_key = :week_key "
+            "AND (delivery_status IS NULL OR delivery_status = 'sent') LIMIT 1;"
         ))
         queries.setdefault("insert_reminder", (
             "INSERT INTO divine_payment_reminders "
@@ -99,7 +108,19 @@ class persistenceMilestone:
             " email_to, delivery_status, sent_at) "
             "VALUES (:id, :customer_id, :booking_id, :milestone_id, :kind, :week_key, :amount, "
             " :due_date, :email_to, :delivery_status, :now) "
-            "ON CONFLICT (milestone_id, kind, week_key) DO NOTHING;"
+            # A failed attempt is overwritten by the retry; a sent one is final.
+            "ON CONFLICT (milestone_id, kind, week_key) DO UPDATE SET "
+            " delivery_status = EXCLUDED.delivery_status, email_to = EXCLUDED.email_to, "
+            " amount = EXCLUDED.amount, sent_at = EXCLUDED.sent_at "
+            "WHERE divine_payment_reminders.delivery_status IS DISTINCT FROM 'sent';"
+        ))
+        queries.setdefault("list_undated_possession", (
+            "SELECT * FROM divine_payment_milestones WHERE project_id = :project_id "
+            "AND due_trigger = 'possession' AND status <> 'paid';"
+        ))
+        queries.setdefault("set_due_date", (
+            "UPDATE divine_payment_milestones SET due_date = :due_date, last_updated_date = :now "
+            "WHERE id = :id AND status <> 'paid';"
         ))
         queries.setdefault("last_reminder_for_customer", (
             "SELECT * FROM divine_payment_reminders WHERE customer_id = :customer_id "
@@ -169,9 +190,31 @@ class persistenceMilestone:
                         "status": r.get("status") or "upcoming",
                         "paid_on": r.get("paid_on"),
                         "paid_payment_id": r.get("paid_payment_id"),
+                        "basic_amount": r.get("basic_amount"),
+                        "charge_head": r.get("charge_head"),
+                        "charge_amount": r.get("charge_amount"),
+                        "due_trigger": r.get("due_trigger"),
                         "now": now,
                     }
                     db.execute(text(self._queries["insert_milestone"]), params)
+                db.commit()
+                return len(rows)
+            except Exception:
+                db.rollback()
+                raise
+
+    def date_possession_milestones(self, project_id: str, possession_date) -> int:
+        """Give every unpaid 'On Offer of Possession' milestone of a project its
+        due date (possession date + the row's due_days). Returns rows updated."""
+        from datetime import timedelta
+        with self._session_factory() as db:
+            try:
+                now = datetime.now(timezone.utc)
+                rows = db.execute(text(self._queries["list_undated_possession"]),
+                                  {"project_id": project_id}).mappings().all()
+                for r in rows:
+                    due = possession_date + timedelta(days=int(r.get("due_days") or 0))
+                    db.execute(text(self._queries["set_due_date"]), {"id": r["id"], "due_date": due, "now": now})
                 db.commit()
                 return len(rows)
             except Exception:

@@ -270,7 +270,7 @@ def list_customers(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     search: Optional[str] = Query(None, max_length=200),
-    source: Optional[Literal["WEBSITE", "BROKER_CHANNEL"]] = Query(None),
+    source: Optional[Literal["WEBSITE", "BROKER_CHANNEL", "OFFLINE_IMPORT"]] = Query(None),
     status: Optional[Literal["ACTIVE", "BOOKED"]] = Query(None),
     sort: Literal["created_at", "-created_at", "full_name", "-full_name"] = Query("-created_at"),
     current_admin: dict = Depends(get_current_admin),

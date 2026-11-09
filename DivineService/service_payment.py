@@ -303,7 +303,9 @@ class servicePayment:
         except Exception as e:  # pragma: no cover - defensive
             logger.warning("payment.booking.prelookup_failed inventory_id=%s error=%s", inventory_id, e)
             return
-        if unit is not None and (getattr(unit, "status", None) or "") not in ("available", "held"):
+        # Only 'available' is bookable - 'held' is a client hold (see
+        # scripts/sync_inventory_from_sheet.py), 'sold' an offline sale.
+        if unit is not None and (getattr(unit, "status", None) or "") != "available":
             raise ValueError("unit_not_available")
 
     _INSTALLMENT_GUARD_CODES = (
@@ -421,9 +423,81 @@ class servicePayment:
             recorded_by_admin_id=recorded_by_admin_id,
         )
 
+    def _plan_service(self):
+        svc = getattr(self, "_payment_plan_service", None)
+        if svc is None:
+            from DivineService.service_payment_plans import servicePaymentPlans
+            svc = self._payment_plan_service = servicePaymentPlans()
+        return svc
+
+    def _booking_plan_terms(self, purpose: str, amount, booking_plan, inventory_id):
+        """The payment-plan terms for a plot_booking payment (stored in
+        payment.notes and re-used at application upload), or None when no plan
+        was chosen (legacy flow). The amount must be the plan's first
+        instalment. Raises ValueError: payment_plan_only_for_booking |
+        payment_plan_not_found | payment_plan_not_for_project | invalid_* |
+        booking_amount_mismatch."""
+        if not booking_plan or not booking_plan.get("payment_plan_code"):
+            return None
+        if purpose != BOOKING_PURPOSE:
+            raise ValueError("payment_plan_only_for_booking")
+        if booking_plan.get("sale_price") in (None, ""):
+            raise ValueError("invalid_sale_price")
+        # The plan is always tied to a real plot: its project decides which plans
+        # are allowed, its area bounds the declared price. Never skipped.
+        if not inventory_id:
+            raise ValueError("inventory_id_required")
+        try:
+            unit = self._inventory_persistence.get_by_id(inventory_id)
+        except Exception as e:
+            logger.warning("payment.plan.unit_lookup_failed inventory_id=%s error=%s",
+                           inventory_id, type(e).__name__)
+            raise ValueError("plot_lookup_failed")
+        if unit is None:
+            raise ValueError("unit_not_found")
+        project_name = getattr(unit, "project_name", None)
+        if not isinstance(project_name, str) or not project_name.strip():
+            raise ValueError("plot_lookup_failed")
+        from DivineService.service_offline_import import project_slug
+        project_id = project_slug(project_name)
+        terms = self._plan_service().booking_terms(
+            booking_plan["payment_plan_code"], booking_plan.get("sale_price"),
+            booking_plan.get("plc_amount") or 0, booking_plan.get("ifms_amount") or 0,
+            booking_plan.get("cam_amount") or 0, project_id=project_id,
+        )
+        self._check_sale_price_range(terms["sale_price"], getattr(unit, "area_sqyd", None))
+        if abs(float(amount) - float(terms["booking_amount"])) > 1:
+            raise ValueError("booking_amount_mismatch")
+        terms.update({"project_id": project_id, "inventory_id": inventory_id,
+                      "area_sqyd": float(getattr(unit, "area_sqyd", 0) or 0)})
+        return terms
+
+    @staticmethod
+    def _check_sale_price_range(sale_price, area_sqyd) -> None:
+        """Sanity bound on the customer-declared Basic Sale Price: the implied rate
+        per sq. yd must lie within PLAN_MIN_RATE_PER_SQYD..PLAN_MAX_RATE_PER_SQYD
+        (defaults 5,000..5,00,000). Catches typos and absurd prices before any
+        money moves; the exact price is still verified by the admin at KYC
+        review, which shows these terms."""
+        try:
+            area = float(area_sqyd or 0)
+        except (TypeError, ValueError):
+            area = 0.0
+        if area <= 0:
+            return            # plot without an area on record - nothing to compare against
+        def bound(name, default):
+            try:
+                value = float(os.getenv(name) or default)
+                return value if value > 0 else default
+            except ValueError:
+                return default
+        rate = float(sale_price) / area
+        if rate < bound("PLAN_MIN_RATE_PER_SQYD", 5000) or rate > bound("PLAN_MAX_RATE_PER_SQYD", 500000):
+            raise ValueError("sale_price_out_of_range")
+
     def create_order(self, amount: float, owner_id: str, owner_role: str,
                      purpose: str = "other", inventory_id: str = None,
-                     installment_no: int = None, due_date=None):
+                     installment_no: int = None, due_date=None, booking_plan: dict = None):
         """Creates a Razorpay Order and a matching local record. The order is created with
         payment NOT yet captured - amount only becomes "paid" once verify_payment() confirms
         a valid signature from Razorpay, never from the client's own say-so."""
@@ -436,6 +510,7 @@ class servicePayment:
             self._guard_unit_bookable(inventory_id)
         if purpose == INSTALLMENT_PURPOSE:
             self._guard_installment(owner_id, installment_no, amount, due_date, inventory_id)
+        plan_terms = self._booking_plan_terms(purpose, amount, booking_plan, inventory_id)
 
         client = self._client()
         amount_paise = int(round(amount * 100))
@@ -470,6 +545,7 @@ class servicePayment:
             status="created", razorpay_order_id=order["id"],
             purpose=purpose, inventory_id=inventory_id,
             installment_no=installment_no, due_date=due_date,
+            notes={"payment_plan": plan_terms} if plan_terms else None,
         )
         return record, self._key_id
 
@@ -519,7 +595,7 @@ class servicePayment:
                             purpose: str = "other", inventory_id: str = None,
                             installment_no: int = None, due_date=None, method: str = "cash",
                             utr_number: str = None, cheque_number: str = None,
-                            recorded_by_admin_id: str = None):
+                            recorded_by_admin_id: str = None, booking_plan: dict = None):
         """Records money already collected/transferred outside the gateway - cash
         handed over in person, a cheque identified by its cheque number, or an
         RTGS/NEFT bank transfer identified by its UTR reference - there's no
@@ -543,11 +619,19 @@ class servicePayment:
         )
         if purpose == INSTALLMENT_PURPOSE:
             self._guard_installment(owner_id, installment_no, amount, due_date, inventory_id)
+        plan_terms = self._booking_plan_terms(purpose, amount, booking_plan, inventory_id)
+        # No bookable pre-check for plot_booking here (unlike create_order): this
+        # money was already collected, so it is always recorded. A sold / held /
+        # taken plot fails the inventory hold and the payment is flagged for
+        # manual review (inventory_status='conflict').
 
         note = (note or "").strip()
+        notes = {"note": note} if note else {}
+        if plan_terms:
+            notes["payment_plan"] = plan_terms
         record = self._persist_new_payment(
             owner_id=owner_id, owner_role=owner_role, amount=amount, status="paid",
-            razorpay_order_id=None, method=clean_method, notes={"note": note} if note else {},
+            razorpay_order_id=None, method=clean_method, notes=notes,
             purpose=purpose, inventory_id=inventory_id,
             installment_no=installment_no, due_date=due_date, utr_number=clean_utr,
             cheque_number=clean_cheque_number, recorded_by_admin_id=(recorded_by_admin_id or "").strip() or None,

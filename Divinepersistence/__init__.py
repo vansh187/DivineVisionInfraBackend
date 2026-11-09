@@ -20,5 +20,6 @@ from .persistence_booking import persistenceBooking
 from .persistence_revenue import persistenceRevenue
 from .persistence_refund import persistenceRefund
 from .persistence_offline_submission import persistenceOfflineSubmission
+from .persistence_payment_plan import persistencePaymentPlan
 
-__all__ = ["PersistenceDB", "persistenceCustomer", "persistenceCustomerProfile", "persistenceBroker", "persistenceAdmin", "persistenceAdminCustomers", "persistenceAdminBrokers", "persistenceAdminVisits", "persistenceDocument", "persistenceKyc", "persistencePayment", "persistenceVisit", "persistenceMarketTrend", "persistenceBrokerCommission", "persistenceChatbot", "persistenceInventory", "persistenceMilestone", "persistencePasswordReset", "persistenceBooking", "persistenceRevenue", "persistenceRefund", "persistenceOfflineSubmission"]
+__all__ = ["PersistenceDB", "persistenceCustomer", "persistenceCustomerProfile", "persistenceBroker", "persistenceAdmin", "persistenceAdminCustomers", "persistenceAdminBrokers", "persistenceAdminVisits", "persistenceDocument", "persistenceKyc", "persistencePayment", "persistenceVisit", "persistenceMarketTrend", "persistenceBrokerCommission", "persistenceChatbot", "persistenceInventory", "persistenceMilestone", "persistencePasswordReset", "persistenceBooking", "persistenceRevenue", "persistenceRefund", "persistenceOfflineSubmission", "persistencePaymentPlan"]

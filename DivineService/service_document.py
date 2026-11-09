@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import uuid
+from datetime import datetime, timezone
 import cv2
 import numpy as np
 import requests
@@ -94,6 +95,11 @@ def is_decodable_image(file_bytes: bytes) -> bool:
         return cv2.imdecode(np.frombuffer(file_bytes, dtype=np.uint8), cv2.IMREAD_COLOR) is not None
     except cv2.error:
         return False
+
+
+# divine_documents.status of an offline buyer's plot record created by
+# scripts/import_offline_buyers.py - form data only, no stored file.
+IMPORTED_STATUS = "imported"
 
 
 def _pdf_safe_text(value) -> str:
@@ -498,6 +504,19 @@ class serviceDocument:
             raise PermissionError("forbidden")
         if payment.status != _PAID_PAYMENT_STATUS:
             raise ValueError("payment_not_completed")
+        if (getattr(payment, "purpose", None) or "other") == "installment":
+            # An instalment payment can never open a new booking.
+            raise ValueError("payment_not_for_booking")
+        # One booking application per booking payment: a second upload would
+        # create a second milestone set (and duplicate reminders).
+        try:
+            existing = self._persistence.get_latest_by_payment_id(payment_id)
+        except Exception as e:
+            logger.warning("booking_application_dedupe_lookup_failed payment_id=%s error=%s",
+                           payment_id, type(e).__name__)
+            existing = None
+        if existing is not None and "booking" in (getattr(existing, "document_type", "") or "").lower():
+            raise ValueError("booking_application_exists")
         # Cross-check the Razorpay identifiers the client sent against what's actually on the
         # payment record - including when the record has none (e.g. a cash payment, which is
         # legitimately status="paid" with razorpay_order_id/razorpay_payment_id both NULL).
@@ -510,19 +529,22 @@ class serviceDocument:
         if razorpay_payment_id and razorpay_payment_id != payment.razorpay_payment_id:
             raise ValueError("payment_mismatch")
 
-        # The TOTAL plot amount is now required so a full payment schedule can be
-        # derived (the booking amount alone -> blank demand/allotment letters).
-        total_amount = normalize_indian_amount(_first_present(form_data, _TOTAL_AMOUNT_KEYS))
-        if not total_amount or total_amount <= 0:
-            raise ValueError("total_amount_required")
-        booking_amount = float(payment.amount or 0)   # what was actually paid now
-        if booking_amount > total_amount:
-            raise ValueError("booking_amount_exceeds_total")
-        plan = build_payment_schedule(
-            total_amount=total_amount,
-            booking_amount=booking_amount,
-            booking_date=_first_present(form_data, _BOOKING_DATE_KEYS),
-        )
+        plan = self._plan_schedule_from_payment(payment, form_data, project_id=project_id)
+        if plan is None:
+            # Legacy flow (booking paid without choosing a payment plan).
+            # The TOTAL plot amount is required so a full payment schedule can be
+            # derived (the booking amount alone -> blank demand/allotment letters).
+            total_amount = normalize_indian_amount(_first_present(form_data, _TOTAL_AMOUNT_KEYS))
+            if not total_amount or total_amount <= 0:
+                raise ValueError("total_amount_required")
+            booking_amount = float(payment.amount or 0)   # what was actually paid now
+            if booking_amount > total_amount:
+                raise ValueError("booking_amount_exceeds_total")
+            plan = build_payment_schedule(
+                total_amount=total_amount,
+                booking_amount=booking_amount,
+                booking_date=_first_present(form_data, _BOOKING_DATE_KEYS),
+            )
         # Persist the derived plan back into form_data under canonical keys so the
         # stored booking application is self-contained (demand / allotment letters
         # and GET /customer/profile read straight from it).
@@ -532,6 +554,9 @@ class serviceDocument:
         form_data["total_outstanding_words"] = plan["total_outstanding_words"]
         form_data["booking_date"] = plan["booking_date"]
         form_data["payment_schedule"] = plan["rows"]
+        if plan.get("payment_plan"):
+            form_data["payment_plan"] = plan["payment_plan"]
+            form_data["payment_plan_code"] = plan["payment_plan"]["code"]
 
         document_id = str(uuid.uuid4())
         safe_type = _safe_path_segment(document_type)
@@ -586,10 +611,63 @@ class serviceDocument:
         # Materialise the per-milestone rows so instalment payments + the payment-due
         # reminder job have a table to work against. Best-effort: never blocks the upload.
         self._create_payment_milestones(doc, plan, owner_id, project_id, payment,
-                                        _first_present(form_data, _BOOKING_DATE_KEYS))
+                                        plan.get("booking_date"))
 
         signed_url = self._sign_url(object_path, bucket=self._booking_forms_bucket)
         return doc, signed_url, DEFAULT_SIGNED_URL_EXPIRY_SECONDS, plan
+
+    def _plan_schedule_from_payment(self, payment, form_data: dict, project_id: str = None):
+        """The schedule for a booking paid against a chosen payment plan, or None
+        for a legacy booking. Plan, version and prices come from the terms the
+        server computed and range-checked at order time and stored on the
+        payment - the customer can't change them at upload (a different total or
+        plan code in form_data -> plan_mismatch); the admin verifies the declared
+        price at KYC review. Booking date = the payment's date in IST. The
+        possession date is the plot's project's (stored in the terms)."""
+        notes = getattr(payment, "notes", None)
+        if isinstance(notes, str):
+            try:
+                notes = json.loads(notes)
+            except ValueError:
+                notes = None
+        terms = notes.get("payment_plan") if isinstance(notes, dict) else None
+        if not isinstance(terms, dict) or not terms.get("payment_plan_code"):
+            return None
+        from DivineService.loan_report_data import amount_in_words_indian
+        from DivineService.service_payment_plans import IST, servicePaymentPlans
+
+        client_code = (form_data.get("payment_plan_code") or form_data.get("paymentPlanCode") or "").strip()
+        if client_code and client_code != terms["payment_plan_code"]:
+            raise ValueError("plan_mismatch")
+        created = getattr(payment, "created_date", None)
+        if isinstance(created, datetime):
+            booking_date = (created if created.tzinfo else created.replace(tzinfo=timezone.utc)).astimezone(IST).date()
+        else:
+            booking_date = datetime.now(IST).date()
+        schedule = servicePaymentPlans().schedule_for_booking(
+            terms, booking_date, project_id=terms.get("project_id") or (project_id or "").strip() or None)
+        client_total = normalize_indian_amount(_first_present(form_data, _TOTAL_AMOUNT_KEYS))
+        if client_total and abs(float(client_total) - float(schedule["total"])) > 1:
+            raise ValueError("plan_mismatch")
+
+        paid = float(payment.amount or 0)
+        rows = []
+        for i, r in enumerate(schedule["rows"]):
+            rows.append({**r, "status": "paid" if i == 0 and paid + 1 >= float(r["amount"]) else "due"})
+        outstanding = max(0, float(schedule["total"]) - paid)
+        return {
+            "total_receivable": schedule["total"],
+            "total_received": paid,
+            "total_outstanding": outstanding,
+            "total_outstanding_words": amount_in_words_indian(outstanding) or None,
+            "booking_date": schedule["booking_date"],
+            "rows": rows,
+            "payment_plan": {
+                **schedule["plan"],
+                "sale_price": schedule["sale_price"], "plc": schedule["plc"], "ifms": schedule["ifms"],
+                "cam": schedule["cam"], "total": schedule["total"], "booking_amount": schedule["booking_amount"],
+            },
+        }
 
     def _create_payment_milestones(self, doc, plan, owner_id, project_id, payment, booking_date_raw):
         try:
@@ -696,6 +774,10 @@ class serviceDocument:
         # incidental, in case that ID scheme is ever changed.
         if doc.owner_id != requester_id or (requester_role is not None and doc.owner_role != requester_role):
             raise PermissionError("forbidden")
+        if (getattr(doc, "status", None) or "") == IMPORTED_STATUS:
+            # Offline-buyer plot record (scripts/import_offline_buyers.py) - data
+            # only, no uploaded file to sign.
+            raise ValueError("no_file_for_imported_record")
         # Every row records the bucket it was actually written to at upload time (storage_bucket).
         # Rows created before that column existed have it NULL - those all predate the
         # Booking_Forms bucket, so they fall back to the default bucket, not an inference off
@@ -725,7 +807,7 @@ class serviceDocument:
         if not isinstance(form_data, dict):
             form_data = {}
 
-        from DivineService.service_demand_letter import generate_demand_letter_pdf
+        from DivineService.service_demand_letter import finance_pending, generate_demand_letter_pdf
         # The booking row for THIS document's payment is authoritative for the
         # plot number and project (so a multi-plot customer gets the right plot,
         # and the right company letterhead even when the form lacks projectId);
@@ -739,8 +821,12 @@ class serviceDocument:
         if isinstance(project, str) and project.strip():
             form_data = {**form_data, "project_name": project.strip()}
         form_data = self._with_live_milestones(form_data, document_id)
+        if finance_pending(form_data):
+            # No total and no schedule even after the milestone overlay - an
+            # offline buyer whose price data isn't loaded yet.
+            raise ValueError("payment_details_pending")
         pdf_bytes = generate_demand_letter_pdf(form_data, doc.owner_id)
-        return pdf_bytes, f"demand-letter-{document_id}.pdf"
+        return pdf_bytes, f"demand-letter-{document_id}.pdf"  # document_id matched a DB row exactly
 
     def _with_live_milestones(self, form_data: dict, document_id: str) -> dict:
         """Overlay the live milestone plan (keyed by this document's id) onto the
@@ -771,6 +857,10 @@ class serviceDocument:
                 "due_date": due.isoformat() if hasattr(due, "isoformat") else due,
                 "amount": int(round(amount)),
                 "status": getattr(r, "status", None),
+                "basic_amount": getattr(r, "basic_amount", None),
+                "charge_head": getattr(r, "charge_head", None),
+                "charge_amount": getattr(r, "charge_amount", None),
+                "due_trigger": getattr(r, "due_trigger", None),
             })
         received = sum(s["amount"] for s in schedule if (s["status"] or "").lower() == "paid")
         return {**form_data, "payment_schedule": schedule, "amount_received": received}
@@ -783,6 +873,8 @@ class serviceDocument:
             raise ValueError("not_found")
         if requester_role is not None and doc.owner_role != requester_role:
             raise PermissionError("forbidden")
+        if (getattr(doc, "status", None) or "") == IMPORTED_STATUS:
+            raise ValueError("no_file_for_imported_record")
         bucket = getattr(doc, "storage_bucket", None) or self._bucket
         signed_url = self._sign_url(doc.storage_path, bucket=bucket)
         return doc, signed_url, DEFAULT_SIGNED_URL_EXPIRY_SECONDS
@@ -859,6 +951,8 @@ class serviceDocument:
             doc = self._persistence.get_latest_by_owner_and_type(owner_id, (document_type or "").strip())
             if not doc:
                 return None, None, None
+            if (getattr(doc, "status", None) or "") == IMPORTED_STATUS:
+                return doc, None, None      # offline-buyer record: data only, no file to sign
             bucket = getattr(doc, "storage_bucket", None) or self._bucket
             signed_url = self._sign_url(doc.storage_path, bucket=bucket)
             return doc, signed_url, DEFAULT_SIGNED_URL_EXPIRY_SECONDS
@@ -890,6 +984,8 @@ class serviceDocument:
 
             by_bucket = {}
             for doc in docs:
+                if (getattr(doc, "status", None) or "") == IMPORTED_STATUS:
+                    continue                # no file - never sent to the signer
                 bucket = getattr(doc, "storage_bucket", None) or self._bucket
                 by_bucket.setdefault(bucket, []).append(doc)
 

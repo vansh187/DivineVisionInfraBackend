@@ -33,6 +33,8 @@ def _pay_service():
     # auto-created attribute rather than a real string) for record.booking_id
     # assertions to mean anything.
     booking.create_booking.return_value = SimpleNamespace(id="BKG-2026-000001")
+    # The bookable pre-check reads the unit's status - a fresh plot is 'available'.
+    inventory.get_by_id.return_value = SimpleNamespace(id="INV-9", status="available")
     svc = servicePayment(payments, inventory, booking)
     svc._key_id, svc._key_secret = "rzp_test_fake", "fake_secret"
     return svc, payments, inventory, booking

@@ -10,10 +10,11 @@ URL - it does not need to be configured to send a particular HTTP method or body
 The call is safe to repeat: every (milestone, kind) reminder is de-duplicated in
 divine_payment_reminders, so a double fire on a given day sends nothing extra.
 """
+import hmac
 import logging
 import os
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Header, HTTPException, Query
 
 from DivineService.service_payment_reminders import serviceReminders
 
@@ -21,18 +22,21 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
 
-def _require_job_token(key: str) -> None:
+def _require_job_token(key: str, header_token: str = None) -> None:
+    """The shared secret may come as the X-Jobs-Token header (preferred - kept
+    out of access logs) or the legacy ?key= query parameter. Constant-time compare."""
     expected = (os.getenv("DIVINE_JOBS_TOKEN") or "").strip()
     if not expected:
         raise HTTPException(status_code=503, detail="jobs_not_configured")
-    if not key or key.strip() != expected:
+    supplied = (header_token or key or "").strip()
+    if not supplied or not hmac.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8")):
         raise HTTPException(status_code=401, detail="unauthorized")
 
 
-def _run_payment_reminders(key: str):
+def _run_payment_reminders(key: str, header_token: str = None):
     """Run the daily payment-due reminder sweep. Idempotent within a day - each
     (milestone, kind) reminder is sent at most once (OVERDUE once per ISO week)."""
-    _require_job_token(key)
+    _require_job_token(key, header_token)
     try:
         return serviceReminders().run()
     except Exception:
@@ -41,10 +45,12 @@ def _run_payment_reminders(key: str):
 
 
 @router.get("/payment-reminders")
-def run_payment_reminders_get(key: str = Query(None, max_length=200)):
-    return _run_payment_reminders(key)
+def run_payment_reminders_get(key: str = Query(None, max_length=200),
+                              x_jobs_token: str = Header(None, max_length=200)):
+    return _run_payment_reminders(key, x_jobs_token)
 
 
 @router.post("/payment-reminders")
-def run_payment_reminders_post(key: str = Query(None, max_length=200)):
-    return _run_payment_reminders(key)
+def run_payment_reminders_post(key: str = Query(None, max_length=200),
+                               x_jobs_token: str = Header(None, max_length=200)):
+    return _run_payment_reminders(key, x_jobs_token)
