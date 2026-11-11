@@ -868,7 +868,8 @@ class OfflineBuyerImport:
             "created_by, created_date, last_updated_by, last_updated_date, source, must_change_password, "
             "invite_status) VALUES (:id, :username, :first, :last, :email, :phone, :pw, :by, :now, :by, :now, "
             ":source, :must, :invite)"
-        ), {"id": candidate, "username": ident, "first": parts[0] or None, "last": parts[1] if len(parts) > 1 else None,
+        ), {"id": candidate, "username": ident[:255], "first": (parts[0] or "")[:150] or None,
+            "last": parts[1][:150] if len(parts) > 1 else None,
             "email": ident if kind == "email" else None,
             "phone": next((m.phone for m in members if m.phone), None),
             "pw": unusable, "by": source, "now": now, "source": IMPORT_SOURCE, "must": True,

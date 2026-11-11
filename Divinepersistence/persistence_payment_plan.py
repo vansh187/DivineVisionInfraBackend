@@ -44,9 +44,10 @@ class PaymentPlanInstalmentModel(Base):
     seq = Column(Integer, nullable=False)
     label = Column(String(150), nullable=False)
     percent = Column(Numeric(6, 3), nullable=False)
-    due_trigger = Column(String(12), nullable=False, default="booking")   # booking | possession
+    due_trigger = Column(String(12), nullable=False, default="booking")   # booking | possession | custom
     due_days = Column(Integer)                                            # NULL = on the trigger date
-    charge_head = Column(String(10))                                      # NULL | PLC | IFMS | CAM
+    charge_head = Column(String(10))                                      # NULL | PLC | IFMS | CAM | ALL
+    due_from = Column(String(100))                                        # custom trigger: event name
 
 
 class ProjectSettingsModel(Base):
@@ -81,8 +82,8 @@ _DEFAULT_QUERIES = {
     ),
     "insert_instalment": (
         "INSERT INTO divine_payment_plan_instalments (id, plan_id, seq, label, percent, due_trigger, "
-        "due_days, charge_head) VALUES (:id, :plan_id, :seq, :label, :percent, :due_trigger, "
-        ":due_days, :charge_head);"
+        "due_days, charge_head, due_from) VALUES (:id, :plan_id, :seq, :label, :percent, :due_trigger, "
+        ":due_days, :charge_head, :due_from);"
     ),
     "deactivate_other_versions": (
         "UPDATE divine_payment_plans SET is_active = :inactive, last_updated_date = :now "
@@ -225,6 +226,7 @@ class persistencePaymentPlan:
                             "label": row["label"], "percent": float(row["percent"]),
                             "due_trigger": row.get("due_trigger") or "booking",
                             "due_days": row.get("due_days"), "charge_head": row.get("charge_head"),
+                            "due_from": row.get("due_from") if row.get("due_trigger") == "custom" else None,
                         })
                     result = "created"
                 if meta["is_active"]:

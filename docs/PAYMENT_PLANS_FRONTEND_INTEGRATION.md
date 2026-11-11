@@ -379,7 +379,10 @@ Authorization: Bearer <admin token>
 | 8 | Plan retired between preview and payment | Order returns `payment_plan_not_found`. Reload plans and ask the customer to choose again. |
 | 9 | Upload retried after a network error | A 409 `booking_application_exists` means it already succeeded. Reload the profile. |
 | 10 | `form_data.total_amount` ≠ the total paid against | 400 `plan_mismatch`. Always send `preview.total` from the same preview used for payment. |
-| 11 | "On Offer of Possession" row | `due_date: null`, no Pay button, never overdue, no reminder. It gets a date (and then reminders) once the admin sets the project's possession date. |
+| 11 | Rows due from an event: `due_trigger` `"possession"`, or `"custom"` with `due_from` (e.g. "Completion of plinth") | `due_date: null`: show `due_text` ("On Offer of Possession" / "30 days after Completion of plinth"), no Pay button, never overdue, no reminder. A possession row gets a date (and then reminders) once the admin sets the project's possession date; a custom row stays undated. **Instalments after an undated event row can still be paid**: treat the first unpaid row *with a date* as "next". Never compute a date for these rows from the booking date. |
+| 11b | `GET /customer/profile` and null values | The profile response **omits** fields that are null (e.g. an undated row has no `due_date` key at all). Treat a missing key the same as `null`. |
+| 11c | Plan code in `form_data` at upload | Either the full code (`PP1/FPP/10-15-25-25-15-10`) or the short code (`PP1`, any case) is accepted. A different plan → `plan_mismatch`. |
+| 11a | Row 1 with a due other than "on booking" | Row 1 is still the booking payment and is paid at booking. Only its `due_text` differs. |
 | 12 | Instalment payments | Unchanged: pay rows in order; amount = that row's `amount` (charges included). |
 | 13 | Temporary-password customers (imported buyers) | `POST /customer/login` returns `must_change_password: true`, and the chatbot login response also carries `must_change_password: true`. Show the "set new password" screen before anything else. |
 | 14 | Legacy bookings (made before plans) | No `payment_plan` on the booking; the schedule shows as before. Don't show plan UI for them. |

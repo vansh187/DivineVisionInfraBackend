@@ -578,7 +578,9 @@ class BookingPaymentScheduleRowDTO(BaseModel):
     basic_amount: Optional[float] = None
     charge_head: Optional[str] = None
     charge_amount: Optional[float] = None
-    due_trigger: Optional[str] = None
+    due_trigger: Optional[str] = None       # booking | possession | custom
+    due_from: Optional[str] = None          # custom: the event, e.g. 'Completion of plinth'
+    due_text: Optional[str] = None          # e.g. '30 days after Completion of plinth' - show when due_date is null
 
 
 class BookingNextDueDTO(BaseModel):
@@ -1130,7 +1132,9 @@ class PaymentScheduleRowDTO(BaseModel):
     basic_amount: Optional[int] = None
     charge_head: Optional[str] = None       # PLC | IFMS | CAM | PLC+IFMS+CAM | None
     charge_amount: Optional[int] = None
-    due_trigger: Optional[str] = None       # booking | possession (possession rows: due_date null until set)
+    due_trigger: Optional[str] = None       # booking | possession | custom (event rows: due_date null until set)
+    due_from: Optional[str] = None          # custom: the event the days count from
+    due_text: Optional[str] = None          # wording to show when due_date is null
 
 
 class CustomerNextDueDTO(BaseModel):

@@ -636,9 +636,6 @@ class serviceDocument:
         from DivineService.loan_report_data import amount_in_words_indian
         from DivineService.service_payment_plans import IST, servicePaymentPlans
 
-        client_code = (form_data.get("payment_plan_code") or form_data.get("paymentPlanCode") or "").strip()
-        if client_code and client_code != terms["payment_plan_code"]:
-            raise ValueError("plan_mismatch")
         created = getattr(payment, "created_date", None)
         if isinstance(created, datetime):
             booking_date = (created if created.tzinfo else created.replace(tzinfo=timezone.utc)).astimezone(IST).date()
@@ -646,6 +643,13 @@ class serviceDocument:
             booking_date = datetime.now(IST).date()
         schedule = servicePaymentPlans().schedule_for_booking(
             terms, booking_date, project_id=terms.get("project_id") or (project_id or "").strip() or None)
+        # The form may repeat the plan as its full code or its short code ("PP1",
+        # any case) - both identify the plan paid against; anything else doesn't.
+        client_code = str(form_data.get("payment_plan_code") or form_data.get("paymentPlanCode") or "").strip()
+        accepted = {str(schedule["plan"].get("code") or "").lower(), str(schedule["plan"].get("short_code") or "").lower(),
+                    str(terms["payment_plan_code"]).lower()}
+        if client_code and client_code.lower() not in accepted:
+            raise ValueError("plan_mismatch")
         client_total = normalize_indian_amount(_first_present(form_data, _TOTAL_AMOUNT_KEYS))
         if client_total and abs(float(client_total) - float(schedule["total"])) > 1:
             raise ValueError("plan_mismatch")
@@ -861,6 +865,8 @@ class serviceDocument:
                 "charge_head": getattr(r, "charge_head", None),
                 "charge_amount": getattr(r, "charge_amount", None),
                 "due_trigger": getattr(r, "due_trigger", None),
+                "due_from": getattr(r, "due_from", None),
+                "due_days": getattr(r, "due_days", None),
             })
         received = sum(s["amount"] for s in schedule if (s["status"] or "").lower() == "paid")
         return {**form_data, "payment_schedule": schedule, "amount_received": received}

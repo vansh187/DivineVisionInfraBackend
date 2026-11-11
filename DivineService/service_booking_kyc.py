@@ -136,17 +136,20 @@ class serviceBookingKyc:
         }
 
     def list_queue(self, search: str = None, status: str = None, kyc_status: str = None,
-                    page: int = 1, page_size: int = 20) -> dict:
+                    page: int = 1, page_size: int = 20, customer_id: str = None) -> dict:
         try:
             search = (search or "").strip() or None
+            customer_id = (customer_id or "").strip() or None
             offset = (page - 1) * page_size
             rows = self._persistence.list_queue(
                 search=search, status=status, kyc_status=kyc_status, limit=page_size, offset=offset,
+                customer_id=customer_id,
             )
             if rows:
                 total_items = int(rows[0].total_count)
             else:
-                total_items = self._persistence.count_queue(search=search, status=status, kyc_status=kyc_status)
+                total_items = self._persistence.count_queue(search=search, status=status, kyc_status=kyc_status,
+                                                            customer_id=customer_id)
             customer_names = self._customer_names(rows)
             total_pages = (total_items + page_size - 1) // page_size if page_size else 0
             return {
@@ -540,6 +543,7 @@ class serviceBookingKyc:
                 charge_head=getattr(row, "charge_head", None),
                 charge_amount=profile_service._to_int_rupees(getattr(row, "charge_amount", None)),
                 due_trigger=getattr(row, "due_trigger", None),
+                due_from=getattr(row, "due_from", None), due_days=getattr(row, "due_days", None),
             ) for row in rows]
             if not schedule and isinstance(raw_schedule, list):
                 schedule = [SimpleNamespace(
@@ -551,6 +555,7 @@ class serviceBookingKyc:
                     charge_head=row.get("charge_head"),
                     charge_amount=profile_service._to_int_rupees(row.get("charge_amount")),
                     due_trigger=row.get("due_trigger"),
+                    due_from=row.get("due_from"), due_days=row.get("due_days"),
                 ) for row in raw_schedule if isinstance(row, dict)]
             paid_total = sum(
                 getattr(row, "amount", 0) or 0
@@ -595,7 +600,8 @@ class serviceBookingKyc:
             {"label": r.label, "percent": r.percent, "due_date": r.due_date, "amount": r.amount,
              "status": getattr(r, "status", None), "basic_amount": getattr(r, "basic_amount", None),
              "charge_head": getattr(r, "charge_head", None), "charge_amount": getattr(r, "charge_amount", None),
-             "due_trigger": getattr(r, "due_trigger", None)}
+             "due_trigger": getattr(r, "due_trigger", None), "due_from": getattr(r, "due_from", None),
+             "due_days": getattr(r, "due_days", None)}
             for r in (getattr(entry, "payment_schedule", None) or [])
         ]
         plot_area = pick(getattr(entry, "plot_area_sq_yd", None), _first(form, _AREA_KEYS))

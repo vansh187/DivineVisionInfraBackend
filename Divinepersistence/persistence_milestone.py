@@ -16,7 +16,7 @@ class PaymentMilestoneModel(Base):
     project_id = Column(String(120))
     inventory_id = Column(String(36))
     milestone_no = Column(Integer, nullable=False)
-    label = Column(String(120))
+    label = Column(String(150))
     percent = Column(Numeric(6, 3))
     due_days = Column(Integer)
     due_date = Column(Date)
@@ -27,9 +27,10 @@ class PaymentMilestoneModel(Base):
     # Payment-plan rows (DivineService/service_payment_plans.py): amount =
     # basic_amount (share of the sale price) + charge_amount (PLC/IFMS/CAM).
     basic_amount = Column(Numeric(14, 2))
-    charge_head = Column(String(10))
+    charge_head = Column(String(20))      # PLC | IFMS | CAM | combinations like PLC+IFMS+CAM
     charge_amount = Column(Numeric(14, 2))
-    due_trigger = Column(String(12))      # booking | possession (NULL = booking)
+    due_trigger = Column(String(12))      # booking | possession | custom (NULL = booking)
+    due_from = Column(String(100))        # custom trigger: the event the days count from
     created_date = Column(DateTime(timezone=True))
     last_updated_date = Column(DateTime(timezone=True))
 
@@ -63,11 +64,11 @@ class persistenceMilestone:
             "INSERT INTO divine_payment_milestones "
             "(id, booking_id, customer_id, project_id, inventory_id, milestone_no, label, "
             " percent, due_days, due_date, amount, status, paid_on, paid_payment_id, "
-            " basic_amount, charge_head, charge_amount, due_trigger, "
+            " basic_amount, charge_head, charge_amount, due_trigger, due_from, "
             " created_date, last_updated_date) "
             "VALUES (:id, :booking_id, :customer_id, :project_id, :inventory_id, :milestone_no, "
             " :label, :percent, :due_days, :due_date, :amount, :status, :paid_on, :paid_payment_id, "
-            " :basic_amount, :charge_head, :charge_amount, :due_trigger, "
+            " :basic_amount, :charge_head, :charge_amount, :due_trigger, :due_from, "
             " :now, :now) "
             "ON CONFLICT (booking_id, milestone_no) DO NOTHING;"
         ))
@@ -194,6 +195,8 @@ class persistenceMilestone:
                         "charge_head": r.get("charge_head"),
                         "charge_amount": r.get("charge_amount"),
                         "due_trigger": r.get("due_trigger"),
+                        "due_from": (r.get("due_from") or None) and str(r["due_from"])[:100],
+                        "label": (r.get("label") or None) and str(r["label"])[:150],
                         "now": now,
                     }
                     db.execute(text(self._queries["insert_milestone"]), params)

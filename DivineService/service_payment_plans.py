@@ -32,8 +32,24 @@ logger = logging.getLogger(__name__)
 
 IST = timezone(timedelta(hours=5, minutes=30))
 CHARGE_HEADS = ("PLC", "IFMS", "CAM")
-ROW_CHARGE_HEADS = CHARGE_HEADS + ("ALL",)
-DUE_TRIGGERS = ("booking", "possession")
+# Two-charge combinations, always in the order PLC, IFMS, CAM joined by '+'.
+PAIR_CHARGE_HEADS = ("PLC+IFMS", "PLC+CAM", "IFMS+CAM")
+# What a plan instalment may store. All three charges are stored as 'ALL'
+# (never 'PLC+IFMS+CAM' - 12 chars would not fit varchar(10)).
+ROW_CHARGE_HEADS = CHARGE_HEADS + PAIR_CHARGE_HEADS + ("ALL",)
+
+
+def charges_in(head) -> list:
+    """The individual charges a plan row carries:
+    'PLC+CAM' -> ['PLC', 'CAM'], 'ALL' -> ['PLC', 'IFMS', 'CAM'], None -> []."""
+    if not head:
+        return []
+    head = str(head)
+    if head == "ALL":
+        return list(CHARGE_HEADS)
+    return head.split("+") if head in ROW_CHARGE_HEADS else []
+DUE_TRIGGERS = ("booking", "possession", "custom")   # custom = admin-named event (due_from)
+MAX_DUE_FROM = 100
 MAX_TOTAL_INR = Decimal("500000000")     # 50 crore - far above any plot; guards typos
 EXAMPLE_PRICES = {"sale_price": 5000000, "plc": 100000, "ifms": 50000, "cam": 75000}   # the document's example
 _CACHE_SECONDS = 60
@@ -107,6 +123,10 @@ def validate_plan(plan: dict) -> list:
             raise ValueError("invalid_payment_plan")
         if (r.get("due_trigger") or "booking") not in DUE_TRIGGERS:
             raise ValueError("invalid_payment_plan")
+        if (r.get("due_trigger") or "booking") == "custom":
+            event = str(r.get("due_from") or "").strip()
+            if not 1 <= len(event) <= MAX_DUE_FROM:
+                raise ValueError("invalid_payment_plan")
         if r.get("charge_head") not in (None, "") and r.get("charge_head") not in ROW_CHARGE_HEADS:
             raise ValueError("invalid_payment_plan")
         if r.get("due_days") is not None and int(r["due_days"]) < 0:
@@ -114,18 +134,34 @@ def validate_plan(plan: dict) -> list:
         total_pct += pct
     if abs(total_pct - 100) > Decimal("0.001"):
         raise ValueError("invalid_payment_plan")
-    first = rows[0]
-    # The first row is what the customer pays to book - it must be due on booking.
-    if (first.get("due_trigger") or "booking") != "booking" or int(first.get("due_days") or 0) != 0:
+    # Each of PLC / IFMS / CAM may be placed on at most one row.
+    used = [c for r in rows for c in charges_in(r.get("charge_head"))]
+    if len(set(used)) != len(used):
         raise ValueError("invalid_payment_plan")
+    # Row 1 is always what the customer pays to book (and is marked paid at
+    # booking) whatever wording / due the admin gives it.
     return rows
 
 
 def due_text(row: dict) -> str:
+    """'On booking' / '45 days after booking' / 'On Offer of Possession' /
+    'On Completion of plinth' / '30 days after Completion of plinth'."""
     days = row.get("due_days")
-    if (row.get("due_trigger") or "booking") == "possession":
+    trigger = (row.get("due_trigger") or "booking").lower()
+    if trigger == "custom":
+        event = str(row.get("due_from") or "").strip() or "the stated event"
+        return f"On {event}" if not days else f"{days} days after {event}"
+    if trigger == "possession":
         return "On Offer of Possession" if not days else f"{days} days after Offer of Possession"
     return "On booking" if not days else f"{days} days after booking"
+
+
+def is_event_linked(row: dict) -> bool:
+    """A row due from an event that has no date yet (possession not offered,
+    or a custom event) - never overdue, never reminded, never demanded."""
+    trigger = str(row.get("due_trigger") or "booking").lower()
+    due = row.get("due_date") if isinstance(row, dict) else getattr(row, "due_date", None)
+    return trigger in ("possession", "custom") and not due
 
 
 def compute_schedule(plan: dict, sale_price, plc=0, ifms=0, cam=0, booking_date=None,
@@ -144,13 +180,13 @@ def compute_schedule(plan: dict, sale_price, plc=0, ifms=0, cam=0, booking_date=
     booked_on = _as_date(booking_date)
     possession_on = _as_date(possession_date)
 
-    # Which row carries each charge: its own head, else an 'ALL' row, else the last row.
+    # Which row carries each charge: the row whose head includes it (a single
+    # head, a pair such as 'PLC+IFMS', or 'ALL'); a charge no row carries goes on
+    # the last row so it is never dropped.
     carrier = {}
     for head in CHARGE_HEADS:
-        idx = next((i for i, r in enumerate(rows) if r.get("charge_head") == head), None)
-        if idx is None:
-            idx = next((i for i, r in enumerate(rows) if r.get("charge_head") == "ALL"), len(rows) - 1)
-        carrier[head] = idx
+        carrier[head] = next((i for i, r in enumerate(rows) if head in charges_in(r.get("charge_head"))),
+                             len(rows) - 1)
 
     out_rows = []
     basic_so_far = Decimal(0)
@@ -165,7 +201,9 @@ def compute_schedule(plan: dict, sale_price, plc=0, ifms=0, cam=0, booking_date=
         charge = sum((charges[h] for h in heads), Decimal(0))
         trigger = r.get("due_trigger") or "booking"
         days = r.get("due_days")
-        anchor = booked_on if trigger == "booking" else possession_on
+        # booking -> booking date; possession -> project possession date (once
+        # set); custom -> an event the system has no date for (always undated).
+        anchor = booked_on if trigger == "booking" else possession_on if trigger == "possession" else None
         due = (anchor + timedelta(days=int(days or 0))) if anchor else None
         out_rows.append({
             "seq": int(r["seq"]),
@@ -173,6 +211,7 @@ def compute_schedule(plan: dict, sale_price, plc=0, ifms=0, cam=0, booking_date=
             "percent": _num(pct),
             "due_trigger": trigger,
             "due_days": None if days is None else int(days),
+            "due_from": (str(r.get("due_from") or "").strip() or None) if trigger == "custom" else None,
             "due_text": due_text(r),
             "due_date": due.isoformat() if due else None,
             "basic_amount": _num(basic),
@@ -215,6 +254,8 @@ def public_plan(plan: dict) -> dict:
             "percent": _num(Decimal(str(r["percent"]))),
             "due_trigger": r.get("due_trigger") or "booking",
             "due_days": None if r.get("due_days") is None else int(r["due_days"]),
+            "due_from": (str(r.get("due_from") or "").strip() or None)
+                        if (r.get("due_trigger") or "booking") == "custom" else None,
             "due_text": due_text(r),
             "charge_head": r.get("charge_head") or None,
         } for r in rows],
@@ -529,19 +570,25 @@ def normalize_definition(body: dict, keep_seq: bool = False) -> dict:
                 raise ValueError("invalid_instalments")
             if not 0 <= days <= MAX_DUE_DAYS:
                 raise ValueError("invalid_instalments")
+        due_from = None
+        if trigger == "custom":
+            due_from = re.sub(r"\s+", " ", str(r.get("due_from") or "")).strip()
+            if not 1 <= len(due_from) <= MAX_DUE_FROM:
+                raise ValueError("invalid_instalments")
         head = r.get("charge_head")
         head = str(head).strip().upper() if head not in (None, "") else None
         if head is not None and head not in ROW_CHARGE_HEADS:
             raise ValueError("invalid_instalments")
         if head:
-            used_heads.append(head)
+            used_heads.extend(charges_in(head))
         seq = i
         if keep_seq and r.get("seq") is not None:
             seq = int(r["seq"])
         instalments.append({"seq": seq, "label": label, "percent": float(percent), "due_trigger": trigger,
-                            "due_days": days, "charge_head": head})
-    # Each charge lands on exactly one row: no head twice, and 'ALL' only alone.
-    if len(set(used_heads)) != len(used_heads) or ("ALL" in used_heads and len(used_heads) > 1):
+                            "due_days": days, "charge_head": head, "due_from": due_from})
+    # Each of PLC / IFMS / CAM sits on at most one row (pairs and 'ALL' count
+    # every charge they contain).
+    if len(set(used_heads)) != len(used_heads):
         raise ValueError("invalid_payment_plan")
     plan = {"code": code, "short_code": short_code, "name": name, "description": description,
             "project_id": project_id, "sort_order": sort_order, "instalments": instalments}

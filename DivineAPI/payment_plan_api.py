@@ -134,9 +134,12 @@ _ADMIN_BAD_INPUT = {
 class PlanInstalmentInDTO(BaseModel):
     label: str = Field(..., min_length=1, max_length=150)
     percent: float = Field(..., gt=0, le=100, description="% of the Basic Sale Price, up to 3 decimals")
-    due_trigger: Literal["booking", "possession"] = "booking"
-    due_days: Optional[int] = Field(0, ge=0, le=3650, description="days after booking / possession")
-    charge_head: Optional[Literal["PLC", "IFMS", "CAM", "ALL"]] = None
+    due_trigger: Literal["booking", "possession", "custom"] = "booking"
+    due_days: Optional[int] = Field(0, ge=0, le=3650, description="days after the trigger date / event")
+    due_from: Optional[str] = Field(None, max_length=100,
+                                    description="Required when due_trigger='custom': the event the days count from")
+    # Pairs always in the order PLC, IFMS, CAM joined by '+', no spaces; 'ALL' = all three.
+    charge_head: Optional[Literal["PLC", "IFMS", "CAM", "PLC+IFMS", "PLC+CAM", "IFMS+CAM", "ALL"]] = None
 
 
 class PlanCreateDTO(BaseModel):

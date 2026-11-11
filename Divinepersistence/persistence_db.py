@@ -167,10 +167,22 @@ OFFLINE_IMPORT_COLUMNS = {
     # Payment plans (scripts/add_payment_plans.py)
     "divine_payment_milestones": (
         ("basic_amount", "numeric(14,2)"),
-        ("charge_head", "varchar(10)"),
+        ("charge_head", "varchar(20)"),
         ("charge_amount", "numeric(14,2)"),
         ("due_trigger", "varchar(12)"),
+        ("due_from", "varchar(100)"),          # custom "Counted from" event
     ),
+    "divine_payment_plan_instalments": (
+        ("due_from", "varchar(100)"),
+    ),
+}
+
+# Columns that must be at least this wide (Postgres only; widening a varchar is
+# a metadata-only change). charge_head holds e.g. 'PLC+IFMS+CAM' (12 chars);
+# milestone labels come from plan labels of up to 150 chars.
+MIN_VARCHAR_WIDTHS = {
+    ("divine_payment_milestones", "charge_head"): 20,
+    ("divine_payment_milestones", "label"): 150,
 }
 
 
@@ -192,4 +204,15 @@ def ensure_offline_import_columns(conn) -> list:
                 ddl = ddl.replace("timestamptz", "timestamp").replace("DEFAULT false", "DEFAULT 0")
             conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {ddl};"))
             added.append(f"{table}.{name}")
+    if dialect == "postgresql":
+        for (table, column), width in MIN_VARCHAR_WIDTHS.items():
+            if table not in tables:
+                continue
+            current = conn.execute(text(
+                "SELECT character_maximum_length FROM information_schema.columns "
+                "WHERE table_schema = current_schema() AND table_name = :t AND column_name = :c"),
+                {"t": table, "c": column}).scalar()
+            if current is not None and int(current) < width:
+                conn.execute(text(f"ALTER TABLE {table} ALTER COLUMN {column} TYPE varchar({int(width)});"))
+                added.append(f"{table}.{column} varchar({current}->{width})")
     return added

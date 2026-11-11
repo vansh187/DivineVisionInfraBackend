@@ -35,6 +35,7 @@ list_queue: |
            OR lower(project_name) LIKE '%' || replace(replace(lower(:search), '%', '\%'), '_', '\_') || '%' ESCAPE '\')
       AND (:status IS NULL OR status = :status)
       AND (:kyc_status IS NULL OR kyc_status = :kyc_status)
+      AND (:customer_id IS NULL OR customer_id = :customer_id)
   )
   SELECT *, count(*) OVER() AS total_count FROM filtered
   ORDER BY created_date DESC
@@ -47,7 +48,8 @@ count_queue: |
          OR lower(customer_id) LIKE '%' || replace(replace(lower(:search), '%', '\%'), '_', '\_') || '%' ESCAPE '\'
          OR lower(project_name) LIKE '%' || replace(replace(lower(:search), '%', '\%'), '_', '\_') || '%' ESCAPE '\')
     AND (:status IS NULL OR status = :status)
-    AND (:kyc_status IS NULL OR kyc_status = :kyc_status);
+    AND (:kyc_status IS NULL OR kyc_status = :kyc_status)
+    AND (:customer_id IS NULL OR customer_id = :customer_id);
 
 list_by_customer: |
   SELECT * FROM divine_bookings WHERE customer_id = :customer_id ORDER BY created_date DESC;
