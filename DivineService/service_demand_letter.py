@@ -332,18 +332,36 @@ def _plan_label(form: dict) -> str:
 
 
 def _awaiting_possession(row: dict) -> bool:
-    return _s(row.get("due_trigger")).lower() == "possession" and not _to_date(row.get("due_date"))
+    """Due from an event with no date yet - Offer of Possession not set, or an
+    admin-named custom event. Never overdue and never demanded."""
+    return _s(row.get("due_trigger")).lower() in ("possession", "custom") and not _to_date(row.get("due_date"))
+
+
+def _due_cell_text(row: dict) -> str:
+    if _awaiting_possession(row):
+        if _s(row.get("due_trigger")).lower() == "possession":
+            return "On Possession"
+        explicit = _s(row.get("due_text"))
+        if explicit:
+            return explicit
+        from DivineService.service_payment_plans import due_text
+        return due_text(row)
+    return _fmt_date(row.get("due_date"))
 
 
 def _head_text(row: dict) -> str:
-    """'Basic Price', or 'BSP + PLC' / 'BSP + IFMS' / 'BSP + CAM' / 'BSP + Charges'."""
+    """'Basic Price', 'BSP + PLC', 'BSP + PLC + IFMS' (any pair), or
+    'BSP + Charges' when all three charges sit on the row."""
     explicit = _s(row.get("head"))
     if explicit:
         return explicit
     charge = _s(row.get("charge_head"))
     if not charge or not (_num(row.get("charge_amount")) or 0):
         return "Basic Price"
-    return f"BSP + {charge}" if "+" not in charge else "BSP + Charges"
+    parts = [p for p in charge.split("+") if p]
+    if charge.upper() == "ALL" or len(parts) >= 3:
+        return "BSP + Charges"
+    return "BSP + " + " + ".join(parts)
 
 
 def _render_demand_letter_pdf(form_data: dict, customer_id: str, issued_on=None) -> bytes:
@@ -445,20 +463,39 @@ def _render_demand_letter_pdf(form_data: dict, customer_id: str, issued_on=None)
     for r in fig["rows"]:
         amt = _num(r.get("amount")) or 0
         basic = _num(r.get("basic_amount"))
-        pdf.cell(col[0], rh, _latin(_s(r.get("label")) or "-"), border=1)
+        # Long event wording ("30 days after Completion of plinth") wraps inside
+        # the Due Date cell; the whole row grows to fit (max 3 lines).
+        due_text_value = _latin(_due_cell_text(r))
+        pdf.set_font_size(7 if len(due_text_value) > 14 else 8)
+        due_lines = pdf.multi_cell(col[2] - 1, 3.4, due_text_value, dry_run=True, output="LINES")
+        n_lines = max(1, min(3, len(due_lines)))
+        h = rh if n_lines == 1 else max(rh, 3.4 * n_lines + 1.2)
+        pdf.set_font_size(8)
+        if pdf.get_y() + h > pdf.page_break_trigger:
+            pdf.add_page()
+        x0, y0 = pdf.get_x(), pdf.get_y()
+        pdf.cell(col[0], h, _latin(_s(r.get("label")) or "-"), border=1)
         head = _latin(_head_text(r))
         size = 8
         while size > 5.5 and pdf.get_string_width(head) > col[1] - 1.5:
             size -= 0.25
             pdf.set_font_size(size)
-        pdf.cell(col[1], rh, head, border=1, align="C")
+        pdf.cell(col[1], h, head, border=1, align="C")
         pdf.set_font_size(8)
-        due_cell = "On Possession" if _awaiting_possession(r) else _fmt_date(r.get("due_date"))
-        pdf.cell(col[2], rh, _latin(due_cell), border=1, align="C")
+        due_x = pdf.get_x()
+        pdf.rect(due_x, y0, col[2], h)
+        if n_lines == 1:
+            pdf.cell(col[2], h, due_text_value, border=0, align="C")
+        else:
+            pdf.set_font_size(7)
+            pdf.set_xy(due_x + 0.5, y0 + (h - 3.4 * n_lines) / 2)
+            pdf.multi_cell(col[2] - 1, 3.4, "\n".join(due_lines[:3]), border=0, align="C")
+            pdf.set_font_size(8)
+            pdf.set_xy(due_x + col[2], y0)
         # Installment = share of the sale price; Total Installment = with PLC/IFMS/CAM.
-        pdf.cell(col[3], rh, _indian(basic if basic is not None else amt), border=1, align="R")
-        pdf.cell(col[4], rh, _indian(amt), border=1, align="R")
-        pdf.ln()
+        pdf.cell(col[3], h, _indian(basic if basic is not None else amt), border=1, align="R")
+        pdf.cell(col[4], h, _indian(amt), border=1, align="R")
+        pdf.set_xy(x0, y0 + h)
 
     pdf.set_font("Helvetica", "B", 8)
     for label, value in (("Total Plot Amount", fig["total_plot"]),

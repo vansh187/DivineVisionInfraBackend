@@ -167,21 +167,23 @@ class persistenceBooking:
             return RowWrapper(row) if row else None
 
     def list_queue(self, search: str = None, status: str = None, kyc_status: str = None,
-                    limit: int = 20, offset: int = 0):
+                    limit: int = 20, offset: int = 0, customer_id: str = None):
         """Rows carry `total_count` (a window-function total over the whole
         filtered set) so the common non-empty page never needs a second query -
         same convention as persistence_admin_visits.list_visits."""
         with self._session_factory() as db:
             result = db.execute(text(self._q("list_queue")), {
                 "search": (search or None), "status": status, "kyc_status": kyc_status,
-                "limit": limit, "offset": offset,
+                "limit": limit, "offset": offset, "customer_id": customer_id or None,
             })
             return [RowWrapper(row) for row in result.mappings().all()]
 
-    def count_queue(self, search: str = None, status: str = None, kyc_status: str = None) -> int:
+    def count_queue(self, search: str = None, status: str = None, kyc_status: str = None,
+                    customer_id: str = None) -> int:
         with self._session_factory() as db:
             result = db.execute(text(self._q("count_queue")), {
                 "search": (search or None), "status": status, "kyc_status": kyc_status,
+                "customer_id": customer_id or None,
             })
             row = result.mappings().first()
             return int(row["total"]) if row else 0

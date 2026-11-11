@@ -412,7 +412,7 @@ CREATE TABLE IF NOT EXISTS divine_payment_milestones (
   project_id varchar(120),
   inventory_id varchar(36),
   milestone_no integer NOT NULL,
-  label varchar(120),
+  label varchar(150),
   percent numeric(6,3),
   due_days integer,
   due_date date,
@@ -422,9 +422,10 @@ CREATE TABLE IF NOT EXISTS divine_payment_milestones (
   paid_payment_id varchar(36),
   -- Payment-plan rows: amount = basic_amount (share of sale price) + charge_amount (PLC/IFMS/CAM)
   basic_amount numeric(14,2),
-  charge_head varchar(10),
+  charge_head varchar(20),          -- PLC | IFMS | CAM | combinations e.g. PLC+IFMS+CAM
   charge_amount numeric(14,2),
-  due_trigger varchar(12),          -- booking | possession (possession rows: due_date NULL until set)
+  due_trigger varchar(12),          -- booking | possession | custom (event rows: due_date NULL until dated)
+  due_from varchar(100),            -- custom: the event the days count from, e.g. 'Completion of plinth'
   created_date timestamptz DEFAULT now(),
   last_updated_date timestamptz DEFAULT now(),
   UNIQUE (booking_id, milestone_no)
@@ -476,9 +477,10 @@ CREATE TABLE IF NOT EXISTS divine_payment_plan_instalments (
   seq integer NOT NULL,
   label varchar(150) NOT NULL,
   percent numeric(6,3) NOT NULL,          -- % of the Basic Sale Price
-  due_trigger varchar(12) NOT NULL DEFAULT 'booking',   -- booking | possession
-  due_days integer,                       -- days after the trigger date
+  due_trigger varchar(12) NOT NULL DEFAULT 'booking',   -- booking | possession | custom
+  due_days integer,                       -- days after the trigger date / event
   charge_head varchar(10),                -- NULL | PLC | IFMS | CAM | ALL
+  due_from varchar(100),                  -- custom: the event name (required for custom rows)
   CONSTRAINT uq_payment_plan_instalment_seq UNIQUE (plan_id, seq)
 );
 CREATE INDEX IF NOT EXISTS ix_divine_payment_plan_instalments_plan_id ON divine_payment_plan_instalments (plan_id);

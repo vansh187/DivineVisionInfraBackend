@@ -420,6 +420,8 @@ class serviceCustomerProfile:
                         charge_head=self._text(r.get("charge_head")),
                         charge_amount=self._to_int_rupees(r.get("charge_amount")),
                         due_trigger=self._text(r.get("due_trigger")),
+                        due_from=self._text(r.get("due_from")),
+                        due_text=self._text(r.get("due_text")),
                     )
                     for r in rows
                 ]
@@ -515,6 +517,8 @@ class serviceCustomerProfile:
                         charge_head=self._text(item.get("charge_head")),
                         charge_amount=self._to_int_rupees(item.get("charge_amount")),
                         due_trigger=self._text(item.get("due_trigger")),
+                        due_from=self._text(item.get("due_from")),
+                        due_text=self._text(item.get("due_text")),
                     )
                 )
             return rows or None

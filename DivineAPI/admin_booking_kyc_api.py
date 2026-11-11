@@ -46,6 +46,7 @@ def list_booking_queue(
     search: Optional[str] = Query(None, max_length=200, description="Matches booking id, customer id, or project name"),
     status: Optional[Literal["pending_kyc_review", "booked", "rejected", "cancelled"]] = Query(None),
     kyc_status: Optional[Literal["pending", "verified", "needs_resubmission", "rejected"]] = Query(None),
+    customer_id: Optional[str] = Query(None, max_length=100, description="Exact customer id"),
     current_admin: dict = Depends(get_current_admin),
 ):
     """Admin panel's Booking Queue - every plot-booking payment awaiting or
@@ -54,6 +55,7 @@ def list_booking_queue(
     try:
         return _booking_service.list_queue(
             search=search, status=status, kyc_status=kyc_status, page=page, page_size=page_size,
+            customer_id=customer_id,
         )
     except Exception:
         logger.exception("admin_list_booking_queue_failed")

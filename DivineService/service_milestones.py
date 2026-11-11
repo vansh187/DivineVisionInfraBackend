@@ -76,6 +76,21 @@ def compute_status(due_date, is_paid: bool, today=None) -> str:
     return "upcoming"
 
 
+def _awaiting_event(record) -> bool:
+    trigger = str(getattr(record, "due_trigger", None) or "booking").lower()
+    return trigger in ("possession", "custom") and not getattr(record, "due_date", None)
+
+
+def _row_due_text(record):
+    try:
+        from DivineService.service_payment_plans import due_text
+        return due_text({"due_trigger": getattr(record, "due_trigger", None),
+                         "due_days": getattr(record, "due_days", None),
+                         "due_from": getattr(record, "due_from", None)})
+    except Exception:
+        return None
+
+
 def _row_is_on_booking(row: dict, index: int) -> bool:
     """Only the FIRST row is the on-booking instalment. (A later row with
     due_days 0 - e.g. 'On Offer of Possession' - is not paid at booking.)"""
@@ -127,6 +142,7 @@ class serviceMilestones:
                 "charge_head": r.get("charge_head") or None,
                 "charge_amount": _to_num(r.get("charge_amount")),
                 "due_trigger": r.get("due_trigger") or None,
+                "due_from": r.get("due_from") or None,
             })
         return rows
 
@@ -331,6 +347,8 @@ class serviceMilestones:
                 "charge_head": getattr(r, "charge_head", None),
                 "charge_amount": _to_num(getattr(r, "charge_amount", None)),
                 "due_trigger": getattr(r, "due_trigger", None) or "booking",
+                "due_from": getattr(r, "due_from", None),
+                "due_text": _row_due_text(r),
                 "status": status,
                 "pay_enabled_from": payable_from.isoformat() if payable_from else None,
                 "paid_on": self._iso(getattr(r, "paid_on", None)),
@@ -352,7 +370,11 @@ class serviceMilestones:
                                    getattr(r, "id", None), e)
 
     def _next_due(self, customer_id: str, rows: list, today: date):
-        nxt = next((row for row in rows if row["status"] != "paid"), None)
+        # The next instalment with a date wins; an event-linked row with no date
+        # yet (possession / custom event) only when nothing dated is left - so a
+        # dated row after it still gets its reminders.
+        unpaid = [row for row in rows if row["status"] != "paid"]
+        nxt = next((row for row in unpaid if row.get("due_date")), None) or (unpaid[0] if unpaid else None)
         if not nxt:
             return None
         d = _to_date(nxt["due_date"])
@@ -475,8 +497,11 @@ class serviceMilestones:
         if getattr(target, "status", None) == "paid":
             return target, "installment_already_paid"
 
+        # An earlier instalment waiting on an undated event (possession not yet
+        # offered / a custom event) doesn't block paying a dated one after it.
         earlier_unpaid = any(
             (getattr(r, "milestone_no", 0) or 0) < no and getattr(r, "status", None) != "paid"
+            and not _awaiting_event(r)
             for r in records
         )
         if earlier_unpaid:

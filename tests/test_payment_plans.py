@@ -133,8 +133,8 @@ def test_amounts_accept_indian_formatting():
 @pytest.mark.parametrize("bad", [
     {"instalments": []},
     {"instalments": [{"seq": 1, "label": "a", "percent": 90, "due_days": 0}]},                       # 90 %
-    {"instalments": [{"seq": 1, "label": "a", "percent": 100, "due_days": 30}]},                     # not on booking
-    {"instalments": [{"seq": 1, "label": "a", "percent": 100, "due_trigger": "possession"}]},
+    {"instalments": [{"seq": 1, "label": "a", "percent": 100, "due_trigger": "custom"}]},          # custom without event
+    {"instalments": [{"seq": 1, "label": "a", "percent": 100, "due_trigger": "slab"}]},            # unknown trigger
     {"instalments": [{"seq": 1, "label": "a", "percent": 100, "due_days": 0, "charge_head": "GST"}]},
     {"instalments": [{"seq": 1, "label": "a", "percent": 0, "due_days": 0},
                      {"seq": 2, "label": "b", "percent": 100, "due_days": 9}]},
@@ -821,8 +821,9 @@ def test_duplicate_code_and_short_code_conflict(admin_api):
     ({"project_id": "Suraksha Enclave"}, "invalid_project_id"),
     ({"instalments": [{"label": "On Booking", "percent": 50, "due_days": 0},
                       {"label": "Later", "percent": 40, "due_days": 30}]}, "invalid_payment_plan"),
-    ({"instalments": [{"label": "Later", "percent": 100, "due_days": 30}]}, "invalid_payment_plan"),
-    ({"instalments": [{"label": "On Booking", "percent": 100, "due_trigger": "possession"}]}, "invalid_payment_plan"),
+    ({"instalments": [{"label": "On Booking", "percent": 100, "due_trigger": "custom"}]}, "invalid_instalments"),
+    ({"instalments": [{"label": "On Booking", "percent": 100, "due_trigger": "custom", "due_from": "   "}]},
+     "invalid_instalments"),
     ({"instalments": [{"label": "On Booking", "percent": 50, "due_days": 0, "charge_head": "PLC"},
                       {"label": "Later", "percent": 50, "due_days": 30, "charge_head": "PLC"}]}, "invalid_payment_plan"),
     ({"instalments": [{"label": "On Booking", "percent": 50, "due_days": 0, "charge_head": "ALL"},
@@ -888,3 +889,460 @@ def test_normalize_definition_numbers_rows_in_order():
     plan = normalize_definition(PP5)
     assert [r["seq"] for r in plan["instalments"]] == [1, 2, 3]
     assert plan["instalments"][0]["charge_head"] is None and plan["instalments"][1]["charge_head"] == "PLC"
+
+
+
+# --------------------------------------------------------------------------
+# Custom "Counted from" events + column-length safety
+# --------------------------------------------------------------------------
+
+PP6 = {
+    "code": "PP6/CLP/10-40-50", "short_code": "PP6", "name": "Construction Linked Plan 10:40:50",
+    "description": None, "project_id": "suraksha-enclave", "sort_order": 6,
+    "instalments": [
+        {"label": "Booking Amount", "percent": 10, "due_trigger": "booking", "due_days": 0, "charge_head": None},
+        {"label": "On completion of plinth", "percent": 40, "due_trigger": "custom", "due_days": 30,
+         "due_from": "Completion of plinth", "charge_head": None},
+        {"label": "On Offer of Possession", "percent": 50, "due_trigger": "possession", "due_days": 0, "charge_head": "ALL"},
+    ],
+}
+
+
+def test_custom_event_plan_matches_the_frontend_sample(admin_api):
+    r = admin_api.post("/admin/payment-plans/validate", json=PP6)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    inst = body["instalments"]
+    assert [i["due_from"] for i in inst] == [None, "Completion of plinth", None]
+    assert [i["due_text"] for i in inst] == ["On booking", "30 days after Completion of plinth", "On Offer of Possession"]
+    assert [x["amount"] for x in body["example"]["rows"]] == [500000, 2000000, 2725000]
+    assert body["example"]["rows"][2]["charge_head"] == "PLC+IFMS+CAM" and body["example"]["total"] == 5225000
+    assert admin_api.post("/admin/payment-plans", json=PP6).status_code == 201
+    public = admin_api.get("/payment-plans/PP6").json()
+    assert public["instalments"][1]["due_from"] == "Completion of plinth"
+
+
+def test_custom_event_without_days_reads_on_event(admin_api):
+    plan = {**PP6, "instalments": [PP6["instalments"][0],
+                                   {**PP6["instalments"][1], "due_days": 0}, PP6["instalments"][2]]}
+    body = admin_api.post("/admin/payment-plans/validate", json=plan).json()
+    assert body["instalments"][1]["due_text"] == "On Completion of plinth"
+
+
+def test_custom_rows_have_no_due_date():
+    from DivineService.service_payment_plans import normalize_definition
+    s = compute_schedule(normalize_definition(PP6), **DOC_PRICES, booking_date="2026-11-01",
+                         possession_date="2028-01-01")
+    assert [r["due_date"] for r in s["rows"]] == ["2026-11-01", None, "2028-01-01"]
+    assert s["rows"][1]["due_trigger"] == "custom" and s["rows"][1]["due_from"] == "Completion of plinth"
+
+
+def test_due_from_is_dropped_for_standard_rows():
+    from DivineService.service_payment_plans import normalize_definition
+    plan = normalize_definition({**PP6, "instalments": [
+        {"label": "On Booking", "percent": 100, "due_trigger": "booking", "due_from": "ignored"}]})
+    assert plan["instalments"][0]["due_from"] is None
+
+
+def test_due_from_length_limits(admin_api):
+    long_event = {**PP6, "instalments": [PP6["instalments"][0],
+                                         {**PP6["instalments"][1], "due_from": "x" * 101}, PP6["instalments"][2]]}
+    assert admin_api.post("/admin/payment-plans/validate", json=long_event).status_code == 422
+    unknown = {**PP6, "instalments": [{**PP6["instalments"][0], "due_trigger": "slab"}]}
+    assert admin_api.post("/admin/payment-plans/validate", json=unknown).status_code == 422
+
+
+@pytest.mark.parametrize("first", [
+    {"label": "Booking Amount", "percent": 25, "due_trigger": "booking", "due_days": 7},
+    {"label": "Booking Amount", "percent": 25, "due_trigger": "possession", "due_days": 0},
+    {"label": "Booking Amount", "percent": 25, "due_trigger": "custom", "due_days": 5, "due_from": "Agreement signing"},
+])
+def test_first_instalment_may_have_any_due_and_is_still_paid_at_booking(admin_api, factory, first):
+    plan = {**PP6, "code": "PPX/T/25-75", "short_code": "PPX", "instalments": [
+        first, {"label": "Balance", "percent": 75, "due_trigger": "booking", "due_days": 60, "charge_head": "ALL"}]}
+    r = admin_api.post("/admin/payment-plans/validate", json=plan)
+    assert r.status_code == 200, r.text
+    from DivineService.service_payment_plans import normalize_definition
+    sched = compute_schedule(normalize_definition(plan), 1000000, booking_date="2026-11-01")
+    sched["rows"] = [{**x, "status": "paid" if i == 0 else "due"} for i, x in enumerate(sched["rows"])]
+    sched["payment_plan"] = sched["plan"]
+    rows = _milestones(factory)._rows_from_plan(sched, "doc-f", "C1", "p", "i", "pay-1", "2026-11-01")
+    assert rows[0]["status"] == "paid" and rows[0]["paid_payment_id"] == "pay-1"
+    assert sched["booking_amount"] == 250000
+
+
+def _custom_milestones(factory, booking_date):
+    from DivineService.service_payment_plans import normalize_definition
+    plan = normalize_definition({**PP6, "instalments": [
+        {"label": "Booking Amount", "percent": 10, "due_days": 0},
+        {"label": "On completion of plinth", "percent": 40, "due_trigger": "custom", "due_days": 30,
+         "due_from": "Completion of plinth"},
+        {"label": "Within 180 days of booking", "percent": 50, "due_days": 180}]})
+    sched = compute_schedule(plan, 1000000, booking_date=booking_date)
+    sched["rows"] = [{**x, "status": "paid" if i == 0 else "due"} for i, x in enumerate(sched["rows"])]
+    sched["payment_plan"] = sched["plan"]
+    svc = _milestones(factory)
+    svc._offline_submissions = MagicMock()
+    svc._offline_submissions.pending_milestones.return_value = set()
+    svc._persistence.create_milestones(
+        svc._rows_from_plan(sched, "doc-c", "C1", "suraksha-enclave", "INV-1", "pay-1", booking_date))
+    return svc
+
+
+def test_custom_milestone_stores_event_and_shows_wording(factory):
+    svc = _custom_milestones(factory, "2026-11-01")
+    stored = svc._persistence.list_for_booking("doc-c")
+    assert stored[1].due_from == "Completion of plinth" and stored[1].due_date is None
+    enriched = svc.enriched_schedule("C1", "doc-c", rows=stored)
+    row = enriched["rows"][1]
+    assert row["due_text"] == "30 days after Completion of plinth" and row["status"] == "upcoming"
+
+
+def test_dated_row_after_an_undated_event_still_gets_next_due_and_can_be_paid(factory):
+    booked = (date.today() - timedelta(days=200)).isoformat()      # 180-day row now overdue
+    svc = _custom_milestones(factory, booked)
+    stored = svc._persistence.list_for_booking("doc-c")
+    nd = svc.enriched_schedule("C1", "doc-c", rows=stored)["next_due"]
+    assert nd["label"] == "Within 180 days of booking" and nd["days_until_due"] < 0
+    svc.ensure_for_customer = lambda *a, **k: stored
+    target, code = svc.validate_installment("C1", 3, 500000, inventory_id="INV-1")
+    assert code is None and target.milestone_no == 3              # not blocked by the plinth row
+    target, code = svc.validate_installment("C1", 2, 400000, inventory_id="INV-1")
+    assert code is None                                            # the event row can be paid early too
+
+
+def test_reminder_goes_to_the_dated_row_not_the_undated_event(factory, monkeypatch):
+    svc_m = _custom_milestones(factory, (date.today() - timedelta(days=200)).isoformat())
+    from DivineService.service_payment_reminders import serviceReminders
+    import DivineService.service_payment_reminders as module
+    profile = MagicMock()
+    profile.list_booking_applications.return_value = [{"id": "doc-c", "form_data": {"unitNo": "C61"}}]
+    customers = MagicMock()
+    customers.get_by_id.return_value = SimpleNamespace(email="buyer@gmail.com", first_name="A")
+    sent = []
+    monkeypatch.setattr(module, "dispatch_payment_reminder_email", lambda *a, **k: sent.append(k) or True)
+    rem = serviceReminders(milestone_persistence=svc_m._persistence, customer_persistence=customers,
+                           profile_persistence=profile, milestone_service=svc_m, email_service=MagicMock())
+    assert rem.run()["sent"] == {"OVERDUE": 1}
+    assert sent[0]["milestone_label"] == "Within 180 days of booking" and sent[0]["amount"] == 500000
+
+
+def test_demand_letter_never_demands_an_undated_event_and_wraps_its_wording():
+    from DivineService.service_demand_letter import demand_letter_figures
+    from DivineService.service_payment_plans import normalize_definition
+    plan = normalize_definition(PP6)
+    sched = compute_schedule(plan, **DOC_PRICES, booking_date="2026-01-01")
+    rows = [{**x, "status": "paid" if i == 0 else "due"} for i, x in enumerate(sched["rows"])]
+    form = {"projectId": "suraksha-enclave", "applicantName": "A", "unitNo": "C61", "total_consideration": sched["total"],
+            "amount_received": rows[0]["amount"], "payment_schedule": rows, "payment_plan": sched["plan"]}
+    fig = demand_letter_figures(form, date(2026, 11, 9))
+    assert fig["overdue"] == 0 and fig["demand"] == 0 and fig["awaiting_possession"]
+    text_ = " ".join(_letter_text(form).split())
+    assert "30 days after Completion of plinth" in text_ and "On Possession" in text_
+
+
+@pytest.mark.parametrize("code", ["PP1", "PP2", "PP3", "PP4"])
+def test_standard_plans_unchanged(code):
+    """Regression: booking/possession-only plans give the same numbers and wording as before."""
+    s = compute_schedule(PLANS[code], **DOC_PRICES, booking_date="2026-11-01")
+    assert all(r["due_from"] is None for r in s["rows"])
+    assert all(r["due_text"].startswith(("On booking", "On Offer", "45", "60", "90", "180", "270", "30"))
+               for r in s["rows"])
+    assert sum(r["amount"] for r in s["rows"]) == 5225000
+
+
+def _string_limits(model):
+    return {c.name: c.type.length for c in model.__table__.columns if getattr(c.type, "length", None)}
+
+
+@pytest.mark.parametrize("code", ["PP1", "PP2", "PP3", "PP4", "PP6"])
+def test_every_value_fits_its_database_column(factory, code):
+    """Postgres rejects over-long strings (SQLite doesn't) - check every string
+    a plan can produce against the declared column widths."""
+    from Divinepersistence.persistence_milestone import PaymentMilestoneModel
+    from Divinepersistence.persistence_payment_plan import PaymentPlanInstalmentModel, PaymentPlanModel
+    from DivineService.service_payment_plans import normalize_definition
+    plan = normalize_definition(PP6) if code == "PP6" else PLANS[code]
+    plan = {**plan, "instalments": [{**i, "label": (i["label"] + " ") .ljust(150, "x")[:150]} for i in plan["instalments"]]}
+    sched = compute_schedule(plan, **DOC_PRICES, booking_date="2026-11-01")
+    sched["payment_plan"] = sched["plan"]
+    rows = _milestones(factory)._rows_from_plan(sched, "d" * 36, "C12345", "suraksha-enclave", "i" * 36, "p" * 36,
+                                                "2026-11-01")
+    limits = _string_limits(PaymentMilestoneModel)
+    for row in rows:
+        for col, limit in limits.items():
+            value = row.get(col)
+            if isinstance(value, str):
+                assert len(value) <= limit, (col, value, limit)
+    inst_limits = _string_limits(PaymentPlanInstalmentModel)
+    for i in plan["instalments"]:
+        for col, limit in inst_limits.items():
+            if isinstance(i.get(col), str):
+                assert len(i[col]) <= limit, (col, i[col])
+    plan_limits = _string_limits(PaymentPlanModel)
+    for col, limit in plan_limits.items():
+        if isinstance(plan.get(col), str):
+            assert len(plan[col]) <= limit, (col, plan[col])
+
+
+def test_milestone_columns_are_wide_enough_for_combined_charges():
+    from Divinepersistence.persistence_milestone import PaymentMilestoneModel
+    limits = _string_limits(PaymentMilestoneModel)
+    assert limits["charge_head"] >= len("PLC+IFMS+CAM") and limits["label"] >= 150 and limits["due_from"] >= 100
+
+
+def test_postgres_widening_statements(monkeypatch):
+    """The startup migration widens too-narrow Postgres columns and adds due_from."""
+    from Divinepersistence import persistence_db as pdb
+    assert pdb.MIN_VARCHAR_WIDTHS[("divine_payment_milestones", "charge_head")] == 20
+    assert ("due_from", "varchar(100)") in pdb.OFFLINE_IMPORT_COLUMNS["divine_payment_plan_instalments"]
+    assert ("due_from", "varchar(100)") in pdb.OFFLINE_IMPORT_COLUMNS["divine_payment_milestones"]
+
+
+def test_admin_bookings_list_has_an_exact_customer_filter():
+    from Divinepersistence.persistence_booking import persistenceBooking
+    q = persistenceBooking()._q("list_queue")
+    assert ":customer_id IS NULL OR customer_id = :customer_id" in q
+
+
+
+# --------------------------------------------------------------------------
+# Two-charge combinations in "Add charges" (PLC+IFMS, PLC+CAM, IFMS+CAM)
+# --------------------------------------------------------------------------
+
+def _pair_plan(code, row2_head, row3_head, pcts=(10, 40, 50)):
+    return {
+        "code": code, "short_code": code.split("/")[0], "name": f"Flexible Payment Plan {code}",
+        "description": None, "project_id": "suraksha-enclave", "sort_order": 7,
+        "instalments": [
+            {"label": "Booking Amount", "percent": pcts[0], "due_trigger": "booking", "due_days": 0, "charge_head": None},
+            {"label": "Within 45 days of booking", "percent": pcts[1], "due_trigger": "booking", "due_days": 45,
+             "charge_head": row2_head},
+            {"label": "On Offer of Possession", "percent": pcts[2], "due_trigger": "possession", "due_days": 0,
+             "charge_head": row3_head},
+        ],
+    }
+
+
+def _example(body):
+    return [(r["basic_amount"], r["charge_head"], r["charge_amount"], r["amount"]) for r in body["example"]["rows"]]
+
+
+def test_charges_in_unit():
+    from DivineService.service_payment_plans import charges_in
+    assert charges_in(None) == [] and charges_in("") == []
+    assert charges_in("PLC") == ["PLC"] and charges_in("CAM") == ["CAM"]
+    assert charges_in("PLC+IFMS") == ["PLC", "IFMS"]
+    assert charges_in("PLC+CAM") == ["PLC", "CAM"]
+    assert charges_in("IFMS+CAM") == ["IFMS", "CAM"]
+    assert charges_in("ALL") == ["PLC", "IFMS", "CAM"]
+    assert charges_in("CAM+PLC") == [] and charges_in("GST") == []          # not a valid head
+
+
+def test_sample_e_plc_ifms_created_and_stored(admin_api, factory):
+    body = _pair_plan("PP7/FPP/10-40-50", "PLC+IFMS", "CAM")
+    body["description"] = "10% on booking, 40% (+PLC, IFMS) within 45 days, 50% (+CAM) on Offer of Possession."
+    r = admin_api.post("/admin/payment-plans", json=body)
+    assert r.status_code == 201, r.text
+    out = r.json()
+    assert [i["charge_head"] for i in out["instalments"]] == [None, "PLC+IFMS", "CAM"]
+    assert _example(out) == [(500000, None, 0, 500000), (2000000, "PLC+IFMS", 150000, 2150000),
+                             (2500000, "CAM", 75000, 2575000)]
+    assert out["example"]["total"] == 5225000 and out["example"]["booking_amount"] == 500000
+    assert out["valid"] is True and out["is_active"] is True
+    with factory() as db:                                 # exactly what was written to the plan table
+        stored = db.execute(text(
+            "SELECT i.seq, i.charge_head FROM divine_payment_plan_instalments i JOIN divine_payment_plans p "
+            "ON p.id = i.plan_id WHERE p.code = 'PP7/FPP/10-40-50' ORDER BY i.seq")).all()
+    assert [tuple(x) for x in stored] == [(1, None), (2, "PLC+IFMS"), (3, "CAM")]
+
+
+def test_sample_f_plc_cam(admin_api):
+    out = admin_api.post("/admin/payment-plans/validate", json=_pair_plan("PP8/FPP/F", "PLC+CAM", "IFMS")).json()
+    assert _example(out) == [(500000, None, 0, 500000), (2000000, "PLC+CAM", 175000, 2175000),
+                             (2500000, "IFMS", 50000, 2550000)]
+
+
+def test_sample_g_ifms_cam(admin_api):
+    out = admin_api.post("/admin/payment-plans/validate", json=_pair_plan("PP9/FPP/G", "IFMS+CAM", "PLC")).json()
+    assert _example(out) == [(500000, None, 0, 500000), (2000000, "IFMS+CAM", 125000, 2125000),
+                             (2500000, "PLC", 100000, 2600000)]
+
+
+def test_sample_h_unassigned_third_charge_falls_to_last_row(admin_api):
+    body = {**_pair_plan("PP10/FPP/H", None, None), "instalments": [
+        {"label": "Booking Amount", "percent": 10, "due_trigger": "booking", "due_days": 0, "charge_head": "PLC+IFMS"},
+        {"label": "Balance", "percent": 90, "due_trigger": "booking", "due_days": 60, "charge_head": None}]}
+    out = admin_api.post("/admin/payment-plans/validate", json=body).json()
+    assert _example(out) == [(500000, "PLC+IFMS", 150000, 650000), (4500000, "CAM", 75000, 4575000)]
+    assert out["example"]["booking_amount"] == 650000
+    assert [i["charge_head"] for i in out["instalments"]] == ["PLC+IFMS", None]   # stored heads unchanged
+
+
+@pytest.mark.parametrize("a, b", [
+    ("PLC+IFMS", "PLC"), ("PLC+IFMS", "PLC+CAM"), ("IFMS+CAM", "ALL"), ("PLC+CAM", "PLC+CAM"),
+    ("PLC", "PLC"), ("ALL", "CAM"), ("IFMS", "PLC+IFMS"),
+])
+def test_overlapping_charges_are_rejected_and_nothing_is_saved(admin_api, a, b):
+    body = _pair_plan("PPZ/FPP/I", a, b)
+    r = admin_api.post("/admin/payment-plans", json=body)
+    assert r.status_code == 400 and r.json()["detail"] == "invalid_payment_plan", r.text
+    assert admin_api.get("/payment-plans/PPZ/FPP/I").status_code == 404
+
+
+@pytest.mark.parametrize("head", ["CAM+PLC", "IFMS+PLC", "PLC + IFMS", "plc+ifms", "PLC+IFMS+CAM", "PLC,IFMS", "GST"])
+def test_wrong_order_spacing_case_or_triple_is_refused_by_the_api(admin_api, head):
+    r = admin_api.post("/admin/payment-plans/validate", json=_pair_plan("PPY/FPP/W", head, None))
+    assert r.status_code == 422, r.text
+
+
+def test_service_normalises_case_but_never_order():
+    from DivineService.service_payment_plans import normalize_definition
+    plan = normalize_definition(_pair_plan("PPN/FPP/N", "plc+ifms", "cam"))
+    assert [i["charge_head"] for i in plan["instalments"]] == [None, "PLC+IFMS", "CAM"]
+    with pytest.raises(ValueError, match="invalid_instalments"):
+        normalize_definition(_pair_plan("PPN/FPP/N", "CAM+PLC", None))
+    with pytest.raises(ValueError, match="invalid_instalments"):
+        normalize_definition(_pair_plan("PPN/FPP/N", "PLC+IFMS+CAM", None))   # all three is stored as ALL
+
+
+def test_all_three_split_as_a_pair_and_a_single_equals_all():
+    """PLC+IFMS on one row + CAM on another = the same money as placing them individually."""
+    from DivineService.service_payment_plans import normalize_definition
+    pair = compute_schedule(normalize_definition(_pair_plan("PPA/1", "PLC+IFMS", "CAM")), **DOC_PRICES)
+    single = {**_pair_plan("PPA/2", None, "CAM"), "instalments": [
+        {"label": "Booking Amount", "percent": 10, "due_days": 0},
+        {"label": "Within 45 days of booking", "percent": 20, "due_days": 45, "charge_head": "PLC"},
+        {"label": "Within 45 days of booking ", "percent": 20, "due_days": 45, "charge_head": "IFMS"},
+        {"label": "On Offer of Possession", "percent": 50, "due_trigger": "possession", "charge_head": "CAM"}]}
+    split = compute_schedule(normalize_definition(single), **DOC_PRICES)
+    assert pair["total"] == split["total"] == 5225000
+    assert pair["rows"][1]["amount"] == split["rows"][1]["amount"] + split["rows"][2]["amount"]
+
+
+@pytest.mark.parametrize("prices", [
+    dict(sale_price=5000000, plc=100000, ifms=50000, cam=75000),
+    dict(sale_price=2627461, plc=0, ifms=10000, cam=0),          # only one charge present
+    dict(sale_price=1000001, plc=0, ifms=0, cam=0),              # no charges at all
+    dict(sale_price="25,00,000.50", plc="1,00,000", ifms=0, cam="12,345.4"),
+])
+@pytest.mark.parametrize("heads", [("PLC+IFMS", "CAM"), ("PLC+CAM", "IFMS"), ("IFMS+CAM", "PLC"),
+                                   ("PLC+IFMS", None), (None, "IFMS+CAM")])
+def test_pairs_always_add_up_to_the_total(prices, heads):
+    from DivineService.service_payment_plans import normalize_definition
+    s = compute_schedule(normalize_definition(_pair_plan("PPS/1", *heads)), **prices)
+    assert sum(r["amount"] for r in s["rows"]) == s["total"]
+    assert sum(r["charge_amount"] for r in s["rows"]) == s["plc"] + s["ifms"] + s["cam"]
+    for r in s["rows"]:                                   # a row's head names exactly the non-zero charges on it
+        assert (r["charge_head"] is None) == (r["charge_amount"] == 0)
+
+
+def test_zero_charges_in_a_pair_show_no_head():
+    from DivineService.service_payment_plans import normalize_definition
+    s = compute_schedule(normalize_definition(_pair_plan("PPS/2", "PLC+IFMS", "CAM")), 1000000, plc=0, ifms=5000, cam=0)
+    assert [r["charge_head"] for r in s["rows"]] == [None, "IFMS", None]
+
+
+def test_stored_plan_with_a_pair_validates_on_load(plan_persistence, plan_service):
+    from DivineService.service_payment_plans import normalize_definition
+    plan = normalize_definition(_pair_plan("PP7/FPP/10-40-50", "PLC+IFMS", "CAM"))
+    plan.update({"version": 1, "is_active": True})
+    plan_persistence.upsert_plan(plan)
+    plan_service.clear_cache()
+    listed = {p["short_code"]: p for p in plan_service.list_plans("suraksha-enclave")}
+    assert listed["PP7"]["instalments"][1]["charge_head"] == "PLC+IFMS"
+    preview = plan_service.preview("PP7", **DOC_PRICES)
+    assert [r["amount"] for r in preview["rows"]] == [500000, 2150000, 2575000]
+
+
+def test_booking_with_a_pair_plan_end_to_end(plan_persistence, plan_service, doc_service, factory):
+    """Payment terms -> upload schedule -> milestones in the DB -> demand letter."""
+    from DivineService.service_payment_plans import normalize_definition
+    plan = normalize_definition(_pair_plan("PP7/FPP/10-40-50", "PLC+IFMS", "CAM"))
+    plan.update({"version": 1, "is_active": True})
+    plan_persistence.upsert_plan(plan)
+    plan_service.clear_cache()
+    terms = plan_service.booking_terms("PP7", **DOC_PRICES)
+    assert terms["booking_amount"] == 500000
+    sched = doc_service._plan_schedule_from_payment(_payment(terms, created=datetime(2026, 1, 1, 6, tzinfo=timezone.utc)), {})
+    svc = _milestones(factory)
+    rows = svc._rows_from_plan(sched, "doc-p", "C1", "suraksha-enclave", "INV-1", "pay-1", sched["booking_date"])
+    svc._persistence.create_milestones(rows)
+    stored = svc._persistence.list_for_booking("doc-p")
+    assert [(r.charge_head, int(r.charge_amount), int(r.amount)) for r in stored] == [
+        (None, 0, 500000), ("PLC+IFMS", 150000, 2150000), ("CAM", 75000, 2575000)]
+    form = {"projectId": "suraksha-enclave", "applicantName": "A", "unitNo": "C61",
+            "total_consideration": sched["total_receivable"], "amount_received": 500000,
+            "payment_schedule": sched["rows"], "payment_plan": sched["payment_plan"]}
+    letter = " ".join(_letter_text(form, issued=date(2026, 11, 11)).split())
+    assert "BSP + PLC + IFMS" in letter and "21,50,000" in letter
+
+
+@pytest.mark.parametrize("head, expected", [
+    (None, "Basic Price"), ("PLC", "BSP + PLC"), ("PLC+IFMS", "BSP + PLC + IFMS"),
+    ("PLC+CAM", "BSP + PLC + CAM"), ("IFMS+CAM", "BSP + IFMS + CAM"), ("PLC+IFMS+CAM", "BSP + Charges"),
+    ("ALL", "BSP + Charges"),
+])
+def test_demand_letter_head_text(head, expected):
+    from DivineService.service_demand_letter import _head_text
+    assert _head_text({"charge_head": head, "charge_amount": 100 if head else 0}) == expected
+
+
+def test_demand_letter_head_text_fits_its_cell():
+    """The longest pair label must fit the 23 mm Head column at the smallest font."""
+    from fpdf import FPDF
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Helvetica", "", 5.5)
+    for label in ("BSP + PLC + IFMS", "BSP + IFMS + CAM", "BSP + PLC + CAM", "BSP + Charges"):
+        assert pdf.get_string_width(label) <= 23.0 - 1.5, label
+
+
+def test_reminder_label_names_the_pair():
+    from DivineService.service_payment_reminders import serviceReminders
+    enriched = {"rows": [{"id": "m2", "label": "Within 45 days of booking", "charge_head": "PLC+IFMS",
+                          "charge_amount": 150000}]}
+    assert serviceReminders._milestone_label(enriched, "m2", "x") == "Within 45 days of booking (incl. PLC+IFMS)"
+
+
+@pytest.mark.parametrize("heads", [("PLC+IFMS", "CAM"), ("PLC+CAM", "IFMS"), ("IFMS+CAM", "PLC"), ("ALL", None)])
+def test_pair_values_fit_their_database_columns(factory, heads):
+    from Divinepersistence.persistence_milestone import PaymentMilestoneModel
+    from Divinepersistence.persistence_payment_plan import PaymentPlanInstalmentModel
+    from DivineService.service_payment_plans import normalize_definition
+    plan = normalize_definition(_pair_plan("PPL/1", *heads))
+    plan_limit = _string_limits(PaymentPlanInstalmentModel)["charge_head"]
+    for i in plan["instalments"]:
+        assert len(i["charge_head"] or "") <= plan_limit                 # stored plan value
+    sched = compute_schedule(plan, **DOC_PRICES)
+    sched["payment_plan"] = sched["plan"]
+    rows = _milestones(factory)._rows_from_plan(sched, "d" * 36, "C1", "p", "i", "pay", "2026-11-01")
+    ms_limit = _string_limits(PaymentMilestoneModel)["charge_head"]
+    for r in rows:
+        assert len(r["charge_head"] or "") <= ms_limit                   # computed instalment value
+
+
+@pytest.mark.parametrize("code", ["PP1", "PP2", "PP3", "PP4"])
+def test_existing_single_and_all_plans_unchanged_by_pairs(code):
+    """Regression: the seeded plans give the same rows as before the pair change."""
+    expected = {
+        "PP1": [(500000, None), (750000, None), (1350000, "PLC"), (1300000, "IFMS"), (825000, "CAM"), (500000, None)],
+        "PP2": [(500000, None), (4725000, "PLC+IFMS+CAM")],
+        "PP3": [(2500000, None), (1350000, "PLC"), (800000, "IFMS"), (575000, "CAM")],
+        "PP4": [(5225000, "PLC+IFMS+CAM")],
+    }[code]
+    s = compute_schedule(PLANS[code], **DOC_PRICES)
+    assert [(r["amount"], r["charge_head"]) for r in s["rows"]] == expected
+
+
+@pytest.mark.parametrize("form_code", ["PP1/FPP/10-15-25-25-15-10", "PP1", "pp1", " PP1 "])
+def test_upload_accepts_the_full_or_short_plan_code(doc_service, plan_service, form_code):
+    """Integration bug found end-to-end: the website may repeat the plan as its short code."""
+    plan = doc_service._plan_schedule_from_payment(_payment(_terms(plan_service)), {"payment_plan_code": form_code})
+    assert plan["payment_plan"]["code"] == "PP1/FPP/10-15-25-25-15-10"
+
+
+@pytest.mark.parametrize("form_code", ["PP2", "PP1/FPP/OTHER", "PP"])
+def test_upload_rejects_a_different_plan_code(doc_service, plan_service, form_code):
+    with pytest.raises(ValueError, match="plan_mismatch"):
+        doc_service._plan_schedule_from_payment(_payment(_terms(plan_service)), {"payment_plan_code": form_code})
