@@ -346,3 +346,42 @@ def test_offline_loaders_on_postgres(pg):
     sync.rollback(rep.batch_id)
     with pg.connect() as c:
         assert c.execute(text("SELECT count(*) FROM divine_project_inventory WHERE project_name='PG Estate'")).scalar() == 0
+
+
+def test_plots_count_reads_jsonb_notes_on_postgres(plans, factory, pg):
+    """The Postgres JSON query behind plots_count: real jsonb notes written by the
+    payment code, plus odd shapes (scalar, array, nested string) that must be
+    skipped, not crash the query."""
+    from Divinepersistence.persistence_payment import persistencePayment
+    from DivineService.service_payment_plans import normalize_definition
+    code = "PGC/CNT/100"
+    plan = normalize_definition({"code": code, "short_code": "PGC", "name": "PG count", "project_id": "pg-count",
+                                 "instalments": [{"label": "On Booking", "percent": 100, "due_days": 0}]})
+    plan.update({"version": 1, "is_active": True})
+    plans._persistence.upsert_plan(plan)
+    payments = persistencePayment(session_factory=factory)
+
+    def book(i, notes=None, raw=None, status="booked"):
+        pid = f"pay-cnt-{i}"
+        payments.create_payment(id=pid, owner_id="C66666", owner_role="customer", amount=1, currency="INR",
+                                status="paid", method="cash", notes=notes, purpose="plot_booking",
+                                inventory_id=f"INV-CNT-{i}")
+        with pg.begin() as c:
+            if raw is not None:
+                c.execute(text("UPDATE divine_payments SET notes = CAST(:n AS jsonb) WHERE id = :id"),
+                          {"n": raw, "id": pid})
+            c.execute(text("INSERT INTO divine_bookings(id, payment_id, inventory_id, customer_id, status, kyc_status, "
+                           "version) VALUES (:b, :p, :inv, 'C66666', :s, 'pending', 1)"),
+                      {"b": f"bk-cnt-{i}", "p": pid, "inv": f"INV-CNT-{i}", "s": status})
+
+    book(1, {"payment_plan": {"payment_plan_code": code, "payment_plan_version": 1}})
+    book(2, {"payment_plan": {"payment_plan_code": code, "payment_plan_version": "1"}}, status="pending_kyc_review")
+    book(3, {"payment_plan": {"payment_plan_code": code}})                     # no version -> active v1
+    book(4, {"payment_plan": {"payment_plan_code": code, "payment_plan_version": 1}}, status="cancelled")
+    book(5, raw='"just a string"')
+    book(6, raw="[1, 2]")
+    book(7, raw='{"payment_plan": "PGC"}')
+    book(8, {})
+    assert plans._persistence.count_plots_by_plan([code]) == {(code, 1): 3}
+    listed = {(p["code"], p["version"]): p["plots_count"] for p in plans.admin_list("pg-count")}
+    assert listed == {(code, 1): 3}

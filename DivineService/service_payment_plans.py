@@ -386,9 +386,21 @@ class servicePaymentPlans:
     # ---- admin: plan management -------------------------------------------
     def admin_list(self, project_id: str = None) -> list:
         """Every plan version (active and retired) for the admin panel, newest
-        version of each code first."""
+        version of each code first, each with ``plots_count`` (see _admin_views)."""
+        return self._admin_views(self._persistence.list_all(project_id))
+
+    def _admin_views(self, plans: list) -> list:
+        """Admin view of each plan. ``plots_count`` = plots with an active booking
+        (pending KYC review / booked) on that code and version, counted live for
+        just these plans' codes (never cached). If counting fails the field is
+        left out - the admin panel shows "-" - and the views still return."""
+        try:
+            counts = self._persistence.count_plots_by_plan([p["code"] for p in plans])
+        except Exception:
+            logger.exception("payment_plan_plot_counts_failed")
+            counts = None
         out = []
-        for plan in self._persistence.list_all(project_id):
+        for plan in plans:
             try:
                 view = public_plan(plan)
                 valid = True
@@ -401,6 +413,8 @@ class servicePaymentPlans:
                 "created_date": _iso(plan.get("created_date")),
                 "last_updated_date": _iso(plan.get("last_updated_date")),
             })
+            if counts is not None:
+                view["plots_count"] = counts.get((plan["code"], int(plan.get("version") or 1)), 0)
             out.append(view)
         return out
 
@@ -481,7 +495,7 @@ class servicePaymentPlans:
 
     def _admin_view(self, code: str) -> dict:
         """The active version of a code, else its newest version."""
-        views = [p for p in self.admin_list(None) if p["code"] == code]
+        views = self._admin_views([p for p in self._persistence.list_all(None) if p["code"] == code])
         return next((p for p in views if p["is_active"]), views[0])
 
 

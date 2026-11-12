@@ -11,9 +11,10 @@ back and re-raise. Every session is opened in a ``with`` block.
 import logging
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 
 from sqlalchemy import (Boolean, Column, Date, DateTime, Integer, Numeric, String, Text,
-                        UniqueConstraint, text)
+                        UniqueConstraint, bindparam, text)
 
 from .persistence_db import Base, SessionLocal, RowWrapper, load_queries
 
@@ -104,6 +105,29 @@ _DEFAULT_QUERIES = {
         "UPDATE divine_payment_plans SET is_active = :active, last_updated_date = :now "
         "WHERE code = :code AND version = :version;"
     ),
+    # Plan code/version of every active booking (KYC review pending or booked) on
+    # the given plan codes, read from the booking payment's notes.payment_plan.
+    # Only these two small values come back, never the whole notes. Postgres
+    # (jsonb: a non-object value yields NULL) and SQLite (test DB: json_valid
+    # guards malformed text) spell the JSON access differently. Read-only.
+    "list_active_booking_plan_refs_postgresql": (
+        "SELECT DISTINCT t.inventory_id, t.plan_code, t.plan_version FROM ("
+        "SELECT b.inventory_id, p.notes -> 'payment_plan' ->> 'payment_plan_code' AS plan_code, "
+        "p.notes -> 'payment_plan' ->> 'payment_plan_version' AS plan_version "
+        "FROM divine_bookings b JOIN divine_payments p ON p.id = b.payment_id "
+        "WHERE b.status IN ('pending_kyc_review', 'booked')"
+        ") t WHERE t.plan_code IN :codes;"
+    ),
+    "list_active_booking_plan_refs_sqlite": (
+        "SELECT DISTINCT t.inventory_id, t.plan_code, t.plan_version FROM ("
+        "SELECT b.inventory_id, "
+        "CASE WHEN json_valid(p.notes) THEN json_extract(p.notes, '$.payment_plan.payment_plan_code') END AS plan_code, "
+        "CASE WHEN json_valid(p.notes) THEN json_extract(p.notes, '$.payment_plan.payment_plan_version') END AS plan_version "
+        "FROM divine_bookings b JOIN divine_payments p ON p.id = b.payment_id "
+        "WHERE b.status IN ('pending_kyc_review', 'booked')"
+        ") t WHERE t.plan_code IN :codes;"
+    ),
+    "list_versions_for_codes": "SELECT code, version, is_active FROM divine_payment_plans WHERE code IN :codes;",
     "get_project_settings": "SELECT * FROM divine_project_settings WHERE project_id = :project_id LIMIT 1;",
     "insert_project_settings": (
         "INSERT INTO divine_project_settings (project_id, possession_offer_date, updated_by, updated_date) "
@@ -114,6 +138,23 @@ _DEFAULT_QUERIES = {
         "updated_by = :updated_by, updated_date = :now WHERE project_id = :project_id;"
     ),
 }
+
+
+def _plan_version(value):
+    """A stored plan version as int; None when absent. 1, "1", " 2 ", "2.0" and
+    2.0 are all readable; anything else (0, -1, "1.5", "v2", true) raises
+    ValueError - the caller skips it rather than guessing a version."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    if isinstance(value, bool):
+        raise ValueError("invalid_plan_version")
+    try:
+        number = Decimal(str(value).strip())
+    except InvalidOperation:
+        raise ValueError("invalid_plan_version")
+    if not number.is_finite() or number != number.to_integral_value() or number < 1:
+        raise ValueError("invalid_plan_version")
+    return int(number)
 
 
 class persistencePaymentPlan:
@@ -188,6 +229,55 @@ class persistencePaymentPlan:
             except Exception:
                 db.rollback()
                 raise
+
+    def count_plots_by_plan(self, codes) -> dict:
+        """{(code, version): number of distinct plots} with an active booking
+        (pending KYC review or booked) on each of ``codes``. Computed live on
+        every call.
+
+        Terms without a version are put on the version a booking without one
+        resolves to everywhere else (``get_by_code(code)``): the code's active
+        version - or, when none is active, its newest. All versions of the code
+        are considered, whatever project they belong to. A plot is counted once
+        per version even if it appears both with and without a version. Terms
+        whose version is unreadable are skipped (logged), never moved to
+        another version."""
+        codes = sorted({str(c) for c in codes or () if c})
+        if not codes:
+            return {}
+        with self._session_factory() as db:
+            dialect = db.get_bind().dialect.name
+            key = ("list_active_booking_plan_refs_postgresql" if dialect == "postgresql"
+                   else "list_active_booking_plan_refs_sqlite")
+            refs = db.execute(text(self._queries[key]).bindparams(bindparam("codes", expanding=True)),
+                              {"codes": codes}).mappings().all()
+            if not refs:
+                return {}
+            versions = db.execute(
+                text(self._queries["list_versions_for_codes"]).bindparams(bindparam("codes", expanding=True)),
+                {"codes": codes}).mappings().all()
+        resolved = {}                                    # code -> (is_active, version): max = active, else newest
+        for v in versions:
+            rank = (bool(v["is_active"]), int(v["version"]))
+            resolved[v["code"]] = max(resolved.get(v["code"], rank), rank)
+        plots, unreadable = {}, 0
+        for ref in refs:
+            code, inventory_id = ref["plan_code"], ref["inventory_id"]
+            if not code or not inventory_id:
+                continue
+            try:
+                version = _plan_version(ref["plan_version"])
+            except ValueError:
+                unreadable += 1
+                continue
+            if version is None:
+                if code not in resolved:
+                    continue
+                version = resolved[code][1]
+            plots.setdefault((str(code), version), set()).add(str(inventory_id))
+        if unreadable:
+            logger.warning("payment_plan_plot_counts_unreadable_version rows=%d", unreadable)
+        return {key: len(ids) for key, ids in plots.items()}
 
     def get_project_settings(self, project_id: str):
         with self._session_factory() as db:
