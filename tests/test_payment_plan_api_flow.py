@@ -169,7 +169,14 @@ def _upload(world, form_extra=None):
             headers=world["customer"])
 
 
+def _plots_count(world):
+    r = client.get("/admin/payment-plans", params={"project_id": PROJECT_ID}, headers=world["admin"])
+    assert r.status_code == 200, r.text
+    return next(p for p in r.json()["plans"] if p["code"] == PLAN_CODE)["plots_count"]
+
+
 def test_04_upload_builds_the_plan_schedule(world):
+    assert _plots_count(world) == 1                                          # paid, KYC review pending
     r = _upload(world, {"total_amount": 100})                                # tampered total
     assert r.status_code == 400 and r.json()["detail"] == "plan_mismatch"
     r = _upload(world)
@@ -180,6 +187,7 @@ def test_04_upload_builds_the_plan_schedule(world):
     world["state"]["document_id"] = r.json()["id"]
     again = _upload(world)                                                    # retry
     assert again.status_code == 409 and again.json()["detail"] == "booking_application_exists"
+    assert _plots_count(world) == 1
 
 
 def test_05_customer_profile_shows_plan_and_event_rows(world):
@@ -219,6 +227,7 @@ def test_07_admin_approves_and_sees_the_plan(world):
     assert [i["id"] for i in listed["items"]] == [bid]
     letter = client.get(f"/admin/bookings/{bid}/demand-letter", headers=world["admin"])
     assert letter.status_code == 200 and letter.headers["cache-control"] == "no-store, private"
+    assert _plots_count(world) == 1                                          # booked: still one plot
 
 
 def test_08_dated_instalment_after_the_event_can_be_paid(world):
@@ -259,3 +268,17 @@ def test_11_admin_switches_the_plan_off(world):
     # the existing booking keeps working
     r = client.get(f"/documents/{world['state']['document_id']}/demand-letter", headers=world["customer"])
     assert r.status_code == 200
+    assert _plots_count(world) == 1                                          # retired plan keeps its plots
+
+
+def test_12_cancelled_booking_no_longer_counts(world):
+    """Through the real admin cancel (cash/RTGS: refund is bookkeeping only; the
+    customer email is patched out) - every row it touches is removed by _cleanup."""
+    bid = world["state"]["booking_id"]
+    version = client.get(f"/admin/bookings/{bid}", headers=world["admin"]).json()["version"]
+    with patch("DivineService.service_email.dispatch_booking_cancellation_email", return_value=True) as sent:
+        r = client.post(f"/admin/bookings/{bid}/cancel", json={"note": "Customer asked to cancel", "version": version},
+                        headers=world["admin"])
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "cancelled" and sent.called
+    assert _plots_count(world) == 0

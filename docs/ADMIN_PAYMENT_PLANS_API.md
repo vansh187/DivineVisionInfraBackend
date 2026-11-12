@@ -168,11 +168,16 @@ With `due_days: 0` the wording is "On Completion of plinth".
 ## 6. List: `GET /admin/payment-plans`
 
 ```json
-{"count": 6, "plans": [ { …same shape as section 3… }, … ]}
+{"count": 6, "plans": [ { …same shape as section 3…, "plots_count": 3 }, … ]}
 ```
 
 - Every version is included, newest version first within each code.
-- Suggested table columns: `short_code`, `name`, `version`, Active (`is_active`), `project_id`, booking % (`booking_percent`), last updated (`last_updated_date`).
+- `plots_count` (integer, 0 or more) = how many plots currently have an active booking on **this exact code and version**. Active means KYC review pending or booked. Rejected and cancelled bookings don't count; a plot booked twice counts once.
+  - Bookings whose terms carry no version count on the version they resolve to everywhere else: the code's active version, or its newest when none is active. This holds whatever `project_id` filter is used.
+  - The count is calculated on every request, so a booking or status change shows on the next refresh.
+  - The admin add / new-version / edit responses carry it too (same view). The public `/payment-plans` does not.
+  - If the count can't be calculated, the field is **left out**, never sent as a false 0. Show "–" in that case.
+- Suggested table columns: `short_code`, `name`, `version`, Active (`is_active`), `project_id`, booking % (`booking_percent`), Plots (`plots_count`), last updated (`last_updated_date`).
 - Group rows by `code`, showing older versions collapsed.
 - `valid: false` is a safety flag: a stored plan that no longer passes validation. It shouldn't happen; if it does, report it to the developers.
 

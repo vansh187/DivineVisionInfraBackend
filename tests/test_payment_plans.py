@@ -1346,3 +1346,206 @@ def test_upload_accepts_the_full_or_short_plan_code(doc_service, plan_service, f
 def test_upload_rejects_a_different_plan_code(doc_service, plan_service, form_code):
     with pytest.raises(ValueError, match="plan_mismatch"):
         doc_service._plan_schedule_from_payment(_payment(_terms(plan_service)), {"payment_plan_code": form_code})
+
+
+# --- plots_count on the admin plan list -------------------------------------
+
+from Divinepersistence.persistence_payment_plan import _plan_version
+
+PP1_CODE = "PP1/FPP/10-15-25-25-15-10"
+PP2_CODE = "PP2/FPP/10-90"
+ALL_CODES = [PP1_CODE, PP2_CODE, "PP3/FPP/50-25-15-10", "PP4/FPP/100"]
+
+
+def _book(factory, inventory_id, notes, status="booked"):
+    """One booking + its booking payment, notes stored exactly as given (dict -> JSON text)."""
+    import uuid as _uuid
+    pid = str(_uuid.uuid4())
+    raw = notes if isinstance(notes, str) or notes is None else json.dumps(notes)
+    with factory() as db:
+        db.execute(text("INSERT INTO divine_payments(id, owner_id, owner_role, amount, currency, status, method, "
+                        "purpose, inventory_id, notes) VALUES (:id, 'C00001', 'customer', 1, 'INR', 'paid', 'cash', "
+                        "'plot_booking', :inv, :notes)"), {"id": pid, "inv": inventory_id, "notes": raw})
+        db.execute(text("INSERT INTO divine_bookings(id, payment_id, inventory_id, customer_id, status, kyc_status, "
+                        "version) VALUES (:id, :pid, :inv, 'C00001', :status, 'pending', 1)"),
+                   {"id": pid[:20], "pid": pid, "inv": inventory_id, "status": status})
+        db.commit()
+
+
+def _plan_terms(code, version=1):
+    terms = {"payment_plan_code": code}
+    if version is not None:
+        terms["payment_plan_version"] = version
+    return {"payment_plan": terms}
+
+
+def _pp1_v2(plan_persistence, project_id=None):
+    v2 = {**json.loads(json.dumps(PLANS["PP1"])), "version": 2}
+    if project_id:
+        v2["project_id"] = project_id
+    assert plan_persistence.upsert_plan(v2) == "created"      # v2 becomes the active version
+
+
+@pytest.mark.parametrize("value, expected", [
+    (None, None), ("", None), ("  ", None), (1, 1), ("1", 1), (" 2 ", 2), ("2.0", 2), (2.0, 2), (3, 3)])
+def test_plan_version_reads_clean_and_integral_values(value, expected):
+    assert _plan_version(value) == expected
+
+
+@pytest.mark.parametrize("value", [0, -1, "1.5", 1.5, "v2", "abc", True, "NaN", "Infinity", [1], {"v": 1}])
+def test_plan_version_refuses_anything_else(value):
+    with pytest.raises(ValueError):
+        _plan_version(value)
+
+
+def test_count_plots_by_plan_counts_active_bookings_only(factory, plan_persistence):
+    _book(factory, "inv-1", _plan_terms(PP1_CODE), "pending_kyc_review")
+    _book(factory, "inv-2", _plan_terms(PP1_CODE), "booked")
+    _book(factory, "inv-3", _plan_terms(PP1_CODE), "rejected")
+    _book(factory, "inv-4", _plan_terms(PP1_CODE), "cancelled")
+    assert plan_persistence.count_plots_by_plan(ALL_CODES) == {(PP1_CODE, 1): 2}
+
+
+def test_count_plots_by_plan_skips_rows_without_usable_terms(factory, plan_persistence):
+    _book(factory, "inv-1", "{not json")
+    _book(factory, "inv-2", "{}")
+    _book(factory, "inv-3", None)
+    _book(factory, "inv-4", {"payment_plan": {"payment_plan_version": 1}})          # no code
+    _book(factory, "inv-5", {"payment_plan": "PP1"})                                 # not an object
+    _book(factory, "inv-6", '"just a string"')
+    _book(factory, "inv-7", "[1, 2]")
+    _book(factory, "", _plan_terms(PP1_CODE))                                        # no plot
+    _book(factory, "inv-8", _plan_terms("PP9/UNKNOWN"))                              # code not asked for
+    _book(factory, "inv-9", _plan_terms(PP1_CODE))
+    assert plan_persistence.count_plots_by_plan(ALL_CODES) == {(PP1_CODE, 1): 1}
+
+
+def test_unreadable_version_is_skipped_not_moved(factory, plan_persistence, caplog):
+    _pp1_v2(plan_persistence)
+    _book(factory, "inv-1", _plan_terms(PP1_CODE, "1.5"))
+    _book(factory, "inv-2", _plan_terms(PP1_CODE, "v2"))
+    _book(factory, "inv-3", _plan_terms(PP1_CODE, "2.0"))     # readable: version 2
+    _book(factory, "inv-4", _plan_terms(PP1_CODE, " 1 "))     # readable: version 1
+    with caplog.at_level("WARNING"):
+        assert plan_persistence.count_plots_by_plan([PP1_CODE]) == {(PP1_CODE, 2): 1, (PP1_CODE, 1): 1}
+    assert "payment_plan_plot_counts_unreadable_version rows=2" in caplog.text
+
+
+def test_count_plots_by_plan_separates_versions_and_counts_distinct_plots(factory, plan_persistence):
+    _pp1_v2(plan_persistence)
+    _book(factory, "inv-1", _plan_terms(PP1_CODE, 1))
+    _book(factory, "inv-1", _plan_terms(PP1_CODE, 1))         # same plot twice -> one plot
+    _book(factory, "inv-2", _plan_terms(PP1_CODE, 2))
+    _book(factory, "inv-3", _plan_terms(PP1_CODE, "2"))       # version stored as text
+    _book(factory, "inv-5", _plan_terms(PP2_CODE, 1))
+    assert plan_persistence.count_plots_by_plan(ALL_CODES) == {
+        (PP1_CODE, 1): 1, (PP1_CODE, 2): 2, (PP2_CODE, 1): 1}
+
+
+def test_plot_with_and_without_version_counts_once(factory, plan_persistence):
+    """Review finding: the same plot on v2 and on a version-less legacy booking is one plot."""
+    _pp1_v2(plan_persistence)
+    _book(factory, "inv-1", _plan_terms(PP1_CODE, 2))
+    _book(factory, "inv-1", _plan_terms(PP1_CODE, None))
+    assert plan_persistence.count_plots_by_plan([PP1_CODE]) == {(PP1_CODE, 2): 1}
+
+
+def test_versionless_terms_go_to_the_active_version_like_the_upload_does(factory, plan_persistence, plan_service):
+    """Review finding: a booking without a version resolves to the ACTIVE version
+    (get_by_code / schedule_for_booking), not simply the highest one."""
+    _pp1_v2(plan_persistence)
+    plan_persistence.set_active(PP1_CODE, 1, True)            # v1 back on, v2 retired
+    _book(factory, "inv-1", _plan_terms(PP1_CODE, None))
+    assert plan_service.get_plan(PP1_CODE)["version"] == 1    # what the booking's schedule uses
+    assert plan_persistence.count_plots_by_plan([PP1_CODE]) == {(PP1_CODE, 1): 1}
+
+
+def test_versionless_terms_go_to_the_newest_when_none_is_active(factory, plan_persistence):
+    _pp1_v2(plan_persistence)
+    plan_persistence.set_active(PP1_CODE, 2, False)           # no active version left
+    _book(factory, "inv-1", _plan_terms(PP1_CODE, None))
+    assert plan_persistence.count_plots_by_plan([PP1_CODE]) == {(PP1_CODE, 2): 1}
+
+
+def test_only_the_requested_codes_are_counted(factory, plan_persistence):
+    _book(factory, "inv-1", _plan_terms(PP1_CODE))
+    _book(factory, "inv-2", _plan_terms(PP2_CODE))
+    assert plan_persistence.count_plots_by_plan([PP2_CODE]) == {(PP2_CODE, 1): 1}
+    assert plan_persistence.count_plots_by_plan([]) == {}
+    assert plan_persistence.count_plots_by_plan(None) == {}
+
+
+def test_no_codes_means_no_query(plan_persistence, monkeypatch):
+    monkeypatch.setattr(plan_persistence, "_session_factory", lambda: pytest.fail("queried the DB"))
+    assert plan_persistence.count_plots_by_plan([]) == {}
+
+
+def _counts_by_plan(plan_service, project_id=None):
+    return {(p["code"], p["version"]): p.get("plots_count", "missing") for p in plan_service.admin_list(project_id)}
+
+
+def test_admin_list_shows_plots_count_per_version(factory, plan_persistence, plan_service):
+    _pp1_v2(plan_persistence)                                 # PP1 v2 = active and newest
+    _book(factory, "inv-1", _plan_terms(PP1_CODE, 1))
+    _book(factory, "inv-2", _plan_terms(PP1_CODE, 2))
+    _book(factory, "inv-3", _plan_terms(PP1_CODE, None))      # no version -> active version (v2)
+    _book(factory, "inv-4", _plan_terms(PP1_CODE, 1), "cancelled")
+    counts = _counts_by_plan(plan_service)
+    assert counts[(PP1_CODE, 1)] == 1 and counts[(PP1_CODE, 2)] == 2
+    assert counts[(PP2_CODE, 1)] == 0 and counts[("PP4/FPP/100", 1)] == 0
+    assert all(isinstance(v, int) and v >= 0 for v in counts.values())
+
+
+def test_project_filter_does_not_move_versionless_bookings(factory, plan_persistence, plan_service):
+    """Review finding: v1 in one project, v2 in another - a version-less booking
+    stays on v2 (active) whichever project the admin filters by."""
+    _pp1_v2(plan_persistence, project_id="other-estate")
+    _book(factory, "inv-1", _plan_terms(PP1_CODE, None))
+    assert _counts_by_plan(plan_service, "suraksha-enclave")[(PP1_CODE, 1)] == 0
+    assert _counts_by_plan(plan_service, "other-estate")[(PP1_CODE, 2)] == 1
+    unfiltered = _counts_by_plan(plan_service)
+    assert unfiltered[(PP1_CODE, 1)] == 0 and unfiltered[(PP1_CODE, 2)] == 1
+
+
+def test_admin_list_is_live_not_cached(factory, plan_service):
+    assert _counts_by_plan(plan_service)[(PP1_CODE, 1)] == 0
+    _book(factory, "inv-1", _plan_terms(PP1_CODE))
+    assert _counts_by_plan(plan_service)[(PP1_CODE, 1)] == 1
+    with factory() as db:
+        db.execute(text("UPDATE divine_bookings SET status = 'rejected'"))
+        db.commit()
+    assert _counts_by_plan(plan_service)[(PP1_CODE, 1)] == 0
+
+
+def test_admin_list_without_counts_when_counting_fails(plan_persistence, plan_service, monkeypatch):
+    def boom(codes):
+        raise RuntimeError("db down")
+    monkeypatch.setattr(plan_persistence, "count_plots_by_plan", boom)
+    plans = plan_service.admin_list()
+    assert len(plans) == 4 and all("plots_count" not in p for p in plans)      # omitted, never a fake 0
+
+
+def test_admin_list_counts_only_the_listed_codes(plan_persistence, plan_service, monkeypatch):
+    asked = []
+    real = plan_persistence.count_plots_by_plan
+    monkeypatch.setattr(plan_persistence, "count_plots_by_plan", lambda codes: asked.append(sorted(codes)) or real(codes))
+    plan_service.admin_list()
+    assert asked == [sorted(ALL_CODES)]
+
+
+def test_admin_write_counts_only_its_own_code(factory, plan_persistence, plan_service, monkeypatch):
+    """Review finding: an admin create/edit returns one plan - it must not count every plan's bookings."""
+    _book(factory, "inv-1", _plan_terms(PP2_CODE))
+    asked = []
+    real = plan_persistence.count_plots_by_plan
+    monkeypatch.setattr(plan_persistence, "count_plots_by_plan", lambda codes: asked.append(list(codes)) or real(codes))
+    view = plan_service.update_plan(PP2_CODE, {"name": "Renamed"}, admin_id="DV0001")
+    assert asked == [[PP2_CODE]] and view["plots_count"] == 1 and view["name"] == "Renamed"
+
+
+def test_admin_api_returns_plots_count(admin_api, factory):
+    _book(factory, "inv-1", _plan_terms(PP1_CODE))
+    r = admin_api.get("/admin/payment-plans")
+    assert r.status_code == 200, r.text
+    by_code = {p["code"]: p["plots_count"] for p in r.json()["plans"]}
+    assert by_code[PP1_CODE] == 1 and by_code["PP3/FPP/50-25-15-10"] == 0
