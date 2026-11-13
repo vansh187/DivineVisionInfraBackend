@@ -49,6 +49,12 @@ logger = logging.getLogger(__name__)
 PROTECTED_STATUSES = ("booked", "pending_kyc_review", "reserved")
 SHEET_STATUS_MAP = {"sold": "sold", "unsold": "available", "available": "available",
                     "hold": "held", "held": "held", "on hold": "held"}
+# Statuses only the app sets (bookings, partner reservations), as the admin
+# panel's Inventory export writes them. A sheet carrying one never changes the
+# plot's status - the app's own flows do - but its other columns still apply.
+APP_STATUS_LABELS = ("booked", "booked (kyc review)", "reserved by partner")
+# Exactly as the admin panel's Inventory export writes them (no spelling warning).
+EXPORT_STATUS_LABELS = ("Available", "On Hold", "Sold", "Booked", "Booked (KYC Review)", "Reserved by Partner")
 IMPORTED_DOC_STATUS = "imported"
 IMPORT_SOURCE = "offline_import"
 TEMP_PASSWORD_DAYS = 7
@@ -383,7 +389,8 @@ INVENTORY_ALIASES = {
     "length": {"lengthmtr", "length"},
     "area_sqmt": {"areainsqmtrs", "areainsqmtr", "areasqmt", "areainsqm"},
     "area_sqyd": {"areainsqyard", "areainsqyd", "areasqyd"},
-    "status": {"status"},
+    # 'Plot Status' is the admin panel's Inventory export (client sheet layout).
+    "status": {"status", "plotstatus"},
     "project": {"project", "projectname"},
 }
 
@@ -455,10 +462,12 @@ class InventorySheetSync:
                     desired = overrides[k]
                     note = f"Override {desired} (sheet said {raw_status or 'blank'})"
                     report.warnings.append(f"{sheet_plot}: sheet status '{raw_status}' overridden to '{desired}'")
-                if desired is None:
+                app_status = desired is None and raw_status.lower() in APP_STATUS_LABELS
+                if desired is None and not app_status:
                     report.errors.append(f"row {r['_row']} plot {sheet_plot}: unknown status '{raw_status}'")
                     continue
-                if raw_status and raw_status != raw_status.capitalize() and k not in overrides:
+                if (raw_status and raw_status != raw_status.capitalize() and k not in overrides
+                        and raw_status not in EXPORT_STATUS_LABELS):
                     report.warnings.append(f"{sheet_plot}: status written as '{raw_status}'")
                 dims = {
                     "width_mtr": to_decimal(r.get("width")), "length_mtr": to_decimal(r.get("length")),
@@ -469,6 +478,10 @@ class InventorySheetSync:
                     report.warnings.append(f"{sheet_plot}: sheet has no {', '.join(missing)} (existing value kept)")
                 self._check_dimensions(report, sheet_plot, dims)
                 row = by_key.get(k)
+                if row is None and app_status:
+                    report.errors.append(f"row {r['_row']} plot {sheet_plot}: new plot with an app-only status "
+                                         f"'{raw_status}' - give it Sold / Unsold / Hold")
+                    continue
                 if row is None:
                     if dims["area_sqmt"] is None or dims["area_sqyd"] is None:
                         report.errors.append(f"{sheet_plot}: new plot without area - cannot insert")
@@ -512,7 +525,10 @@ class InventorySheetSync:
             report.add("RENAME", plot, f"-> {sheet_plot}")
             steps.append(("rename", row, sheet_plot))
         current = row["status"]
-        if current in PROTECTED_STATUSES:
+        if desired is None:
+            # An app-only status in the sheet (see APP_STATUS_LABELS): status untouched.
+            report.add("KEEP", sheet_plot, f"{note} - status is the app's ('{current}'), left unchanged")
+        elif current in PROTECTED_STATUSES:
             if desired == "sold":
                 if current in ("booked", "pending_kyc_review") and row.get("sale_source") != "app":
                     report.add("SOURCE", sheet_plot, f"{current} in app -> sale_source=app")

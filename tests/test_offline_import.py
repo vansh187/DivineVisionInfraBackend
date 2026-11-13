@@ -881,3 +881,29 @@ def test_book_and_hold_reruns_by_the_same_payment_log_nothing(engine, inventory)
     # Another payment still can't take either plot.
     assert inventory.book_unit(id=booked, payment_id="p-other") is None
     assert inventory.hold_for_kyc_review(id=held, payment_id="p-other") is None
+
+
+
+def test_sync_reads_the_admin_panels_inventory_export(engine):
+    seed_unit(engine, "C1", status="available")
+    seed_unit(engine, "C2", status="booked", booked_payment_id="pay-1")
+    seed_unit(engine, "C3", status="sold")
+    header = ["Plot No", "Width (Mtr.)", "Length (Mtr.)", "Area in Sq. Mtr.", "Area in Sq. Yard", "Plot Status",
+              "Project Name"]
+    rows = [header,
+            ["C1", "7.45", "13.404", "99.86", "119.43", "On Hold", PROJECT],
+            ["C2", "7.45", "13.404", "99.86", "119.43", "Booked (KYC Review)", PROJECT],
+            ["C3", "7.45", "13.404", "99.86", "119.43", "Reserved by Partner", PROJECT]]
+    report = InventorySheetSync(engine).run(rows, PROJECT, "Sonipat", apply=True)
+    assert report.errors == [], report.render()
+    assert not any("written as" in w for w in report.warnings)
+    assert unit(engine, "C1")["status"] == "held"
+    # App-only statuses never change a plot.
+    assert (unit(engine, "C2")["status"], unit(engine, "C3")["status"]) == ("booked", "sold")
+    assert {(k, p) for k, p, _ in report.actions if k == "KEEP"} == {("KEEP", "C2"), ("KEEP", "C3")}
+
+
+def test_sync_refuses_a_new_plot_with_an_app_only_status(engine):
+    rows = [["Plot No", "Plot Status", "Area in Sq. Mtr.", "Area in Sq. Yard"], ["C77", "Booked", "99.86", "119.43"]]
+    report = InventorySheetSync(engine).run(rows, PROJECT, "Sonipat")
+    assert any("app-only status" in e for e in report.errors)

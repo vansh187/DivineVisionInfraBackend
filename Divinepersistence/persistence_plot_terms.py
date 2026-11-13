@@ -75,11 +75,35 @@ class persistencePlotTerms:
 
     def customer_units(self, customer_id: str) -> list:
         """Plots linked to this buyer (divine_project_inventory.booked_by)."""
+        return self.units_for_customers([customer_id])
+
+    def bookings_for_payments(self, payment_ids) -> dict:
+        """payment id -> its divine_bookings row (status, plot) for these payments."""
+        ids = [i for i in dict.fromkeys(payment_ids or ()) if i]
+        out = {}
+        query = text(
+            "SELECT payment_id, status, inventory_id, project_name, unit_number FROM divine_bookings "
+            "WHERE payment_id IN :ids"
+        ).bindparams(bindparam("ids", expanding=True))
         with self._session_factory() as db:
-            rows = db.execute(text(
-                "SELECT id, project_name, unit_number, status, area_sqyd FROM divine_project_inventory "
-                "WHERE booked_by = :c"), {"c": customer_id}).mappings().all()
-        return [dict(r) for r in rows]
+            for i in range(0, len(ids), _CHUNK):
+                for r in db.execute(query, {"ids": ids[i:i + _CHUNK]}).mappings().all():
+                    out[r["payment_id"]] = dict(r)
+        return out
+
+    def units_for_customers(self, customer_ids) -> list:
+        """Plots these customers currently hold (divine_project_inventory.booked_by:
+        an offline buyer's plot, or a website booking under review / booked)."""
+        ids = [i for i in dict.fromkeys(customer_ids or ()) if i]
+        out = []
+        query = text(
+            "SELECT id, project_name, unit_number, status, booked_by FROM divine_project_inventory "
+            "WHERE booked_by IN :ids"
+        ).bindparams(bindparam("ids", expanding=True))
+        with self._session_factory() as db:
+            for i in range(0, len(ids), _CHUNK):
+                out.extend(dict(r) for r in db.execute(query, {"ids": ids[i:i + _CHUNK]}).mappings().all())
+        return out
 
     def project_units(self, project_name: str) -> list:
         """Every plot of a project, with its linked buyer (booked_by)."""

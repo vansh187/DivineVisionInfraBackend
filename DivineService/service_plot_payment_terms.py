@@ -21,10 +21,10 @@ form_data.source = 'offline_import', which the reminder job skips.
 import logging
 import re
 from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 from Divinepersistence.persistence_plot_terms import persistencePlotTerms
-from DivineService.inventory_export import project_key
+from DivineService.inventory_export import _Form, project_key
 from DivineService.service_demand_letter import (
     _NAME_KEYS, _PLOT_KEYS, _first, _s, finance_pending,
 )
@@ -40,6 +40,11 @@ IMPORTED_STATUS = "imported"
 OFFLINE_SOURCE = "offline_import"
 # A received amount within a rupee of an instalment counts as covering it.
 _ROUNDING = Decimal("1")
+# A plot's co-applicants (first, second), with the keys the buyer import and
+# the customer profile use.
+_CO_APPLICANT_KEYS = (("coApplicantName", "co_applicant_name"), ("coApplicant2Name", "co_applicant_2_name"))
+# Website bookings that still hold their plot (divine_bookings.status).
+_ACTIVE_BOOKING_STATUSES = ("pending_kyc_review", "booked")
 # Form keys that only make sense with prices; cleared when a plot loses them.
 _PRICE_KEYS = ("total_consideration", "amount_received", "received_unallocated", "total_outstanding",
                "total_outstanding_words", "payment_schedule")
@@ -88,6 +93,12 @@ def parse_booking_date(value) -> date:
 
 def _percents(text) -> list:
     return [Decimal(n) for n in re.findall(r"\d+(?:\.\d+)?", str(text or ""))]
+
+
+def _natural(value) -> tuple:
+    """Sort key for plot numbers: 'C16' < 'C100' < 'D7' (letters, then numbers by value)."""
+    return tuple((0, int(part)) if part.isdigit() else (1, part.upper())
+                 for part in re.split(r"(\d+)", str(value or "")) if part)
 
 
 def _num(value):
@@ -142,14 +153,71 @@ class servicePlotPaymentTerms:
             return str(plan.get("short_code") or plan.get("code"))
         return _s(form.get("payment_plan_code")) or None
 
-    def plan_labels_for_customers(self, customer_ids) -> dict:
-        """customer id -> the payment plans of their plots (short codes, in
-        booking order, each once). For the admin customers list."""
+    def plot_plans_for_customers(self, customer_ids) -> dict:
+        """customer id -> {"plot_plans": [...], "payment_plans": [...]} for the
+        admin customers list.
+
+        plot_plans: one entry per plot the customer holds, with that plot's
+        payment plan (short code, or None while none is linked) and applicant,
+        in natural plot order (C16, C100, D7). A plot is held through:
+          - a website booking that is still active (its divine_bookings row is
+            pending KYC review or booked; a record with no booking row counts),
+            located by the booking's plot, else by the record's own plot;
+          - an offline buyer's record for a plot linked to the customer
+            (divine_project_inventory.booked_by), located by the plot id the
+            terms stored on it, else by plot number + project (the export's rule);
+          - a plot linked to the customer with no record (plan None).
+        When a plot has several records, the newest one is its record - the
+        same one link_from_sheet writes to.
+        payment_plans: the distinct short codes across those plots."""
+        docs = self._persistence.booking_docs_for_customers(customer_ids)
+        units = self._persistence.units_for_customers(customer_ids)
+        bookings = self._persistence.bookings_for_payments([d.get("payment_id") for d in docs])
+        units_by_id = {u["id"]: u for u in units}
+        units_by_plot = {}
+        for unit in units:
+            units_by_plot.setdefault((unit["booked_by"], plot_key(unit["unit_number"])), []).append(unit)
+
+        held = {}                                  # owner -> {plot key: entry}
+        for unit in units:
+            held.setdefault(unit["booked_by"], {})[unit["id"]] = {
+                "project_name": unit["project_name"], "unit_number": unit["unit_number"],
+                "payment_plan": None, "applicant_name": None}
+        for doc in docs:                           # oldest first: a newer record replaces an older one
+            owner, record = doc["owner_id"], _Form(doc)
+            entry = {"payment_plan": self._plan_label(record.data),
+                     "applicant_name": _s(_first(record.data, _NAME_KEYS)) or None}
+            if doc.get("status") != IMPORTED_STATUS:
+                booking = bookings.get(doc.get("payment_id"))
+                if booking and booking.get("status") not in _ACTIVE_BOOKING_STATUSES:
+                    continue                       # rejected / cancelled: the plot was released
+                unit = units_by_id.get((booking or {}).get("inventory_id"))
+                if unit is None:
+                    unit = next((u for u in units_by_plot.get((owner, record.plot_key), []) if record.is_for(u)), None)
+                if unit is not None:
+                    key, place = unit["id"], unit
+                else:
+                    place = {"project_name": (booking or {}).get("project_name")
+                             or _s(record.data.get("project_name")) or doc.get("project_id"),
+                             "unit_number": (booking or {}).get("unit_number") or _s(_first(record.data, _PLOT_KEYS))
+                             or None}
+                    key = ("record", project_key(place["project_name"]), plot_key(place["unit_number"]))
+            else:
+                stored = units_by_id.get(record.data.get("inventory_id"))
+                unit = stored if stored is not None and stored["booked_by"] == owner else next(
+                    (u for u in units_by_plot.get((owner, record.plot_key), []) if record.is_for(u)), None)
+                if unit is None:
+                    continue                       # the plot is no longer linked to this buyer
+                key, place = unit["id"], unit
+            held.setdefault(owner, {})[key] = {"project_name": place["project_name"],
+                                               "unit_number": place["unit_number"], **entry}
         out = {}
-        for doc in self._persistence.booking_docs_for_customers(customer_ids):
-            label = self._plan_label(doc["form_data"])
-            if label and label not in out.setdefault(doc["owner_id"], []):
-                out[doc["owner_id"]].append(label)
+        for owner, plots in held.items():
+            ordered = sorted(plots.values(), key=lambda p: (project_key(p["project_name"]),
+                                                            _natural(p["unit_number"])))
+            out[owner] = {"plot_plans": ordered,
+                          "payment_plans": list(dict.fromkeys(p["payment_plan"] for p in ordered
+                                                              if p["payment_plan"]))}
         return out
 
     def plot_view(self, doc: dict) -> dict:
@@ -186,7 +254,11 @@ class servicePlotPaymentTerms:
             "record_type": "offline" if doc.get("status") == IMPORTED_STATUS else "website",
             "project_name": _s(form.get("project_name")) or doc.get("project_id"),
             "unit_number": _s(_first(form, _PLOT_KEYS)) or None,
+            # Each plot keeps its own applicant: buyers who share an email share
+            # one login account, but not their plots' applicants or letters.
             "applicant_name": _s(_first(form, _NAME_KEYS)) or None,
+            "co_applicant_names": [n for n in dict.fromkeys(_s(_first(form, keys)) for keys in _CO_APPLICANT_KEYS)
+                                   if n],
             "payment_plan": {
                 "code": plan_code, "short_code": plan.get("short_code"), "name": plan.get("name"),
                 "version": plan.get("version"),
@@ -357,6 +429,8 @@ class servicePlotPaymentTerms:
         "phone": {"phone", "contactno", "mobile", "mobileno", "phoneno"},
         "booking_date": {"bookingdate", "dateofbooking", "date"},
         "sale_price": {"saleprice", "basicsaleprice", "bsp"},
+        # The plot's total price (Basic Sale Price + any PLC / IFMS / CAM).
+        "plot_value": {"plotvalue", "totalvalue", "totalconsideration", "plotprice", "totalprice"},
         "plc": {"plc"},
         "ifms": {"ifms"},
         "cam": {"cam"},
@@ -386,13 +460,19 @@ class servicePlotPaymentTerms:
             if not unit.get("booked_by"):
                 report.errors.append(f"row {rec['_row']} plot {plot}: no buyer is linked to this plot")
                 continue
-            doc = next((d for d in self._persistence.booking_docs_for_customers([unit["booked_by"]])
-                        if plot_key(_first(d["form_data"], _PLOT_KEYS)) == plot_key(plot)), None)
+            # The plot's newest record (the one the customers list reads).
+            doc = next((d for d in reversed(self._persistence.booking_docs_for_customers([unit["booked_by"]]))
+                        if _Form(d).is_for(unit)), None)
             if doc is None:
                 report.errors.append(f"row {rec['_row']} plot {plot}: the buyer has no record for this plot")
                 continue
             self._check_identity(report, rec, doc)
             terms = {k: rec.get(k) for k in ("sale_price", "plc", "ifms", "cam", "amount_received")}
+            try:
+                terms["sale_price"] = self._sale_price_from_plot_value(rec, terms)
+            except ValueError as e:
+                report.errors.append(f"row {rec['_row']} plot {plot}: {e}")
+                continue
             try:
                 _, form, milestones = self.prepare_terms(
                     unit["booked_by"], doc["id"], payment_plan=rec.get("plan"),
@@ -418,6 +498,29 @@ class servicePlotPaymentTerms:
                     # e.g. schedule_has_payments: a payment landed since the dry run.
                     report.errors.append(f"row {rec['_row']} plot {rec['plot']}: not saved ({e})")
         return report
+
+    @staticmethod
+    def _sale_price_from_plot_value(rec: dict, terms: dict):
+        """A sheet may give the plot's total (Plot Value) instead of its Basic
+        Sale Price: BSP = plot value - PLC - IFMS - CAM given in the row. A row
+        with both must agree. ValueError invalid_plot_value / plot_value_mismatch."""
+        def rupees(value, code):
+            # Whole rupees, rounded the way compute_schedule rounds each amount,
+            # so the saved total is exactly the (rounded) plot value.
+            amount = _money(value, code)
+            return None if amount is None else amount.quantize(Decimal(1), rounding=ROUND_HALF_UP)
+
+        value = rupees(rec.get("plot_value"), "invalid_plot_value")
+        if value is None:
+            return terms.get("sale_price")
+        charges = sum((rupees(terms.get(k), f"invalid_{k}_amount") or Decimal(0)) for k in ("plc", "ifms", "cam"))
+        derived = value - charges
+        if derived <= 0:
+            raise ValueError("invalid_plot_value")
+        given = rupees(terms.get("sale_price"), "invalid_sale_price")
+        if given is not None and abs(given - derived) > _ROUNDING:
+            raise ValueError("plot_value_mismatch")
+        return str(derived)
 
     @staticmethod
     def _check_identity(report: Report, rec: dict, doc: dict) -> None:
