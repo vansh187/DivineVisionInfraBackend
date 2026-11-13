@@ -4,6 +4,7 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from Divinepersistence import persistenceInventory, persistenceMarketTrend, persistenceChatbot
+from Divinepersistence.persistence_inventory import status_actor
 from .llm_gemini import llmGemini, GeminiError
 from .llm_groq import llmGroq, GroqError
 
@@ -450,6 +451,7 @@ class serviceInventory:
             id=inventory_id,
             payment_id=(payment_id or "").strip() or f"repair:{actor_id or 'staff'}",
             customer_id=None,
+            actor=status_actor("broker", actor_id) if actor_id else None,
         )
         if record is None:
             raise ValueError("unit_not_available")
@@ -460,7 +462,9 @@ class serviceInventory:
         unit is not currently 'booked'."""
         if not (inventory_id or "").strip():
             raise ValueError("inventory_id_required")
-        record = self._persistence.unbook_unit(id=inventory_id)
+        record = self._persistence.unbook_unit(
+            id=inventory_id, actor=status_actor("broker", actor_id) if actor_id else None,
+        )
         if record is None:
             raise ValueError("unit_not_booked")
         return self._format_booking_result(record)

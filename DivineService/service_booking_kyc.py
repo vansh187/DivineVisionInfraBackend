@@ -4,6 +4,9 @@ import os
 import time
 from types import SimpleNamespace
 from Divinepersistence import persistenceBooking, persistenceInventory, persistenceCustomer, persistenceMilestone
+from Divinepersistence.persistence_inventory import (
+    SOURCE_BOOKING_CANCELLATION, SOURCE_KYC_APPROVAL, SOURCE_KYC_REJECTION, status_actor,
+)
 from DivineService.service_payment import servicePayment
 from DivineService.service_document import serviceDocument
 
@@ -662,6 +665,7 @@ class serviceBookingKyc:
 
             unit = self._inventory_persistence.confirm_booking_after_kyc(
                 id=booking.inventory_id, payment_id=booking.payment_id,
+                actor=status_actor("admin", admin_id), source=SOURCE_KYC_APPROVAL,
             )
             if unit is None:
                 raise ValueError("inventory_confirm_failed")
@@ -680,7 +684,10 @@ class serviceBookingKyc:
                 # own UPDATE would need if it had to reverse itself - not
                 # release_from_kyc_review, whose guard only matches the
                 # pre-confirm state and would silently no-op here.
-                released = self._inventory_persistence.unbook_unit(id=booking.inventory_id)
+                released = self._inventory_persistence.unbook_unit(
+                    id=booking.inventory_id, actor=status_actor("admin", admin_id), source=SOURCE_KYC_APPROVAL,
+                    note="Approval undone: the booking changed at the same time",
+                )
                 if released is None:
                     logger.warning(
                         "booking_kyc.approve_rollback_unbook_failed booking_id=%s inventory_id=%s "
@@ -710,6 +717,8 @@ class serviceBookingKyc:
 
             released = self._inventory_persistence.release_from_kyc_review(
                 id=booking.inventory_id, payment_id=booking.payment_id,
+                actor=status_actor("admin", admin_id),
+                source=SOURCE_KYC_REJECTION if target_status == "rejected" else SOURCE_BOOKING_CANCELLATION,
             )
             if released is None:
                 # Not necessarily a bug: the version check on update_decision below
@@ -820,10 +829,12 @@ class serviceBookingKyc:
             if was_booked:
                 released = self._inventory_persistence.unbook_unit_for_payment(
                     id=booking.inventory_id, payment_id=booking.payment_id,
+                    actor=status_actor("admin", admin_id), source=SOURCE_BOOKING_CANCELLATION,
                 )
             else:
                 released = self._inventory_persistence.release_from_kyc_review(
                     id=booking.inventory_id, payment_id=booking.payment_id,
+                    actor=status_actor("admin", admin_id), source=SOURCE_BOOKING_CANCELLATION,
                 )
             if released is None:
                 # See _reject_or_cancel's identical note - a concurrent double-cancel
