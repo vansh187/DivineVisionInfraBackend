@@ -4,8 +4,8 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from DivineDTO.models import (
-    AdminInventoryListResponseDTO, AdminInventoryProjectsResponseDTO, AdminInventoryStatusUpdateDTO,
-    AdminInventoryUnitDetailDTO, InventoryStatusLiteral,
+    AdminInventoryExportResponseDTO, AdminInventoryListResponseDTO, AdminInventoryProjectsResponseDTO,
+    AdminInventoryStatusUpdateDTO, AdminInventoryUnitDetailDTO, InventoryStatusLiteral,
 )
 from DivineService.auth import get_current_admin
 from DivineService.service_admin_inventory import InventoryStatusError, serviceAdminInventory
@@ -41,6 +41,27 @@ def list_inventory(
                                    page=page, page_size=page_size)
     except Exception:
         logger.exception("admin_inventory_list_failed")
+        raise HTTPException(status_code=500, detail="internal_error")
+
+
+# Declared before /{inventory_id} so "export" isn't read as a plot id.
+@router.get("/export", response_model=AdminInventoryExportResponseDTO)
+def export_inventory(
+    project_name: Optional[str] = Query(None, max_length=150, description="Exact project name"),
+    status: Optional[InventoryStatusLiteral] = Query(None),
+    search: Optional[str] = Query(None, max_length=50, description="Matches plot number or block"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(100, ge=1, le=100),
+    current_admin: dict = Depends(get_current_admin),
+):
+    """Rows for the Inventory CSV export, paged like the list and with the same
+    filters: each plot with its company, and for a sold / booked plot its
+    payment plan, buyer, co-applicant and booking date. Admin-only."""
+    try:
+        return _service.export_units(project_name=project_name, status=status, search=search,
+                                     page=page, page_size=page_size)
+    except Exception:
+        logger.exception("admin_inventory_export_failed")
         raise HTTPException(status_code=500, detail="internal_error")
 
 

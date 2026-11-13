@@ -13,6 +13,7 @@ from decimal import Decimal
 from DivineDTO.models import INVENTORY_STATUSES, MANUAL_INVENTORY_STATUSES as MANUAL_STATUSES
 from Divinepersistence import persistenceAdmin, persistenceInventory
 from Divinepersistence.persistence_inventory import status_actor
+from DivineService.inventory_export import ExportLinks, export_row
 
 logger = logging.getLogger(__name__)
 
@@ -135,21 +136,37 @@ class serviceAdminInventory:
             counts["total"] = counts.get("total", 0) + int(r.plots or 0)
         return {"items": [{"project_name": name, **counts} for name, counts in sorted(projects.items())]}
 
-    def list_units(self, project_name: str = None, status: str = None, search: str = None,
-                   page: int = 1, page_size: int = 20) -> dict:
+    def _page(self, project_name, status, search, page, page_size):
         project_name = (project_name or "").strip() or None
         search = (search or "").strip() or None
         rows, total = self._persistence.admin_list_units(
             project_name=project_name, status=status, search=search,
             limit=page_size, offset=(page - 1) * page_size,
         )
-        return {
-            "items": [self._unit(r) for r in rows],
-            "pagination": {
-                "page": page, "page_size": page_size, "total_items": total,
-                "total_pages": (total + page_size - 1) // page_size if total else 0,
-            },
+        pagination = {
+            "page": page, "page_size": page_size, "total_items": total,
+            "total_pages": (total + page_size - 1) // page_size if total else 0,
         }
+        return rows, pagination
+
+    def list_units(self, project_name: str = None, status: str = None, search: str = None,
+                   page: int = 1, page_size: int = 20) -> dict:
+        rows, pagination = self._page(project_name, status, search, page, page_size)
+        return {"items": [self._unit(r) for r in rows], "pagination": pagination}
+
+    def export_units(self, project_name: str = None, status: str = None, search: str = None,
+                     page: int = 1, page_size: int = 100) -> dict:
+        """One page of the Inventory CSV export: the same plots and filters as
+        list_units, plus company, payment plan, buyer, co-applicant and booking
+        date (see DivineService/inventory_export.py)."""
+        rows, pagination = self._page(project_name, status, search, page, page_size)
+        units = [dict(vars(r)) for r in rows]
+        links = ExportLinks(self._persistence.admin_export_links(
+            payment_ids=[u.get("booked_payment_id") for u in units],
+            customer_ids=[u.get("booked_by") for u in units],
+        ))
+        items = [{**self._unit(r), **export_row(u, links)} for r, u in zip(rows, units)]
+        return {"items": items, "pagination": pagination}
 
     def get_unit(self, inventory_id: str, unit=None) -> dict:
         """``unit``: the plot row when the caller already has it (saves a read,

@@ -292,3 +292,32 @@ admin_set_status: |
     AND booked_payment_id IS NULL
     AND booked_by IS NULL
   RETURNING *;
+
+# ---- Admin panel: Inventory CSV export ------------------------------------
+# Batch lookups for one page of plots (:ids expanded by the caller).
+export_booking_payments: |
+  SELECT p.id AS payment_id, p.notes, b.created_date AS booking_created_date, b.customer_id
+  FROM divine_payments p
+  LEFT JOIN divine_bookings b ON b.payment_id = p.id
+  WHERE p.id IN :ids;
+
+# Booking application forms, newest first: website bookings carry their
+# payment id; offline buyers' forms are found by owner + plot number.
+export_forms_by_payment: |
+  SELECT payment_id, owner_id, project_id, form_data, created_date
+  FROM divine_documents
+  WHERE payment_id IN :ids
+    AND document_type IN ('booking_application', 'project_booking_application')
+  ORDER BY created_date DESC;
+
+export_forms_by_owner: |
+  SELECT payment_id, owner_id, project_id, form_data, created_date
+  FROM divine_documents
+  WHERE owner_role = 'customer' AND owner_id IN :ids
+    AND document_type IN ('booking_application', 'project_booking_application')
+  ORDER BY created_date DESC;
+
+export_customers: |
+  SELECT id, first_name, last_name, email, phone
+  FROM divine_customer_users
+  WHERE id IN :ids;

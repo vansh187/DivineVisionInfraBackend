@@ -1286,6 +1286,29 @@ class AdminInventoryListResponseDTO(BaseModel):
     pagination: PaginationDTO
 
 
+class AdminInventoryExportRowDTO(AdminInventoryUnitDTO):
+    """One plot for the Inventory CSV export: the plot, its project's company,
+    and - for a sold / booked plot - its buyer, co-applicant, payment plan and
+    booking date. Buyer fields are null for a plot nobody has bought."""
+    company_name: Optional[str] = None
+    company_address: Optional[str] = None
+    plot_address: Optional[str] = None
+    payment_plan: Optional[str] = None
+    client_name: Optional[str] = None
+    phone: Optional[str] = None
+    alternative_number: Optional[str] = None
+    email: Optional[str] = None
+    address: Optional[str] = None
+    co_applicant_email: Optional[str] = None
+    co_applicant_address: Optional[str] = None
+    booking_date: Optional[str] = None       # YYYY-MM-DD
+
+
+class AdminInventoryExportResponseDTO(BaseModel):
+    items: List[AdminInventoryExportRowDTO]
+    pagination: PaginationDTO
+
+
 class AdminInventoryStatusChangeDTO(BaseModel):
     id: str
     old_status: Optional[str] = None
