@@ -14,14 +14,9 @@ logger = logging.getLogger(__name__)
 
 # Cash-refund pickup addresses for a cancelled booking - project-specific per the
 # client's requirement (Suraksha Enclave customers collect from the Ganaur site
-# office, everyone else from the OPS Divine Greens office). The OPS office reuses
-# DIVINE_PROJECT_ADDRESS - the SAME env var service_demand_letter.py and
-# service_payment_receipt.py already use for that physical office - so a single
-# address change (e.g. the office relocating) stays in sync across every
-# customer-facing document/email instead of drifting behind a second var.
-_DEFAULT_OPS_OFFICE_ADDRESS = "OPS Divine Greens - Sec-16, Taraori, Karnal, Haryana 132116"
-_DEFAULT_SURAKSHA_OFFICE_ADDRESS = ("Suraksha Enclave Site Office - Village Garhi Kesri, Sector-15, "
-                                    "Ganaur, Sonipat, Haryana")
+# office, everyone else from the OPS Divine Greens office). Both come from
+# service_demand_letter.project_office_address, which the letters and the
+# Inventory export also use, so an office address change stays in sync.
 
 # The KYC document checklist for a booking review - Aadhaar (front/back), PAN,
 # applicant photo, and a cancelled cheque (bank-account proof, for any future
@@ -779,13 +774,11 @@ class serviceBookingKyc:
         """Which office address a cash-refund pickup email should point the
         customer to - Suraksha Enclave -> the Ganaur site office, everything else
         (including an unrecognised/blank project) -> the OPS Divine Greens office."""
+        from DivineService.service_demand_letter import OPS_OFFICE_ADDRESS_DEFAULT, project_office_address
         try:
-            name = (project_name or "").strip().lower()
-            if "suraksha" in name:
-                return os.getenv("DIVINE_SURAKSHA_OFFICE_ADDRESS", _DEFAULT_SURAKSHA_OFFICE_ADDRESS)
-            return os.getenv("DIVINE_PROJECT_ADDRESS", _DEFAULT_OPS_OFFICE_ADDRESS)
+            return project_office_address(project_name)
         except Exception:  # pragma: no cover - defensive, env/string ops only
-            return _DEFAULT_OPS_OFFICE_ADDRESS
+            return OPS_OFFICE_ADDRESS_DEFAULT
 
     def _refund_instructions_for(self, booking, payment) -> str:
         """Customer-facing refund copy shared by the Reject and Cancel emails -

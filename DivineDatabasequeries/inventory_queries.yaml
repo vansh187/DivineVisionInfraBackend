@@ -240,6 +240,8 @@ admin_project_status_counts: |
 # "A-9" sorts before "A-10". The search escapes '\', '%' and '_' (ESCAPE '\')
 # so the admin's text is matched literally, not as LIKE wildcards. Each plot's
 # latest change comes from admin_latest_changes, for this page's ids only.
+# project_name and id break ties ('C-12' exists in more than one project), so
+# the order is total and OFFSET pages never repeat or skip a plot.
 admin_list_units: |
   SELECT u.*
   FROM divine_project_inventory u
@@ -248,7 +250,8 @@ admin_list_units: |
     AND (:search IS NULL
          OR lower(u.unit_number) LIKE '%' || replace(replace(replace(lower(:search), '\', '\\'), '%', '\%'), '_', '\_') || '%' ESCAPE '\'
          OR lower(COALESCE(u.block, '')) LIKE '%' || replace(replace(replace(lower(:search), '\', '\\'), '%', '\%'), '_', '\_') || '%' ESCAPE '\')
-  ORDER BY COALESCE(u.block, '') ASC, LENGTH(u.unit_number) ASC, u.unit_number ASC
+  ORDER BY COALESCE(u.block, '') ASC, LENGTH(u.unit_number) ASC, u.unit_number ASC,
+    u.project_name ASC, u.id ASC
   LIMIT :limit OFFSET :offset;
 
 admin_count_units: |
@@ -295,8 +298,11 @@ admin_set_status: |
 
 # ---- Admin panel: Inventory CSV export ------------------------------------
 # Batch lookups for one page of plots (:ids expanded by the caller).
+# payment_created_date is the booking date (in IST), as on the demand letter;
+# owner_id is the buyer when the booking row is missing.
 export_booking_payments: |
-  SELECT p.id AS payment_id, p.notes, b.created_date AS booking_created_date, b.customer_id
+  SELECT p.id AS payment_id, p.notes, p.created_date AS payment_created_date,
+         p.owner_id, p.owner_role, b.customer_id
   FROM divine_payments p
   LEFT JOIN divine_bookings b ON b.payment_id = p.id
   WHERE p.id IN :ids;

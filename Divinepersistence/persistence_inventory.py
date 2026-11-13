@@ -8,6 +8,18 @@ from DivineDTO.models import MANUAL_INVENTORY_STATUSES
 from .persistence_db import Base, SessionLocal, engine, RowWrapper, load_queries
 
 
+# LIMIT value meaning "all rows" on both Postgres and SQLite.
+_NO_LIMIT = 2 ** 31 - 1
+# Keeps each expanded IN (...) list well under SQLite's bound-parameter limit.
+_IN_CHUNK = 500
+
+
+def _chunks(values):
+    values = list(values)
+    for i in range(0, len(values), _IN_CHUNK):
+        yield values[i:i + _IN_CHUNK]
+
+
 def _to_bindable(value):
     # sqlite3's DBAPI can't bind a raw Decimal on a textual (non-ORM) execute() - Postgres
     # handles Decimal fine, but this keeps both backends working through the same code path.
@@ -579,18 +591,19 @@ class persistenceInventory:
     def admin_list_units(self, project_name: str = None, status: str = None, search: str = None,
                          limit: int = 20, offset: int = 0):
         """(rows, total) for one page of plots, each row with the time and name
-        of its latest status change."""
+        of its latest status change. ``limit=None`` returns every matching plot
+        in one statement - one consistent read, for the CSV export."""
         self.expire_stale_reservations()
         params = {"project_name": project_name, "status": status, "search": search}
         with self._session_factory() as db:
             total = db.execute(text(self._q("admin_count_units")), params).mappings().first()["total"]
-            result = db.execute(text(self._q("admin_list_units")), {**params, "limit": limit, "offset": offset})
+            result = db.execute(text(self._q("admin_list_units")), {
+                **params, "limit": _NO_LIMIT if limit is None else limit, "offset": offset})
             rows = [dict(row) for row in result.mappings().all()]
             latest = {}
-            if rows:
+            for chunk in _chunks([r["id"] for r in rows]):
                 query = text(self._q("admin_latest_changes")).bindparams(bindparam("ids", expanding=True))
-                latest = {r["inventory_id"]: r for r in
-                          db.execute(query, {"ids": [r["id"] for r in rows]}).mappings().all()}
+                latest.update({r["inventory_id"]: r for r in db.execute(query, {"ids": chunk}).mappings().all()})
             for row in rows:
                 change = latest.get(row["id"])
                 row["last_changed_at"] = change["changed_at"] if change else None
@@ -628,22 +641,27 @@ class persistenceInventory:
                 raise
 
     def admin_export_links(self, payment_ids, customer_ids) -> dict:
-        """What the Inventory CSV export needs beyond the plot rows, for one page
-        of plots, in four batched reads: booking payments (+ booking row), the
-        booking application forms by payment and by customer, and the customers."""
+        """What the Inventory CSV export needs beyond the plot rows, in four
+        batched reads (each split into IN-list chunks): booking payments
+        (+ booking row), the booking application forms by payment and by
+        customer, and the customers. The buyer is the booking row's customer,
+        else the paying customer, else the plot's linked buyer."""
         payment_ids = sorted({str(i) for i in payment_ids or () if i})
         links = {"payments": [], "forms_by_payment": [], "forms_by_owner": [], "customers": []}
         with self._session_factory() as db:
             def fetch(name, ids):
-                if not ids:
-                    return []
                 query = text(self._q(name)).bindparams(bindparam("ids", expanding=True))
-                return [dict(r) for r in db.execute(query, {"ids": ids}).mappings().all()]
+                out = []
+                for chunk in _chunks(ids):
+                    out.extend(dict(r) for r in db.execute(query, {"ids": chunk}).mappings().all())
+                return out
 
             links["payments"] = fetch("export_booking_payments", payment_ids)
             links["forms_by_payment"] = fetch("export_forms_by_payment", payment_ids)
             owners = sorted({str(i) for i in customer_ids or () if i}
-                            | {str(p["customer_id"]) for p in links["payments"] if p.get("customer_id")})
+                            | {str(p["customer_id"]) for p in links["payments"] if p.get("customer_id")}
+                            | {str(p["owner_id"]) for p in links["payments"]
+                               if p.get("owner_id") and p.get("owner_role") == "customer"})
             links["forms_by_owner"] = fetch("export_forms_by_owner", owners)
             links["customers"] = fetch("export_customers", owners)
         return links
