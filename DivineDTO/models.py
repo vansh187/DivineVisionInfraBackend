@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field, EmailStr, field_validator
 from typing import Optional, Dict, Any, List, Literal
-from datetime import datetime
+from datetime import date, datetime
 
 BROKER_PROJECTS = ("suraksha-enclave", "ops-divine-greens")
 
@@ -208,6 +208,9 @@ class CustomerListItemDTO(BaseModel):
     status: Literal["ACTIVE", "BOOKED"]
     created_at: Optional[datetime]
     last_activity_at: Optional[datetime]
+    # Short codes of the payment plans on the customer's plots ("PP1"), in
+    # booking order; empty when no plot has a plan yet.
+    payment_plans: List[str] = []
 
 
 class PaginationDTO(BaseModel):
@@ -220,6 +223,73 @@ class PaginationDTO(BaseModel):
 class CustomerListResponseDTO(BaseModel):
     items: List[CustomerListItemDTO]
     pagination: PaginationDTO
+
+
+# ---- Admin: a customer's plots and their payment plans ----------------------
+
+class CustomerPlotPlanDTO(BaseModel):
+    code: str
+    short_code: Optional[str] = None
+    name: Optional[str] = None
+    version: Optional[int] = None
+
+
+class CustomerPlotScheduleRowDTO(BaseModel):
+    milestone_no: Optional[int] = None
+    label: Optional[str] = None
+    percent: Optional[float] = None
+    due_date: Optional[str] = None           # YYYY-MM-DD; null until its event (e.g. possession) is dated
+    amount: float
+    status: Literal["paid", "due", "overdue", "upcoming"]
+
+
+class CustomerPlotDTO(BaseModel):
+    """One plot of a customer: a website booking or an offline buyer's plot."""
+    document_id: str
+    record_type: Literal["offline", "website"]
+    project_name: Optional[str] = None
+    unit_number: Optional[str] = None
+    applicant_name: Optional[str] = None
+    payment_plan: Optional[CustomerPlotPlanDTO] = None
+    booking_date: Optional[str] = None       # YYYY-MM-DD
+    sale_price: Optional[float] = None
+    plc: Optional[float] = None
+    ifms: Optional[float] = None
+    cam: Optional[float] = None
+    total: Optional[float] = None
+    amount_received: Optional[float] = None
+    outstanding: Optional[float] = None
+    # plan_needed -> no plan linked; price_needed -> plan + booking date linked,
+    # prices missing (no demand letter yet); complete -> schedule built.
+    terms_status: Literal["plan_needed", "price_needed", "complete"]
+    # Only an offline buyer's plot; a website booking keeps the terms it was paid against.
+    terms_editable: bool
+    demand_letter_available: bool
+    schedule: List[CustomerPlotScheduleRowDTO] = []
+
+
+class CustomerDetailDTO(BaseModel):
+    id: str
+    full_name: str
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    source: Literal["WEBSITE", "OFFLINE_IMPORT"]
+    plots: List[CustomerPlotDTO]
+
+
+class CustomerPlotTermsDTO(BaseModel):
+    """Payment terms of an offline buyer's plot. payment_plan: a plan code,
+    short code ("PP1") or the client's label ("PL-10-15-25-25-15-10").
+    Prices are optional: without sale_price the plan and booking date are
+    linked and the plot waits for prices (no demand letter yet)."""
+    payment_plan: str = Field(..., min_length=1, max_length=80)
+    booking_date: date
+    sale_price: Optional[float] = Field(None, gt=0, le=500000000, description="Basic Sale Price (INR)")
+    plc: Optional[float] = Field(None, ge=0, le=500000000)
+    ifms: Optional[float] = Field(None, ge=0, le=500000000)
+    cam: Optional[float] = Field(None, ge=0, le=500000000)
+    amount_received: Optional[float] = Field(None, ge=0, le=1000000000,
+                                             description="Total paid by the buyer to date (INR)")
 
 
 class CustomerCreateDTO(BaseModel):

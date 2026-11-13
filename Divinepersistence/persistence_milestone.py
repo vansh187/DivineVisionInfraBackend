@@ -174,37 +174,42 @@ class persistenceMilestone:
             return 0
         with self._session_factory() as db:
             try:
-                now = datetime.now(timezone.utc)
-                for r in rows:
-                    params = {
-                        "id": r.get("id"),
-                        "booking_id": r.get("booking_id"),
-                        "customer_id": r.get("customer_id"),
-                        "project_id": r.get("project_id"),
-                        "inventory_id": r.get("inventory_id"),
-                        "milestone_no": r.get("milestone_no"),
-                        "label": r.get("label"),
-                        "percent": r.get("percent"),
-                        "due_days": r.get("due_days"),
-                        "due_date": r.get("due_date"),
-                        "amount": r.get("amount") or 0,
-                        "status": r.get("status") or "upcoming",
-                        "paid_on": r.get("paid_on"),
-                        "paid_payment_id": r.get("paid_payment_id"),
-                        "basic_amount": r.get("basic_amount"),
-                        "charge_head": r.get("charge_head"),
-                        "charge_amount": r.get("charge_amount"),
-                        "due_trigger": r.get("due_trigger"),
-                        "due_from": (r.get("due_from") or None) and str(r["due_from"])[:100],
-                        "label": (r.get("label") or None) and str(r["label"])[:150],
-                        "now": now,
-                    }
-                    db.execute(text(self._queries["insert_milestone"]), params)
+                self.write_milestones(db, rows)
                 db.commit()
                 return len(rows)
             except Exception:
                 db.rollback()
                 raise
+
+    def write_milestones(self, db, rows: list) -> None:
+        """create_milestones' inserts inside the caller's open session - never
+        commits, so a caller can save milestones together with other writes."""
+        now = datetime.now(timezone.utc)
+        for r in rows:
+            params = {
+                "id": r.get("id"),
+                "booking_id": r.get("booking_id"),
+                "customer_id": r.get("customer_id"),
+                "project_id": r.get("project_id"),
+                "inventory_id": r.get("inventory_id"),
+                "milestone_no": r.get("milestone_no"),
+                "label": r.get("label"),
+                "percent": r.get("percent"),
+                "due_days": r.get("due_days"),
+                "due_date": r.get("due_date"),
+                "amount": r.get("amount") or 0,
+                "status": r.get("status") or "upcoming",
+                "paid_on": r.get("paid_on"),
+                "paid_payment_id": r.get("paid_payment_id"),
+                "basic_amount": r.get("basic_amount"),
+                "charge_head": r.get("charge_head"),
+                "charge_amount": r.get("charge_amount"),
+                "due_trigger": r.get("due_trigger"),
+                "due_from": (r.get("due_from") or None) and str(r["due_from"])[:100],
+                "label": (r.get("label") or None) and str(r["label"])[:150],
+                "now": now,
+            }
+            db.execute(text(self._queries["insert_milestone"]), params)
 
     def date_possession_milestones(self, project_id: str, possession_date) -> int:
         """Give every unpaid 'On Offer of Possession' milestone of a project its

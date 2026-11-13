@@ -116,7 +116,11 @@ _DEFAULT_QUERIES = {
         "SELECT b.inventory_id, p.notes -> 'payment_plan' ->> 'payment_plan_code' AS plan_code, "
         "p.notes -> 'payment_plan' ->> 'payment_plan_version' AS plan_version "
         "FROM divine_bookings b JOIN divine_payments p ON p.id = b.payment_id "
-        "WHERE b.status IN ('pending_kyc_review', 'booked')"
+        "WHERE b.status IN ('pending_kyc_review', 'booked') "
+        # Offline buyers' plots linked to a plan (service_plot_payment_terms).
+        "UNION ALL SELECT d.form_data ->> 'inventory_id', d.form_data -> 'payment_plan' ->> 'code', "
+        "d.form_data -> 'payment_plan' ->> 'version' "
+        "FROM divine_documents d WHERE d.status = 'imported' AND d.form_data ->> 'inventory_id' IS NOT NULL"
         ") t WHERE t.plan_code IN :codes;"
     ),
     "list_active_booking_plan_refs_sqlite": (
@@ -125,7 +129,11 @@ _DEFAULT_QUERIES = {
         "CASE WHEN json_valid(p.notes) THEN json_extract(p.notes, '$.payment_plan.payment_plan_code') END AS plan_code, "
         "CASE WHEN json_valid(p.notes) THEN json_extract(p.notes, '$.payment_plan.payment_plan_version') END AS plan_version "
         "FROM divine_bookings b JOIN divine_payments p ON p.id = b.payment_id "
-        "WHERE b.status IN ('pending_kyc_review', 'booked')"
+        "WHERE b.status IN ('pending_kyc_review', 'booked') "
+        "UNION ALL SELECT json_extract(d.form_data, '$.inventory_id'), "
+        "json_extract(d.form_data, '$.payment_plan.code'), json_extract(d.form_data, '$.payment_plan.version') "
+        "FROM divine_documents d WHERE d.status = 'imported' AND json_valid(d.form_data) "
+        "AND json_extract(d.form_data, '$.inventory_id') IS NOT NULL"
         ") t WHERE t.plan_code IN :codes;"
     ),
     "list_versions_for_codes": "SELECT code, version, is_active FROM divine_payment_plans WHERE code IN :codes;",
@@ -238,8 +246,8 @@ class persistencePaymentPlan:
 
     def count_plots_by_plan(self, codes) -> dict:
         """{(code, version): number of distinct plots} with an active booking
-        (pending KYC review or booked) on each of ``codes``. Computed live on
-        every call.
+        (pending KYC review or booked), or an offline buyer's plot linked to the
+        plan, on each of ``codes``. Computed live on every call.
 
         Terms without a version are put on the version a booking without one
         resolves to everywhere else (``get_by_code(code)``): the code's active

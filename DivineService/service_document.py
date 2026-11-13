@@ -869,6 +869,13 @@ class serviceDocument:
                 "due_days": getattr(r, "due_days", None),
             })
         received = sum(s["amount"] for s in schedule if (s["status"] or "").lower() == "paid")
+        # An offline buyer's amount received can stop partway through an
+        # instalment (service_plot_payment_terms): that part counts as received
+        # too, and the letter credits it against the oldest unpaid dues.
+        try:
+            received += float(form_data.get("received_unallocated") or 0)
+        except (TypeError, ValueError):
+            pass
         return {**form_data, "payment_schedule": schedule, "amount_received": received}
 
     def get_latest(self, document_type: str, requester_id: str, requester_role: str = None):
