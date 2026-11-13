@@ -1,6 +1,6 @@
 import logging
 from datetime import datetime, timezone
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
@@ -9,7 +9,10 @@ from DivineDTO.models import (
     AdminInventoryStatusUpdateDTO, AdminInventoryUnitDetailDTO, InventoryStatusLiteral,
 )
 from DivineService.auth import get_current_admin
-from DivineService.service_admin_inventory import InventoryStatusError, serviceAdminInventory
+from DivineService.inventory_export import CSV_COLUMN_KEYS
+from DivineService.service_admin_inventory import (
+    ExportTooLargeError, InventoryStatusError, serviceAdminInventory,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -52,13 +55,26 @@ def export_inventory_csv(
     project_name: Optional[str] = Query(None, max_length=150, description="Exact project name"),
     status: Optional[InventoryStatusLiteral] = Query(None),
     search: Optional[str] = Query(None, max_length=50, description="Matches plot number or block"),
+    columns: Optional[List[str]] = Query(
+        None, max_length=len(CSV_COLUMN_KEYS),
+        description="Columns to include, by key (repeat the parameter). The file keeps its own column "
+                    "order. Default: the client's 20 sheet columns.",
+    ),
     current_admin: dict = Depends(get_current_admin),
 ):
     """The whole Inventory export as one CSV download, with the same filters as
-    the list: every matching plot, read in one go (no paging). Text a
-    spreadsheet would run as a formula starts with an apostrophe. Admin-only."""
+    the list: every matching plot, read in one go (no paging), with the columns
+    the admin chose. Text a spreadsheet would run as a formula starts with an
+    apostrophe. Admin-only."""
+    unknown = sorted(set(columns or ()) - set(CSV_COLUMN_KEYS))
+    if unknown:
+        raise HTTPException(status_code=422, detail={
+            "code": "unknown_columns", "message": f"Unknown export columns: {', '.join(unknown)}.",
+        })
     try:
-        body = _service.export_csv(project_name=project_name, status=status, search=search)
+        body = _service.export_csv(project_name=project_name, status=status, search=search, columns=columns)
+    except ExportTooLargeError as e:
+        raise HTTPException(status_code=413, detail={"code": "export_too_large", "message": e.message})
     except Exception:
         logger.exception("admin_inventory_export_csv_failed")
         raise HTTPException(status_code=500, detail="internal_error")

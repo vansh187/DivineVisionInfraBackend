@@ -253,9 +253,58 @@ def test_csv_download_is_one_file_with_header_and_safe_cells():
     assert body.startswith("﻿")
     lines = list(csv_module.reader(io.StringIO(body.lstrip("﻿"))))
     header, rows = lines[0], lines[1:]
-    assert header[:4] == ["Plot ID", "Project", "Block", "Plot No"]
+    # The client's sheet: their 20 columns, names and order.
+    assert header == [
+        "Plot No", "Width (Mtr.)", "Length (Mtr.)", "Area in Sq. Mtr.", "Area in Sq. Yard", "Plot Status",
+        "Project Name", "Company Name", "Block", "Company Address", "Payment Plan", "Client Name", "Phone",
+        "Booking Date", "Alternative Number", "Email ID", "Co-applicant Email", "Address",
+        "Co-applicant Address", "Plot Address",
+    ]
     by_plot = {r[header.index("Plot No")]: dict(zip(header, r)) for r in rows}
     assert set(by_plot) == {"C-1", "C-12"}
     assert by_plot["C-12"]["Client Name"] == "Mr. Dheeraj Nirwal"
-    assert by_plot["C-1"]["Client Name"] == "" and by_plot["C-1"]["Width (m)"] == "7.45"
+    assert (by_plot["C-12"]["Plot Status"], by_plot["C-1"]["Plot Status"]) == ("Sold", "Available")
+    assert by_plot["C-1"]["Client Name"] == "" and by_plot["C-1"]["Width (Mtr.)"] == "7.45"
     assert by_plot["C-1"]["Company Name"] == "Rama Krishna Buildwell Pvt. Ltd."
+
+
+def _csv(**params):
+    import csv as csv_module
+    import io
+    res = client.get("/admin/inventory/export.csv", params=params, headers=_admin())
+    assert res.status_code == 200, res.text
+    return list(csv_module.reader(io.StringIO(res.content.decode("utf-8").lstrip("\ufeff"))))
+
+
+def test_csv_has_only_the_chosen_columns_in_file_order():
+    lines = _csv(project_name=SURAKSHA, columns=["client_name", "unit_number", "last_changed_by_name", "id"])
+    assert lines[0] == ["Plot No", "Client Name", "Plot ID", "Status Changed By"]
+    assert {r[0] for r in lines[1:]} == {"C-1", "C-12"}
+    assert all(len(r) == 4 for r in lines)
+
+
+def test_csv_status_change_time_is_shown_in_ist_like_the_panel():
+    import re
+    lines = _csv(project_name=OPS, columns=["unit_number", "last_changed_at"])
+    stamps = [r[1] for r in lines[1:] if r[1]]
+    assert stamps and all(re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}", s) for s in stamps)
+
+
+def test_csv_refuses_unknown_columns():
+    res = client.get("/admin/inventory/export.csv", params={"columns": ["unit_number", "password_hash"]},
+                     headers=_admin())
+    assert res.status_code == 422
+    assert res.json()["detail"] == {"code": "unknown_columns", "message": "Unknown export columns: password_hash."}
+
+
+def test_csv_refuses_more_plots_than_one_file_holds(monkeypatch):
+    import DivineService.service_admin_inventory as service_module
+    monkeypatch.setattr(service_module, "MAX_CSV_ROWS", 1)
+    res = client.get("/admin/inventory/export.csv", params={"project_name": SURAKSHA}, headers=_admin())
+    assert res.status_code == 413
+    assert res.json()["detail"]["code"] == "export_too_large"
+    assert res.json()["detail"]["message"].startswith("More than 1 plots match.")
+    # At the ceiling exactly, the file is still made.
+    monkeypatch.setattr(service_module, "MAX_CSV_ROWS", 2)
+    assert client.get("/admin/inventory/export.csv", params={"project_name": SURAKSHA},
+                      headers=_admin()).status_code == 200

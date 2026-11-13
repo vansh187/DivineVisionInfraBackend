@@ -33,6 +33,20 @@ _LOCK_MESSAGES = {
 }
 
 
+# The most plots one CSV download holds - the same ceiling the admin panel's
+# paged exports have (1,000 pages of 100).
+MAX_CSV_ROWS = 100_000
+
+
+class ExportTooLargeError(ValueError):
+    """More plots match than one CSV download holds; the admin narrows the filters."""
+
+    def __init__(self, limit: int):
+        super().__init__("export_too_large")
+        self.message = (f"More than {limit:,} plots match. Narrow the filters (project, status or search) "
+                        "and export in parts.")
+
+
 class InventoryStatusError(ValueError):
     """A refused status change, with a message written for the admin."""
 
@@ -172,15 +186,20 @@ class serviceAdminInventory:
         rows, pagination = self._page(project_name, status, search, page, page_size)
         return {"items": self._export_items(rows), "pagination": pagination}
 
-    def export_csv(self, project_name: str = None, status: str = None, search: str = None) -> str:
+    def export_csv(self, project_name: str = None, status: str = None, search: str = None,
+                   columns=None) -> str:
         """The whole Inventory export as one CSV file: every plot matching the
         filters, read in a single statement (so the file is one consistent
         picture, with no paging to repeat or skip a plot)."""
         project_name = (project_name or "").strip() or None
         search = (search or "").strip() or None
+        # One plot more than the ceiling, in the same single statement: if it comes
+        # back, the export is refused before any buyer lookups or file building.
         rows, _ = self._persistence.admin_list_units(
-            project_name=project_name, status=status, search=search, limit=None)
-        return to_csv(self._export_items(rows))
+            project_name=project_name, status=status, search=search, limit=MAX_CSV_ROWS + 1)
+        if len(rows) > MAX_CSV_ROWS:
+            raise ExportTooLargeError(MAX_CSV_ROWS)
+        return to_csv(self._export_items(rows), columns=columns)
 
     def get_unit(self, inventory_id: str, unit=None) -> dict:
         """``unit``: the plot row when the caller already has it (saves a read,

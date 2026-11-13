@@ -38,20 +38,32 @@ _FORM_PROJECT_KEYS = ("projectId", "project_id", "project_name", "projectName", 
 # Spreadsheet apps run a cell starting with one of these as a formula.
 _FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
 
-# CSV columns: (row key, header). The order of the file.
-CSV_COLUMNS = (
-    ("id", "Plot ID"), ("project_name", "Project"), ("block", "Block"), ("unit_number", "Plot No"),
-    ("unit_type", "Type"), ("city", "City"), ("locality", "Locality"),
-    ("width_mtr", "Width (m)"), ("length_mtr", "Length (m)"), ("area_sqmt", "Area (sq m)"),
-    ("area_sqyd", "Area (sq yd)"), ("status", "Status"), ("sale_source", "Sale Source"),
-    ("status_note", "Status Note"), ("last_changed_at", "Status Changed At"),
-    ("last_changed_by_name", "Status Changed By"),
-    ("company_name", "Company Name"), ("company_address", "Company Address"),
-    ("plot_address", "Plot Address"), ("payment_plan", "Payment Plan"), ("booking_date", "Booking Date"),
-    ("client_name", "Client Name"), ("phone", "Phone"), ("alternative_number", "Alternative Number"),
-    ("email", "Email"), ("address", "Address"),
-    ("co_applicant_email", "Co-applicant Email"), ("co_applicant_address", "Co-applicant Address"),
+# CSV columns: (row key, header), in the order of the file. The client's
+# sheet comes first, with its column names and order; the extra columns after
+# it are only in the file when asked for (see DEFAULT_CSV_COLUMNS).
+CLIENT_CSV_COLUMNS = (
+    ("unit_number", "Plot No"), ("width_mtr", "Width (Mtr.)"), ("length_mtr", "Length (Mtr.)"),
+    ("area_sqmt", "Area in Sq. Mtr."), ("area_sqyd", "Area in Sq. Yard"), ("status", "Plot Status"),
+    ("project_name", "Project Name"), ("company_name", "Company Name"), ("block", "Block"),
+    ("company_address", "Company Address"), ("payment_plan", "Payment Plan"), ("client_name", "Client Name"),
+    ("phone", "Phone"), ("booking_date", "Booking Date"), ("alternative_number", "Alternative Number"),
+    ("email", "Email ID"), ("co_applicant_email", "Co-applicant Email"), ("address", "Address"),
+    ("co_applicant_address", "Co-applicant Address"), ("plot_address", "Plot Address"),
 )
+EXTRA_CSV_COLUMNS = (
+    ("id", "Plot ID"), ("unit_type", "Type"), ("city", "City"), ("locality", "Locality"),
+    ("sale_source", "Sale Source"), ("status_note", "Status Note"),
+    ("last_changed_at", "Status Changed At"), ("last_changed_by_name", "Status Changed By"),
+)
+CSV_COLUMNS = CLIENT_CSV_COLUMNS + EXTRA_CSV_COLUMNS
+CSV_COLUMN_KEYS = tuple(key for key, _ in CSV_COLUMNS)
+DEFAULT_CSV_COLUMNS = tuple(key for key, _ in CLIENT_CSV_COLUMNS)
+
+# Plot Status as the admin panel shows it.
+STATUS_LABELS = {
+    "available": "Available", "held": "On Hold", "reserved": "Reserved by Partner",
+    "pending_kyc_review": "Booked (KYC Review)", "booked": "Booked", "sold": "Sold",
+}
 
 
 def _text(value) -> str:
@@ -283,23 +295,30 @@ def safe_row(row: dict) -> dict:
     return {k: csv_safe(v) for k, v in row.items()}
 
 
-def _csv_cell(value):
+def _csv_cell(key, value):
     if value is None:
         return ""
+    if key == "status":
+        return STATUS_LABELS.get(value, value)
     if isinstance(value, datetime):
-        return value.isoformat()
+        moment = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return moment.astimezone(IST).strftime("%Y-%m-%d %H:%M")      # as the panel shows it
     if isinstance(value, float) and value.is_integer():
         return str(int(value)) if abs(value) < 1e15 else str(value)
     return value
 
 
-def to_csv(rows) -> str:
+def to_csv(rows, columns=None) -> str:
     """The export as CSV text: a UTF-8 BOM (so Excel reads the encoding), the
-    header, then one line per row. Rows must already be safe_row()-ed."""
+    header, then one line per row. ``columns``: the row keys to include (any
+    order, unknown keys ignored); the file keeps CSV_COLUMNS order. Default:
+    the client's sheet columns. Rows must already be safe_row()-ed."""
+    wanted = set(columns) if columns else set(DEFAULT_CSV_COLUMNS)
+    chosen = [(key, header) for key, header in CSV_COLUMNS if key in wanted]
     out = io.StringIO()
-    out.write("﻿")
+    out.write("\ufeff")
     writer = csv.writer(out, lineterminator="\r\n")
-    writer.writerow([header for _, header in CSV_COLUMNS])
+    writer.writerow([header for _, header in chosen])
     for row in rows:
-        writer.writerow([_csv_cell(row.get(key)) for key, _ in CSV_COLUMNS])
+        writer.writerow([_csv_cell(key, row.get(key)) for key, _ in chosen])
     return out.getvalue()
