@@ -626,3 +626,24 @@ class persistenceInventory:
             except Exception:
                 db.rollback()
                 raise
+
+    def admin_export_links(self, payment_ids, customer_ids) -> dict:
+        """What the Inventory CSV export needs beyond the plot rows, for one page
+        of plots, in four batched reads: booking payments (+ booking row), the
+        booking application forms by payment and by customer, and the customers."""
+        payment_ids = sorted({str(i) for i in payment_ids or () if i})
+        links = {"payments": [], "forms_by_payment": [], "forms_by_owner": [], "customers": []}
+        with self._session_factory() as db:
+            def fetch(name, ids):
+                if not ids:
+                    return []
+                query = text(self._q(name)).bindparams(bindparam("ids", expanding=True))
+                return [dict(r) for r in db.execute(query, {"ids": ids}).mappings().all()]
+
+            links["payments"] = fetch("export_booking_payments", payment_ids)
+            links["forms_by_payment"] = fetch("export_forms_by_payment", payment_ids)
+            owners = sorted({str(i) for i in customer_ids or () if i}
+                            | {str(p["customer_id"]) for p in links["payments"] if p.get("customer_id")})
+            links["forms_by_owner"] = fetch("export_forms_by_owner", owners)
+            links["customers"] = fetch("export_customers", owners)
+        return links
