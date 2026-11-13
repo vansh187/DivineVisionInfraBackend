@@ -1,7 +1,8 @@
 import logging
+from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from DivineDTO.models import (
     AdminInventoryExportResponseDTO, AdminInventoryListResponseDTO, AdminInventoryProjectsResponseDTO,
@@ -44,6 +45,28 @@ def list_inventory(
         raise HTTPException(status_code=500, detail="internal_error")
 
 
+# Declared before /{inventory_id} so "export.csv" isn't read as a plot id.
+@router.get("/export.csv", response_class=Response,
+            responses={200: {"content": {"text/csv": {}}, "description": "The CSV file"}})
+def export_inventory_csv(
+    project_name: Optional[str] = Query(None, max_length=150, description="Exact project name"),
+    status: Optional[InventoryStatusLiteral] = Query(None),
+    search: Optional[str] = Query(None, max_length=50, description="Matches plot number or block"),
+    current_admin: dict = Depends(get_current_admin),
+):
+    """The whole Inventory export as one CSV download, with the same filters as
+    the list: every matching plot, read in one go (no paging). Text a
+    spreadsheet would run as a formula starts with an apostrophe. Admin-only."""
+    try:
+        body = _service.export_csv(project_name=project_name, status=status, search=search)
+    except Exception:
+        logger.exception("admin_inventory_export_csv_failed")
+        raise HTTPException(status_code=500, detail="internal_error")
+    filename = f"inventory-{datetime.now(timezone.utc).strftime('%Y-%m-%d')}.csv"
+    return Response(content=body.encode("utf-8"), media_type="text/csv; charset=utf-8",
+                    headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
 # Declared before /{inventory_id} so "export" isn't read as a plot id.
 @router.get("/export", response_model=AdminInventoryExportResponseDTO)
 def export_inventory(
@@ -56,7 +79,9 @@ def export_inventory(
 ):
     """Rows for the Inventory CSV export, paged like the list and with the same
     filters: each plot with its company, and for a sold / booked plot its
-    payment plan, buyer, co-applicant and booking date. Admin-only."""
+    payment plan, buyer, co-applicant and booking date. Text values are
+    CSV-safe already (see /export.csv, which returns the whole file in one
+    request and is the better choice for a download). Admin-only."""
     try:
         return _service.export_units(project_name=project_name, status=status, search=search,
                                      page=page, page_size=page_size)

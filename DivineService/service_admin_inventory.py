@@ -13,7 +13,7 @@ from decimal import Decimal
 from DivineDTO.models import INVENTORY_STATUSES, MANUAL_INVENTORY_STATUSES as MANUAL_STATUSES
 from Divinepersistence import persistenceAdmin, persistenceInventory
 from Divinepersistence.persistence_inventory import status_actor
-from DivineService.inventory_export import ExportLinks, export_row
+from DivineService.inventory_export import ExportLinks, export_row, safe_row, to_csv
 
 logger = logging.getLogger(__name__)
 
@@ -154,19 +154,33 @@ class serviceAdminInventory:
         rows, pagination = self._page(project_name, status, search, page, page_size)
         return {"items": [self._unit(r) for r in rows], "pagination": pagination}
 
-    def export_units(self, project_name: str = None, status: str = None, search: str = None,
-                     page: int = 1, page_size: int = 100) -> dict:
-        """One page of the Inventory CSV export: the same plots and filters as
-        list_units, plus company, payment plan, buyer, co-applicant and booking
-        date (see DivineService/inventory_export.py)."""
-        rows, pagination = self._page(project_name, status, search, page, page_size)
+    def _export_items(self, rows) -> list:
+        """Export rows for these plots - plot, company, payment plan, buyer,
+        co-applicant and booking date (see DivineService/inventory_export.py) -
+        each text value CSV-safe."""
         units = [dict(vars(r)) for r in rows]
         links = ExportLinks(self._persistence.admin_export_links(
             payment_ids=[u.get("booked_payment_id") for u in units],
             customer_ids=[u.get("booked_by") for u in units],
         ))
-        items = [{**self._unit(r), **export_row(u, links)} for r, u in zip(rows, units)]
-        return {"items": items, "pagination": pagination}
+        return [safe_row({**self._unit(r), **export_row(u, links)}) for r, u in zip(rows, units)]
+
+    def export_units(self, project_name: str = None, status: str = None, search: str = None,
+                     page: int = 1, page_size: int = 100) -> dict:
+        """One page of the Inventory export as JSON: the same plots and filters
+        as list_units, plus the export fields."""
+        rows, pagination = self._page(project_name, status, search, page, page_size)
+        return {"items": self._export_items(rows), "pagination": pagination}
+
+    def export_csv(self, project_name: str = None, status: str = None, search: str = None) -> str:
+        """The whole Inventory export as one CSV file: every plot matching the
+        filters, read in a single statement (so the file is one consistent
+        picture, with no paging to repeat or skip a plot)."""
+        project_name = (project_name or "").strip() or None
+        search = (search or "").strip() or None
+        rows, _ = self._persistence.admin_list_units(
+            project_name=project_name, status=status, search=search, limit=None)
+        return to_csv(self._export_items(rows))
 
     def get_unit(self, inventory_id: str, unit=None) -> dict:
         """``unit``: the plot row when the caller already has it (saves a read,

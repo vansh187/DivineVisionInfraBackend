@@ -174,3 +174,88 @@ def test_customer_account_fills_what_the_form_lacks():
 def test_unknown_project_gets_no_company_and_bad_form_json_is_ignored():
     assert company_for_project("Palm County") == ("", "")
     assert load_form("{not json") == {} and load_form('["a"]') == {}
+
+
+# ---- review fixes -------------------------------------------------------------
+def test_booking_date_is_the_payment_date_in_ist_like_the_letters():
+    # 01:30 IST on 5 Nov is 20:00 UTC on 4 Nov - the letter says 05-11-2026.
+    links = ExportLinks({"payments": [{"payment_id": "P1", "customer_id": "C1", "notes": None,
+                                       "payment_created_date": datetime(2026, 11, 4, 20, 0)}]})
+    unit = {"unit_number": "A-1", "project_name": OPS, "booked_payment_id": "P1",
+            "booked_at": datetime(2026, 11, 9, 10, 0)}       # e.g. the form upload day
+    assert buyer_fields(unit, links)["booking_date"] == "2026-11-05"
+    # Same for a string timestamp (sqlite), with or without an offset.
+    links.payments["P1"]["payment_created_date"] = "2026-11-04T20:00:00+00:00"
+    assert buyer_fields(unit, links)["booking_date"] == "2026-11-05"
+
+
+def test_paid_plot_without_a_booking_row_still_gets_buyer_and_payment_date():
+    links = ExportLinks({
+        "payments": [{"payment_id": "P2", "customer_id": None, "owner_id": "C7", "owner_role": "customer",
+                      "notes": None, "payment_created_date": datetime(2026, 10, 1, 6, 0)}],
+        "customers": [{"id": "C7", "first_name": "Isha", "last_name": "Rao", "email": "isha@example.com",
+                       "phone": "9000000777"}],
+    })
+    fields = buyer_fields({"unit_number": "A-2", "project_name": OPS, "booked_payment_id": "P2"}, links)
+    assert fields["client_name"] == "Isha Rao" and fields["booking_date"] == "2026-10-01"
+
+
+def test_offline_buyer_date_comes_from_their_form_with_the_letter_keys():
+    doc = {"owner_id": "C8", "project_id": "suraksha-enclave",
+           "form_data": {"unitNo": "C-5", "date": "05.11.2026", "coApplicantCorrespondenceSameAsPermanent": "y",
+                         "coApplicantPermanentAddress": "Perm", "coApplicantCorrespondenceAddress": "Corr"}}
+    links = ExportLinks({"forms_by_owner": [doc]})
+    fields = buyer_fields({"unit_number": "C-5", "project_name": SURAKSHA, "booked_by": "C8",
+                           "booked_at": datetime(2026, 12, 1)}, links)
+    assert fields["booking_date"] == "2026-11-05"           # 'date' is a demand-letter key
+    assert fields["co_applicant_address"] == "Perm"         # 'y' is truthy, as on the letter
+
+
+def test_form_matches_when_any_named_project_is_the_plots_project():
+    from DivineService.inventory_export import form_matches_unit
+    unit = {"unit_number": "A-7", "project_name": OPS}
+    assert form_matches_unit({"project_id": "divine-greens", "form_data": {"unitNo": "A7"}}, unit)
+    assert form_matches_unit({"project_id": "wrong-id", "form_data": {"unitNo": "A-7",
+                                                                      "projectId": "ops-divine-greens"}}, unit)
+    assert form_matches_unit({"project_id": None, "form_data": {"unitNo": "A-7"}}, unit)
+    assert not form_matches_unit({"project_id": "suraksha-enclave", "form_data": {"unitNo": "A-7"}}, unit)
+    assert not form_matches_unit({"project_id": "ops-divine-greens", "form_data": {"unitNo": "A-8"}}, unit)
+
+
+def test_text_a_spreadsheet_would_run_is_made_safe():
+    from DivineService.inventory_export import csv_safe, safe_row
+    assert csv_safe('=HYPERLINK("http://evil","x")') == '\'=HYPERLINK("http://evil","x")'
+    assert [csv_safe(v) for v in ("+919876543210", "-1", "@SUM(A1)", "\tx", "Neha")] == [
+        "'+919876543210", "'-1", "'@SUM(A1)", "'\tx", "Neha"]
+    assert safe_row({"a": 7.45, "b": None, "c": "=1+1"}) == {"a": 7.45, "b": None, "c": "'=1+1"}
+
+
+def test_paging_across_projects_never_repeats_or_skips_a_plot():
+    _unit(OPS, "C-12")                                        # same plot number as Suraksha's C-12
+    first = client.get("/admin/inventory/export", params={"page_size": 100}, headers=_admin()).json()
+    expected = [r["id"] for r in first["items"]]
+    paged = []
+    for page in range(1, first["pagination"]["total_items"] + 1):
+        res = client.get("/admin/inventory/export", params={"page": page, "page_size": 1}, headers=_admin())
+        paged.extend(r["id"] for r in res.json()["items"])
+    assert paged == expected and len(set(paged)) == len(paged)
+
+
+def test_csv_download_is_one_file_with_header_and_safe_cells():
+    import csv as csv_module
+    import io
+    assert client.get("/admin/inventory/export.csv").status_code == 401
+    res = client.get("/admin/inventory/export.csv", params={"project_name": SURAKSHA}, headers=_admin())
+    assert res.status_code == 200, res.text
+    assert res.headers["content-type"].startswith("text/csv")
+    assert res.headers["content-disposition"].startswith('attachment; filename="inventory-')
+    body = res.content.decode("utf-8")
+    assert body.startswith("﻿")
+    lines = list(csv_module.reader(io.StringIO(body.lstrip("﻿"))))
+    header, rows = lines[0], lines[1:]
+    assert header[:4] == ["Plot ID", "Project", "Block", "Plot No"]
+    by_plot = {r[header.index("Plot No")]: dict(zip(header, r)) for r in rows}
+    assert set(by_plot) == {"C-1", "C-12"}
+    assert by_plot["C-12"]["Client Name"] == "Mr. Dheeraj Nirwal"
+    assert by_plot["C-1"]["Client Name"] == "" and by_plot["C-1"]["Width (m)"] == "7.45"
+    assert by_plot["C-1"]["Company Name"] == "Rama Krishna Buildwell Pvt. Ltd."

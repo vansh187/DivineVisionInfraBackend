@@ -25,6 +25,22 @@ logger = logging.getLogger(__name__)
 
 _ASSETS = os.path.join(os.path.dirname(__file__), "assets")
 
+# Each project's office: on its letters and exports, and where a cash refund
+# is picked up. Env-overridable.
+OPS_OFFICE_ADDRESS_DEFAULT = "OPS Divine Greens - Sec-16, Taraori, Karnal, Haryana 132116"
+SURAKSHA_OFFICE_ADDRESS_DEFAULT = ("Suraksha Enclave Site Office - Village Garhi Kesri, Sector-15, "
+                                   "Ganaur, Sonipat, Haryana")
+
+
+def project_office_address(project_name) -> str:
+    """The office for a project: Suraksha Enclave -> the Ganaur site office;
+    anything else (OPS Divine Greens, blank, unknown) -> the OPS Divine Greens
+    office. Env is read on each call, so an override needs no restart."""
+    if "suraksha" in str(project_name or "").lower():
+        return os.getenv("DIVINE_SURAKSHA_OFFICE_ADDRESS", SURAKSHA_OFFICE_ADDRESS_DEFAULT)
+    return os.getenv("DIVINE_PROJECT_ADDRESS", OPS_OFFICE_ADDRESS_DEFAULT)
+
+
 # OPS Divine Greens (KCG Resorts) - unchanged defaults, still env-overridable.
 COMPANY = {
     "name": os.getenv("DIVINE_COMPANY_NAME", "KCG Resorts Pvt. Ltd."),
@@ -41,8 +57,7 @@ COMPANY = {
     "bank_ifsc": os.getenv("DIVINE_BANK_IFSC", "ICIC0003703"),
     "mobiles": os.getenv("DIVINE_COMPANY_MOBILES", "+91-92549 72701, +91-74282 91303"),
     "interest_pa": os.getenv("DIVINE_DELAY_INTEREST_PA", "18"),
-    "address_line": os.getenv("DIVINE_PROJECT_ADDRESS",
-                              "OPS Divine Greens - Sec-16, Taraori, Karnal, Haryana 132116"),
+    "address_line": os.getenv("DIVINE_PROJECT_ADDRESS", OPS_OFFICE_ADDRESS_DEFAULT),
 }
 
 _OPS_PROFILE = {
