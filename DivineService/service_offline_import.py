@@ -39,6 +39,10 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 
 from sqlalchemy import text
+from Divinepersistence.persistence_inventory import (
+    PLOT_REMOVED, SOURCE_ADMIN_PANEL, SOURCE_SHEET_SYNC, SOURCE_SYNC_ROLLBACK, SOURCE_TEST_BOOKING_CLEANUP,
+    InventoryStatusLogModel, record_status_change, status_actor,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -334,6 +338,34 @@ _RESTORABLE = ("status", "unit_number", "width_mtr", "length_mtr", "area_sqmt", 
                "booked_by", "reserved_by_broker_id", "reserved_at", "reserved_until")
 
 
+_SHEET_SYNC_ACTOR = status_actor("system", None, "Sheet sync")
+_BOOKING_CLEANUP_ACTOR = status_actor("system", None, "Website booking cleanup")
+
+
+def _log_status(conn, **change):
+    """Permanent plot status history (divine_inventory_status_log). The table is
+    created first if this CLI run beat the app's create_all() to it."""
+    record_status_change(conn, **change)
+
+
+def _admin_set_ids(conn, project_name) -> set:
+    """Plots of the project whose latest status change was made by hand in the
+    admin panel. The sheet sync never overwrites those: it reports a conflict
+    for the client and the admin to resolve."""
+    from sqlalchemy import inspect
+    if not inspect(conn).has_table(InventoryStatusLogModel.__tablename__):
+        return set()
+    rows = conn.execute(text(
+        "SELECT inventory_id FROM ("
+        "  SELECT inventory_id, source, ROW_NUMBER() OVER ("
+        "    PARTITION BY inventory_id ORDER BY changed_at DESC, id DESC) AS rn"
+        "  FROM divine_inventory_status_log"
+        "  WHERE inventory_id IN (SELECT id FROM divine_project_inventory WHERE project_name = :p)"
+        ") latest WHERE rn = 1 AND source = :source"
+    ), {"p": project_name, "source": SOURCE_ADMIN_PANEL}).all()
+    return {r[0] for r in rows}
+
+
 def _snapshot(row) -> dict:
     return {k: row.get(k) for k in _RESTORABLE}
 
@@ -410,6 +442,7 @@ class InventorySheetSync:
                 return report
 
             booking_refs = self._booking_refs(conn, [r["id"] for r in db_rows])
+            admin_set = _admin_set_ids(conn, project_name)
             planned = []   # callables run only when applying
             matched = set()
             for r in records:
@@ -444,7 +477,8 @@ class InventorySheetSync:
                     planned.append(("insert", sheet_plot, desired, note, dims))
                     continue
                 matched.add(row["id"])
-                planned.extend(self._plan_existing(report, row, sheet_plot, desired, note, dims, booking_refs))
+                planned.extend(self._plan_existing(report, row, sheet_plot, desired, note, dims, booking_refs,
+                                                   admin_set))
 
             for row in db_rows:
                 if row["id"] in matched:
@@ -452,6 +486,10 @@ class InventorySheetSync:
                 plot = row["unit_number"]
                 if row["status"] in PROTECTED_STATUSES:
                     report.add("CONFLICT", plot, f"not in sheet but '{row['status']}' in app - kept")
+                    continue
+                if row["id"] in admin_set:
+                    report.add("CONFLICT", plot,
+                               f"not in sheet but set to '{row['status']}' in the admin panel - kept")
                     continue
                 if row["status"] == "held" and (row.get("status_note") or "").startswith("Not in client sheet"):
                     continue
@@ -466,7 +504,8 @@ class InventorySheetSync:
                 report.counts_after = {}
         return report
 
-    def _plan_existing(self, report, row, sheet_plot, desired, note, dims, booking_refs):
+    def _plan_existing(self, report, row, sheet_plot, desired, note, dims, booking_refs,
+                       admin_set=frozenset()):
         steps = []
         plot = row["unit_number"]
         if plot != sheet_plot:
@@ -483,6 +522,11 @@ class InventorySheetSync:
             else:
                 report.add("CONFLICT", sheet_plot,
                            f"sheet says {desired} but plot is '{current}' in the app - kept, resolve with client")
+        elif row["id"] in admin_set:
+            if current != desired:
+                report.add("CONFLICT", sheet_plot,
+                           f"sheet says {desired} but an admin set '{current}' in the admin panel - kept, "
+                           "resolve with client")
         else:
             want_source = "offline" if desired == "sold" else None
             if current != desired or (row.get("sale_source") or None) != want_source:
@@ -550,6 +594,11 @@ class InventorySheetSync:
                 "note": note, "now": now})
             _history(conn, report.batch_id, source, new_id, project_name, plot, None, status,
                      new_unit_number=plot, note="insert")
+            _log_status(
+                conn, inventory_id=new_id, old_status=None, new_status=status, source=SOURCE_SHEET_SYNC,
+                actor=_SHEET_SYNC_ACTOR, note=f"Added from the client sheet ({note})",
+                project_name=project_name, unit_number=plot, changed_at=now,
+            )
             return
         row = step[1]
         snap = _snapshot(row)
@@ -574,15 +623,22 @@ class InventorySheetSync:
                    "reserved_by_broker_id = NULL, reserved_at = NULL, reserved_until = NULL")
             if clear:
                 sql += ", booked_at = NULL, booked_payment_id = NULL, booked_by = NULL"
-            # Guard: never overwrite a plot that turned app-active since planning.
-            sql += " WHERE id = :id AND status NOT IN ('booked', 'pending_kyc_review', 'reserved')"
+            # Guard: only while the plot still has the status it was planned
+            # from - never over a booking, reservation or admin change made
+            # since planning.
+            sql += " WHERE id = :id AND status = :planned_status"
             res = conn.execute(text(sql), {"status": status, "sale_source": sale_source, "note": note,
-                                           "now": now, "id": row["id"]})
+                                           "now": now, "id": row["id"], "planned_status": row["status"]})
             if res.rowcount:
                 _history(conn, report.batch_id, source, row["id"], project_name, row["unit_number"],
                          row["status"], status, old_values=snap, note=note)
+                _log_status(
+                    conn, inventory_id=row["id"], old_status=row["status"], new_status=status,
+                    source=SOURCE_SHEET_SYNC, actor=_SHEET_SYNC_ACTOR, note=note or f"Batch {report.batch_id}",
+                    project_name=project_name, unit_number=row["unit_number"],
+                )
             else:
-                report.warnings.append(f"{row['unit_number']}: became app-active during the run - left unchanged")
+                report.warnings.append(f"{row['unit_number']}: status changed during the run - left unchanged")
         elif kind == "dims":
             changed = step[2]
             sets = ", ".join(f"{k} = :{k}" for k in changed)
@@ -606,31 +662,54 @@ class InventorySheetSync:
                 return report
             for h in hist:
                 if h["note"] == "insert":
+                    # Only while it still has the status the batch gave it: a plot
+                    # booked, reserved or changed by an admin since is kept.
                     res = conn.execute(text(
-                        "DELETE FROM divine_project_inventory WHERE id = :id "
-                        "AND status NOT IN ('booked', 'pending_kyc_review', 'reserved')"), {"id": h["inventory_id"]})
+                        "DELETE FROM divine_project_inventory WHERE id = :id AND status = :batch_status"),
+                        {"id": h["inventory_id"], "batch_status": h["new_status"]})
                     report.add("DELETE" if res.rowcount else "KEPT", h["unit_number"] or "",
-                               "" if res.rowcount else "app-active since import")
+                               "" if res.rowcount else "changed since import")
+                    if res.rowcount:
+                        _log_status(
+                            conn, inventory_id=h["inventory_id"], old_status=h["new_status"],
+                            new_status=PLOT_REMOVED, source=SOURCE_SYNC_ROLLBACK, actor=_SHEET_SYNC_ACTOR,
+                            note=f"Batch {batch_id} rolled back: plot removed",
+                            project_name=h["project_name"], unit_number=h["unit_number"],
+                        )
                     continue
                 old = json.loads(h["old_values"] or "{}")
                 if not old:
                     continue
                 cols = [k for k in _RESTORABLE if k in old]
                 sets = ", ".join(f"{k} = :{k}" for k in cols)
-                # Same guard as the forward step: a plot booked / held for KYC /
-                # reserved through the app after this batch is never rolled back
-                # (that would erase a real booking).
+                current = conn.execute(text(
+                    "SELECT status, project_name, unit_number FROM divine_project_inventory WHERE id = :id"),
+                    {"id": h["inventory_id"]}).mappings().first()
+                # Only while the plot still has the status this batch left it at
+                # (history is undone newest first, so that is this step's
+                # new_status). A plot booked / held for KYC / reserved through
+                # the app, or changed by an admin, after this batch is never
+                # rolled back - that would erase a real booking or decision.
                 res = conn.execute(text(
-                    f"UPDATE divine_project_inventory SET {sets} WHERE id = :id "
-                    "AND (status NOT IN ('booked', 'pending_kyc_review', 'reserved') OR status = :old_status)"),
-                    {**{k: old[k] for k in cols}, "id": h["inventory_id"], "old_status": old.get("status")})
+                    f"UPDATE divine_project_inventory SET {sets} WHERE id = :id AND status = :batch_status"),
+                    {**{k: old[k] for k in cols}, "id": h["inventory_id"], "batch_status": h["new_status"]})
                 if not res.rowcount:
-                    report.add("KEPT", h["unit_number"] or "", "app-active since the sync - not rolled back")
-                    report.warnings.append(f"{h['unit_number']}: booked/reserved in the app after this batch - left as is")
+                    now_status = current["status"] if current else "missing"
+                    report.add("KEPT", h["unit_number"] or "",
+                               f"changed since the sync (now '{now_status}') - not rolled back")
+                    report.warnings.append(
+                        f"{h['unit_number']}: status changed after this batch (now '{now_status}') - left as is")
                     continue
                 if h["note"] == "rename":
                     conn.execute(text("UPDATE divine_bookings SET unit_number = :u WHERE inventory_id = :id"),
                                  {"u": old.get("unit_number"), "id": h["inventory_id"]})
+                if current and "status" in old:
+                    _log_status(
+                        conn, inventory_id=h["inventory_id"], old_status=current["status"],
+                        new_status=old["status"], source=SOURCE_SYNC_ROLLBACK, actor=_SHEET_SYNC_ACTOR,
+                        note=f"Batch {batch_id} rolled back", project_name=current["project_name"],
+                        unit_number=old.get("unit_number") or current["unit_number"],
+                    )
                 report.add("RESTORE", h["unit_number"] or "", h["note"] or "")
             conn.execute(text("DELETE FROM divine_inventory_status_history WHERE batch_id = :b"), {"b": batch_id})
         return report
@@ -1207,5 +1286,11 @@ class WebsiteBookingCleanup:
                     "UPDATE divine_project_inventory SET status = 'available', booked_at = NULL, "
                     f"booked_payment_id = NULL, booked_by = NULL{extra}, last_updated_date = :now "
                     "WHERE id = :id"), {"id": u["id"], "now": _now()})
+                _log_status(
+                    conn, inventory_id=u["id"], old_status=u.get("status"), new_status="available",
+                    source=SOURCE_TEST_BOOKING_CLEANUP, actor=_BOOKING_CLEANUP_ACTOR,
+                    note="Website test booking cleared", project_name=u.get("project_name"),
+                    unit_number=u.get("unit_number"),
+                )
             report.extra["backup"] = backup
         return report

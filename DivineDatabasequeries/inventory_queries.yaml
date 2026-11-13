@@ -81,7 +81,8 @@ expire_stale_units: |
   UPDATE divine_project_inventory
   SET status = 'available', reserved_by_broker_id = NULL, reserved_at = NULL, reserved_until = NULL,
       last_updated_date = :now
-  WHERE status = 'reserved' AND reserved_until < :now;
+  WHERE status = 'reserved' AND reserved_until < :now
+  RETURNING id, project_name, unit_number, status;
 
 expire_stale_reservation_history: |
   UPDATE divine_inventory_reservations
@@ -118,6 +119,9 @@ list_reservations_for_broker: |
   WHERE status = 'reserved' AND reserved_by_broker_id = :broker_id
   ORDER BY reserved_until ASC;
 
+# The status change: only an 'available' plot. A re-run by the payment that
+# already booked it is book_unit_rerun (same columns, status unchanged), kept
+# separate so only a real change writes a status-history row.
 book_unit: |
   UPDATE divine_project_inventory
   SET status = 'booked',
@@ -128,11 +132,20 @@ book_unit: |
       reserved_at = NULL,
       reserved_until = NULL,
       last_updated_date = :now
-  WHERE id = :id
-    AND (
-      status = 'available'
-      OR (status = 'booked' AND booked_payment_id = :payment_id)
-    )
+  WHERE id = :id AND status = 'available'
+  RETURNING *;
+
+book_unit_rerun: |
+  UPDATE divine_project_inventory
+  SET status = 'booked',
+      booked_at = :now,
+      booked_payment_id = :payment_id,
+      booked_by = :customer_id,
+      reserved_by_broker_id = NULL,
+      reserved_at = NULL,
+      reserved_until = NULL,
+      last_updated_date = :now
+  WHERE id = :id AND status = 'booked' AND booked_payment_id = :payment_id
   RETURNING *;
 
 unbook_unit: |
@@ -163,6 +176,7 @@ unbook_unit_for_payment: |
 # Payment settlement now HOLDS the unit for admin KYC review instead of
 # immediately booking it - book_unit (above) is unchanged/still used by the
 # broker-confirms-cash flow, which has no KYC review step.
+# Same split as book_unit / book_unit_rerun.
 hold_for_kyc_review: |
   UPDATE divine_project_inventory
   SET status = 'pending_kyc_review',
@@ -173,11 +187,20 @@ hold_for_kyc_review: |
       reserved_at = NULL,
       reserved_until = NULL,
       last_updated_date = :now
-  WHERE id = :id
-    AND (
-      status = 'available'
-      OR (status = 'pending_kyc_review' AND booked_payment_id = :payment_id)
-    )
+  WHERE id = :id AND status = 'available'
+  RETURNING *;
+
+hold_for_kyc_review_rerun: |
+  UPDATE divine_project_inventory
+  SET status = 'pending_kyc_review',
+      booked_at = :now,
+      booked_payment_id = :payment_id,
+      booked_by = :customer_id,
+      reserved_by_broker_id = NULL,
+      reserved_at = NULL,
+      reserved_until = NULL,
+      last_updated_date = :now
+  WHERE id = :id AND status = 'pending_kyc_review' AND booked_payment_id = :payment_id
   RETURNING *;
 
 confirm_booking_after_kyc: |
@@ -195,4 +218,77 @@ release_from_kyc_review: |
       booked_by = NULL,
       last_updated_date = :now
   WHERE id = :id AND status = 'pending_kyc_review' AND booked_payment_id = :payment_id
+  RETURNING *;
+
+# ---- Status history (divine_inventory_status_log) -------------------------
+# upsert_unit reads this first: whether the plot is new, and the status an
+# update starts from.
+get_unit_status_by_project_unit: |
+  SELECT id, project_name, unit_number, status FROM divine_project_inventory
+  WHERE project_name = :project_name AND unit_number = :unit_number;
+
+# ---- Admin panel: Inventory section --------------------------------------
+# Plot counts per (project, status); the service turns them into one row per
+# project with a count for every status in INVENTORY_STATUSES.
+admin_project_status_counts: |
+  SELECT project_name, status, COUNT(*) AS plots
+  FROM divine_project_inventory
+  GROUP BY project_name, status
+  ORDER BY project_name ASC;
+
+# Plot number order: block first, then shorter numbers before longer ones so
+# "A-9" sorts before "A-10". The search escapes '\', '%' and '_' (ESCAPE '\')
+# so the admin's text is matched literally, not as LIKE wildcards. Each plot's
+# latest change comes from admin_latest_changes, for this page's ids only.
+admin_list_units: |
+  SELECT u.*
+  FROM divine_project_inventory u
+  WHERE (:project_name IS NULL OR u.project_name = :project_name)
+    AND (:status IS NULL OR u.status = :status)
+    AND (:search IS NULL
+         OR lower(u.unit_number) LIKE '%' || replace(replace(replace(lower(:search), '\', '\\'), '%', '\%'), '_', '\_') || '%' ESCAPE '\'
+         OR lower(COALESCE(u.block, '')) LIKE '%' || replace(replace(replace(lower(:search), '\', '\\'), '%', '\%'), '_', '\_') || '%' ESCAPE '\')
+  ORDER BY COALESCE(u.block, '') ASC, LENGTH(u.unit_number) ASC, u.unit_number ASC
+  LIMIT :limit OFFSET :offset;
+
+admin_count_units: |
+  SELECT COUNT(*) AS total
+  FROM divine_project_inventory u
+  WHERE (:project_name IS NULL OR u.project_name = :project_name)
+    AND (:status IS NULL OR u.status = :status)
+    AND (:search IS NULL
+         OR lower(u.unit_number) LIKE '%' || replace(replace(replace(lower(:search), '\', '\\'), '%', '\%'), '_', '\_') || '%' ESCAPE '\'
+         OR lower(COALESCE(u.block, '')) LIKE '%' || replace(replace(replace(lower(:search), '\', '\\'), '%', '\%'), '_', '\_') || '%' ESCAPE '\');
+
+# Newest status-log row of each plot on one page (:ids expanded in Python).
+admin_latest_changes: |
+  SELECT inventory_id, changed_at, changed_by_name FROM (
+    SELECT inventory_id, changed_at, changed_by_name,
+      ROW_NUMBER() OVER (PARTITION BY inventory_id ORDER BY changed_at DESC, id DESC) AS rn
+    FROM divine_inventory_status_log
+    WHERE inventory_id IN :ids
+  ) latest
+  WHERE rn = 1;
+
+admin_status_history: |
+  SELECT * FROM divine_inventory_status_log
+  WHERE inventory_id = :inventory_id
+  ORDER BY changed_at DESC, id DESC;
+
+# Manual change from the admin panel. Only between the manual statuses
+# (:manual_statuses = MANUAL_INVENTORY_STATUSES, expanded in Python), only while the plot is still at the status the admin was looking at
+# (:expected_status), and never for a plot tied to a booking payment or an
+# offline buyer - those move through the booking / import flows.
+admin_set_status: |
+  UPDATE divine_project_inventory
+  SET status = :new_status,
+      sale_source = CASE WHEN :new_status = 'sold' THEN COALESCE(sale_source, 'offline') ELSE NULL END,
+      status_note = :note,
+      status_updated_at = :now,
+      last_updated_date = :now
+  WHERE id = :id
+    AND status = :expected_status
+    AND status IN :manual_statuses
+    AND booked_payment_id IS NULL
+    AND booked_by IS NULL
   RETURNING *;

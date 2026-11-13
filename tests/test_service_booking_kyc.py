@@ -91,7 +91,10 @@ def test_approve_version_conflict_rolls_back_with_unbook_not_release(monkeypatch
     except ValueError as e:
         assert str(e) == "version_conflict"
 
-    inventory.unbook_unit.assert_called_once_with(id="INV-1")
+    inventory.unbook_unit.assert_called_once_with(
+        id="INV-1", actor={"role": "admin", "id": "DV0001", "name": None}, source="kyc_approval",
+        note="Approval undone: the booking changed at the same time",
+    )
     inventory.release_from_kyc_review.assert_not_called()
     persistence.add_decision.assert_not_called()
 
@@ -115,7 +118,9 @@ def test_approve_happy_path():
 
     detail = svc.approve("BKG-1", admin_id="DV0001", note="All docs verified", expected_version=1)
 
-    inventory.confirm_booking_after_kyc.assert_called_once_with(id="INV-1", payment_id="pay1")
+    inventory.confirm_booking_after_kyc.assert_called_once_with(
+        id="INV-1", payment_id="pay1", actor={"role": "admin", "id": "DV0001", "name": None}, source="kyc_approval",
+    )
     persistence.update_decision.assert_called_once_with(
         id="BKG-1", expected_version=1, status="booked", kyc_status="verified", admin_note="All docs verified")
     persistence.add_decision.assert_called_once_with(
@@ -165,7 +170,9 @@ def test_reject_releases_plot_and_initiates_refund():
 
     detail = svc.reject("BKG-1", admin_id="DV0001", note="Docs mismatch", expected_version=1)
 
-    inventory.release_from_kyc_review.assert_called_once_with(id="INV-1", payment_id="pay1")
+    inventory.release_from_kyc_review.assert_called_once_with(
+        id="INV-1", payment_id="pay1", actor={"role": "admin", "id": "DV0001", "name": None}, source="kyc_rejection",
+    )
     payment_service.initiate_refund.assert_called_once_with("pay1", reason="Docs mismatch")
     assert detail["status"] == "rejected"
     assert detail["kyc_status"] == "rejected"
@@ -236,7 +243,9 @@ def test_cancel_an_already_booked_plot_unbooks_instead_of_releasing_from_review(
 
     detail = svc.cancel("BKG-1", admin_id="DV0001", note="Customer asked to cancel", expected_version=2)
 
-    inventory.unbook_unit_for_payment.assert_called_once_with(id="INV-1", payment_id="pay1")
+    inventory.unbook_unit_for_payment.assert_called_once_with(
+        id="INV-1", payment_id="pay1", actor={"role": "admin", "id": "DV0001", "name": None}, source="booking_cancellation",
+    )
     inventory.unbook_unit.assert_not_called()
     inventory.release_from_kyc_review.assert_not_called()
     persistence.update_decision.assert_called_once_with(

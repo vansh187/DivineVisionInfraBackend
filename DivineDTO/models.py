@@ -4,6 +4,14 @@ from datetime import datetime
 
 BROKER_PROJECTS = ("suraksha-enclave", "ops-divine-greens")
 
+# Every divine_project_inventory.status, and the ones an admin may set by hand
+# in the Inventory section. The others belong to the booking flow
+# (pending_kyc_review, booked) and to channel-partner reservations (reserved).
+# The single source for the DTO Literals below, the admin service and the
+# admin_set_status guard.
+INVENTORY_STATUSES = ("available", "held", "reserved", "pending_kyc_review", "booked", "sold")
+MANUAL_INVENTORY_STATUSES = ("available", "held", "sold")
+
 
 def _require_non_blank(v: str, min_length: int = 1) -> str:
     """Shared body for every "strip, then must be non-empty (or at least
@@ -1231,3 +1239,81 @@ class SupportTicketResponseDTO(BaseModel):
     raised_by: Optional[str] = None
     submitted_date: datetime
     email_sent: bool
+
+
+# ---- Admin: Inventory section ----------------------------------------------
+
+InventoryStatusLiteral = Literal[INVENTORY_STATUSES]
+InventoryManualStatusLiteral = Literal[MANUAL_INVENTORY_STATUSES]
+
+
+class AdminInventoryProjectDTO(BaseModel):
+    project_name: str
+    total: int
+    available: int
+    held: int
+    reserved: int
+    pending_kyc_review: int
+    booked: int
+    sold: int
+
+
+class AdminInventoryProjectsResponseDTO(BaseModel):
+    items: List[AdminInventoryProjectDTO]
+
+
+class AdminInventoryUnitDTO(BaseModel):
+    id: str
+    project_name: str
+    city: Optional[str] = None
+    locality: Optional[str] = None
+    block: Optional[str] = None
+    unit_number: str
+    unit_type: Optional[str] = None
+    width_mtr: Optional[float] = None
+    length_mtr: Optional[float] = None
+    area_sqmt: Optional[float] = None
+    area_sqyd: Optional[float] = None
+    status: str
+    sale_source: Optional[str] = None
+    status_note: Optional[str] = None
+    last_changed_at: Optional[datetime] = None
+    last_changed_by_name: Optional[str] = None
+
+
+class AdminInventoryListResponseDTO(BaseModel):
+    items: List[AdminInventoryUnitDTO]
+    pagination: PaginationDTO
+
+
+class AdminInventoryStatusChangeDTO(BaseModel):
+    id: str
+    old_status: Optional[str] = None
+    new_status: str
+    changed_by_role: str
+    changed_by_name: str
+    source: str
+    note: Optional[str] = None
+    changed_at: datetime
+
+
+class AdminInventoryUnitDetailDTO(AdminInventoryUnitDTO):
+    booked_at: Optional[datetime] = None
+    # Why the status can't be changed by hand right now, or None when it can.
+    status_lock: Optional[Literal["partner_reservation", "booking", "buyer_linked"]] = None
+    allowed_statuses: List[InventoryManualStatusLiteral]
+    history: List[AdminInventoryStatusChangeDTO]
+
+
+class AdminInventoryStatusUpdateDTO(BaseModel):
+    status: InventoryManualStatusLiteral
+    # The status the admin was looking at. If the plot has changed since, the
+    # request is refused (409 status_changed) instead of overwriting it.
+    expected_status: InventoryStatusLiteral
+    note: Optional[str] = Field(None, max_length=255)
+
+    @field_validator("note")
+    @classmethod
+    def _strip_note(cls, v):
+        v = (v or "").strip()
+        return v or None

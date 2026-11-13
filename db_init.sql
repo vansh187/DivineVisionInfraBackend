@@ -377,6 +377,27 @@ CREATE INDEX IF NOT EXISTS idx_divine_inventory_status_history_inventory
 CREATE INDEX IF NOT EXISTS idx_divine_inventory_status_history_batch
   ON divine_inventory_status_history (batch_id);
 
+-- Permanent history of every plot status change (before, after, who, when).
+-- Append-only: written in the same transaction as each status change.
+CREATE TABLE IF NOT EXISTS divine_inventory_status_log (
+  id varchar(36) PRIMARY KEY,
+  inventory_id varchar(36) NOT NULL,
+  project_name varchar(150),
+  unit_number varchar(20),
+  old_status varchar(20),
+  new_status varchar(20) NOT NULL,
+  changed_by_role varchar(20) NOT NULL,
+  changed_by_id varchar(64),
+  changed_by_name varchar(255) NOT NULL,
+  source varchar(40) NOT NULL,
+  note varchar(255),
+  changed_at timestamptz NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_divine_inventory_status_log_inventory_id
+  ON divine_inventory_status_log (inventory_id);
+CREATE INDEX IF NOT EXISTS ix_divine_inventory_status_log_changed_at
+  ON divine_inventory_status_log (changed_at);
+
 CREATE TABLE IF NOT EXISTS divine_inventory_reservations (
   id varchar(36) PRIMARY KEY,
   inventory_id varchar(36) NOT NULL REFERENCES divine_project_inventory(id),

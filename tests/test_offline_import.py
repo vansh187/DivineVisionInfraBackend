@@ -247,6 +247,24 @@ def test_sync_rollback_restores_previous_state(engine):
     assert q(engine, "SELECT * FROM divine_inventory_status_history") == []
 
 
+def test_sync_and_rollback_status_changes_stay_in_the_permanent_log(engine):
+    seed_unit(engine, "C1", status="available")
+    report = sync(engine, [inv_row("C1", "Sold")])
+    InventorySheetSync(engine).rollback(report.batch_id)
+    log = q(engine, "SELECT * FROM divine_inventory_status_log ORDER BY changed_at, id")
+    assert [(r["old_status"], r["new_status"], r["source"]) for r in log] == [
+        ("available", "sold", "sheet_sync"), ("sold", "available", "sync_rollback"),
+    ]
+    assert {r["changed_by_name"] for r in log} == {"Sheet sync"}
+    assert all(r["unit_number"] == "C1" and r["project_name"] == PROJECT for r in log)
+
+
+def test_sync_dry_run_writes_no_status_log(engine):
+    seed_unit(engine, "C1", status="available")
+    sync(engine, [inv_row("C1", "Sold")], apply=False)
+    assert q(engine, "SELECT * FROM divine_inventory_status_log") == []
+
+
 # --------------------------------------------------------------------------
 # B. Offline buyer import
 # --------------------------------------------------------------------------
@@ -524,6 +542,9 @@ def test_cleanup_removes_booking_data_and_frees_plots(engine):
     c9 = unit(engine, "C9")
     assert c9["status"] == "available" and c9["booked_by"] is None and c9["booked_payment_id"] is None
     assert unit(engine, "C10")["booked_by"] == "C22222"            # offline sale untouched
+    log = q(engine, "SELECT * FROM divine_inventory_status_log WHERE inventory_id = :i", i=inv_id)
+    assert [(r["old_status"], r["new_status"], r["source"], r["changed_by_name"]) for r in log] == [
+        ("pending_kyc_review", "available", "test_booking_cleanup", "Website booking cleanup")]
 
 
 # --------------------------------------------------------------------------
@@ -771,3 +792,92 @@ def test_profile_marks_imported_plot_finance_pending():
     assert booking.co_applicants == ["Asha"] and booking.applicant_name == "Dheeraj Nirwal"
     assert booking.plot_address.startswith("Plot No -C61")
     assert not booking.payment_schedule
+
+
+# --------------------------------------------------------------------------
+# Permanent status log: admin changes, creations, deletions, missing table
+# --------------------------------------------------------------------------
+
+def _admin_sets(engine, inv_id, old, new):
+    """What POST /admin/inventory/{id}/status does: the status plus its log row."""
+    from Divinepersistence.persistence_inventory import record_status_change, status_actor
+    with engine.begin() as c:
+        c.execute(text("UPDATE divine_project_inventory SET status = :s WHERE id = :i"), {"s": new, "i": inv_id})
+        record_status_change(c, inventory_id=inv_id, old_status=old, new_status=new, source="admin_panel",
+                             actor=status_actor("admin", "A00001", "Ritika Sharma"),
+                             changed_at=datetime.now(timezone.utc))
+
+
+def test_sync_keeps_a_status_an_admin_set_by_hand(engine):
+    on_sheet = seed_unit(engine, "C1", status="available")
+    off_sheet = seed_unit(engine, "C2", status="available")
+    _admin_sets(engine, on_sheet, "available", "held")
+    _admin_sets(engine, off_sheet, "available", "sold")
+    report = sync(engine, [inv_row("C1", "Available")])
+    conflicts = [(plot, msg) for kind, plot, msg in report.actions if kind == "CONFLICT"]
+    assert any(plot == "C1" and "admin panel" in msg for plot, msg in conflicts)
+    assert any(plot == "C2" and "admin panel" in msg for plot, msg in conflicts)
+    assert unit(engine, "C1")["status"] == "held" and unit(engine, "C2")["status"] == "sold"
+
+
+def test_rollback_never_overwrites_a_later_admin_change(engine):
+    inv_id = seed_unit(engine, "C1", status="available")
+    report = sync(engine, [inv_row("C1", "Sold")])
+    _admin_sets(engine, inv_id, "sold", "held")
+    rolled = InventorySheetSync(engine).rollback(report.batch_id)
+    assert any(kind == "KEPT" and "now 'held'" in msg for kind, _, msg in rolled.actions)
+    assert unit(engine, "C1")["status"] == "held"
+
+
+def test_sync_insert_and_its_rollback_are_both_in_the_log(engine):
+    report = sync(engine, [inv_row("C7", "Sold")])
+    inv_id = unit(engine, "C7")["id"]
+    InventorySheetSync(engine).rollback(report.batch_id)
+    assert unit(engine, "C7") is None
+    log = q(engine, "SELECT * FROM divine_inventory_status_log WHERE inventory_id = :i ORDER BY changed_at, id",
+            i=inv_id)
+    assert [(r["old_status"], r["new_status"], r["source"]) for r in log] == [
+        (None, "sold", "sheet_sync"), ("sold", "removed", "sync_rollback")]
+
+
+def test_ingest_creates_the_log_table_when_missing_and_logs_new_plots(tmp_path):
+    from Divinepersistence.persistence_inventory import InventoryStatusLogModel, persistenceInventory
+    eng = create_engine(f"sqlite:///{tmp_path / 'no_log.sqlite'}")
+    Base.metadata.create_all(bind=eng)
+    InventoryStatusLogModel.__table__.drop(bind=eng)
+    inv = persistenceInventory(session_factory=sessionmaker(bind=eng))
+    inv.upsert_unit(id="u1", project_name=PROJECT, city="Sonipat", unit_number="C1", status="available",
+                    area_sqmt=99.86, area_sqyd=119.43)
+    log = q(eng, "SELECT old_status, new_status, source FROM divine_inventory_status_log")
+    assert log == [{"old_status": None, "new_status": "available", "source": "inventory_ingest"}]
+
+
+def test_log_table_created_in_a_rolled_back_transaction_is_created_again(tmp_path):
+    from Divinepersistence.persistence_inventory import InventoryStatusLogModel, record_status_change
+    eng = create_engine(f"sqlite:///{tmp_path / 'ddl.sqlite'}")
+    Base.metadata.create_all(bind=eng)
+    InventoryStatusLogModel.__table__.drop(bind=eng)
+    change = dict(inventory_id="u1", old_status="available", new_status="held", source="sheet_sync")
+    with pytest.raises(RuntimeError):
+        with eng.begin() as c:
+            record_status_change(c, **change)
+            raise RuntimeError("batch failed later")
+    # SQLite DDL is transactional too: the table went with the rollback.
+    with eng.begin() as c:
+        record_status_change(c, **change)
+    assert len(q(eng, "SELECT * FROM divine_inventory_status_log")) == 1
+
+
+def test_book_and_hold_reruns_by_the_same_payment_log_nothing(engine, inventory):
+    booked = seed_unit(engine, "C40", status="available")
+    held = seed_unit(engine, "C41", status="available")
+    for _ in range(2):
+        assert inventory.book_unit(id=booked, payment_id="p-book", customer_id="C00001")
+        assert inventory.hold_for_kyc_review(id=held, payment_id="p-hold", customer_id="C00001")
+    log = q(engine, "SELECT inventory_id, old_status, new_status FROM divine_inventory_status_log "
+                    "WHERE inventory_id IN (:a, :b) ORDER BY inventory_id", a=booked, b=held)
+    assert [(r["old_status"], r["new_status"]) for r in log] == [
+        ("available", "booked"), ("available", "pending_kyc_review")]
+    # Another payment still can't take either plot.
+    assert inventory.book_unit(id=booked, payment_id="p-other") is None
+    assert inventory.hold_for_kyc_review(id=held, payment_id="p-other") is None
