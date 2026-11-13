@@ -13,7 +13,7 @@ def _service(plans=None):
     persistence = MagicMock()
     customer_persistence = MagicMock()
     plot_terms = MagicMock()
-    plot_terms.plan_labels_for_customers.return_value = plans or {}
+    plot_terms.plot_plans_for_customers.return_value = plans or {}
     return (serviceAdminCustomers(persistence, customer_persistence, plot_terms=plot_terms),
             persistence, customer_persistence)
 
@@ -69,21 +69,28 @@ def test_list_customers_formats_rows_into_plain_dicts_without_total_count():
     assert result["items"] == [{
         "id": "X1", "full_name": "A B", "email": "a@b.com", "phone": "123",
         "source": "WEBSITE", "status": "ACTIVE", "created_at": "2026-01-01", "last_activity_at": "2026-01-01",
-        "payment_plans": [],
+        "payment_plans": [], "plot_plans": [],
     }]
 
 
-def test_list_customers_carries_each_customers_payment_plans():
-    svc, persistence, _ = _service(plans={"X1": ["PP1", "PP3"]})
+def test_list_customers_maps_each_plot_to_its_payment_plan():
+    plots = [{"project_name": "Suraksha Enclave", "unit_number": "C16", "payment_plan": "PP1"},
+             {"project_name": "Suraksha Enclave", "unit_number": "C40", "payment_plan": None},
+             {"project_name": "Suraksha Enclave", "unit_number": "C88", "payment_plan": "PP3"},
+             {"project_name": "Suraksha Enclave", "unit_number": "C90", "payment_plan": "PP1"}]
+    svc, persistence, _ = _service(plans={"X1": {"plot_plans": plots, "payment_plans": ["PP1", "PP3"]}})
     persistence.list_customers.return_value = [_row(total_count=1)]
-    assert svc.list_customers()["items"][0]["payment_plans"] == ["PP1", "PP3"]
+    item = svc.list_customers()["items"][0]
+    assert item["plot_plans"] == plots
+    assert item["payment_plans"] == ["PP1", "PP3"]
 
 
 def test_list_customers_still_loads_when_the_plan_lookup_fails():
     svc, persistence, _ = _service()
-    svc._plot_terms.plan_labels_for_customers.side_effect = RuntimeError("db down")
+    svc._plot_terms.plot_plans_for_customers.side_effect = RuntimeError("db down")
     persistence.list_customers.return_value = [_row(total_count=1)]
-    assert svc.list_customers()["items"][0]["payment_plans"] == []
+    item = svc.list_customers()["items"][0]
+    assert item["payment_plans"] == [] and item["plot_plans"] == []
 
 
 def test_create_customer_rejects_email_already_used_as_username():

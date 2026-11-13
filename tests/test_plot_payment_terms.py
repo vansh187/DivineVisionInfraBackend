@@ -20,7 +20,7 @@ from Divinepersistence.persistence_document import persistenceDocument
 from Divinepersistence.persistence_inventory import persistenceInventory
 from DivineAPI.main import app, RateLimitMiddleware
 from DivineService.service_demand_letter import demand_letter_figures
-from DivineService.service_payment_plans import seed_plans_if_empty
+from DivineService.service_payment_plans import sync_plans
 from DivineService.service_plot_payment_terms import parse_booking_date, servicePlotPaymentTerms
 
 client = TestClient(app)
@@ -63,7 +63,9 @@ def setup_module(module):
     except Exception:
         pass
     PersistenceDB().create_tables()
-    seed_plans_if_empty()
+    # Always load PP1-PP4: the shared test database may still hold other modules'
+    # plans (it can't be deleted while open), and seeding only fills an empty catalogue.
+    sync_plans()
     B["asha"] = _buyer("Asha Verma", "9000000101", SURAKSHA, f"D7{T}", "Mrs. Asha Verma")
     B["rohit"] = _buyer("Rohit Mehra", "9000000102", SURAKSHA, f"D8{T}", "Mr. Rohit Mehra")
     B["karan"] = _buyer("Karan Malhotra", "9000000103", SURAKSHA, f"D9{T}", "Mr. Karan")
@@ -271,3 +273,199 @@ def test_offline_plots_count_under_their_plan_in_the_admin_plan_list():
     from Divinepersistence import persistencePaymentPlan
     counts = persistencePaymentPlan().count_plots_by_plan([PP1])
     assert counts[(PP1, pp1["version"])] >= 3
+
+
+def test_a_customer_with_several_plots_sees_each_plots_own_plan():
+    # One buyer, three plots: PP1 on one, PP3 on another, the third not linked yet.
+    owner = B["rohit"]["customer"]
+    extra = {}
+    for key in ("second", "third"):
+        plot = f"E{key[0].upper()}{T}"
+        unit_id = persistenceInventory().upsert_unit(
+            id=str(uuid.uuid4()), project_name=SURAKSHA, city="Ganaur", unit_number=plot,
+            area_sqmt=99.86, area_sqyd=119.43, status="sold").id
+        doc_id = str(uuid.uuid4())
+        persistenceDocument().create_document(
+            id=doc_id, owner_id=owner, owner_role="customer", document_type="project_booking_application",
+            storage_path=f"imported://t/{plot}", status="imported", project_id="suraksha-enclave",
+            form_data={"projectId": "suraksha-enclave", "project_name": SURAKSHA, "unitNo": plot,
+                       "applicantName": "Mr. Rohit Mehra", "source": "offline_import"})
+        with engine.begin() as conn:
+            conn.execute(text("UPDATE divine_project_inventory SET booked_by = :c WHERE id = :u"),
+                         {"c": owner, "u": unit_id})
+        extra[key] = {"customer": owner, "doc": doc_id, "plot": plot}
+    assert _put(extra["second"], payment_plan="PP3", booking_date="2026-04-10").status_code == 200
+
+    res = client.get("/admin/customers", params={"search": "Rohit Mehra"}, headers=_admin())
+    item = next(i for i in res.json()["items"] if i["id"] == owner)
+    by_plot = {p["unit_number"]: p["payment_plan"] for p in item["plot_plans"]}
+    assert by_plot == {B["rohit"]["plot"]: "PP1", extra["second"]["plot"]: "PP3", extra["third"]["plot"]: None}
+    assert sorted(item["payment_plans"]) == ["PP1", "PP3"]
+
+    plots = {p["unit_number"]: p for p in _detail(B["rohit"])["plots"]}
+    assert plots[extra["second"]["plot"]]["payment_plan"]["short_code"] == "PP3"
+    assert plots[extra["third"]["plot"]]["terms_status"] == "plan_needed"
+
+
+def test_sheet_plot_value_becomes_the_sale_price_and_received_is_marked():
+    service = servicePlotPaymentTerms()
+    sheet = [["Plot No", "Payment Plan", "Client Name", "Phone", "Booking Date", "Plot Value", "Amount Received"],
+             [f"D9{T}", "PP1", "Mr. Karan", "9000000103", "02-04-2026", "26,27,460", "15,74,870"]]
+    report = service.link_from_sheet(sheet, SURAKSHA, apply=True)
+    assert report.errors == [], report.render()
+    plot = _detail(B["karan"])["plots"][0]
+    assert (plot["sale_price"], plot["total"], plot["amount_received"]) == (2627460, 2627460, 1574870)
+    assert [r["status"] for r in plot["schedule"]][:3] == ["paid", "paid", "paid"]   # 50% = 13,13,730
+    assert plot["schedule"][3]["status"] != "paid"                                   # 2,61,140 of it paid
+    assert plot["outstanding"] == 2627460 - 1574870 and plot["demand_letter_available"] is True
+
+    bad = [sheet[0], [f"D9{T}", "PP1", "Mr. Karan", "9000000103", "02-04-2026", "1,000", "5,000"]]
+    assert any("amount_received_exceeds_total" in e for e in service.link_from_sheet(bad, SURAKSHA).errors)
+
+
+def test_plots_sharing_an_account_keep_their_own_applicants():
+    # Two buyers with one email share an account; each plot keeps its applicant.
+    owner = B["asha"]["customer"]
+    plot = f"F1{T}"
+    unit_id = persistenceInventory().upsert_unit(
+        id=str(uuid.uuid4()), project_name=SURAKSHA, city="Ganaur", unit_number=plot,
+        area_sqmt=99.86, area_sqyd=119.43, status="sold").id
+    persistenceDocument().create_document(
+        id=str(uuid.uuid4()), owner_id=owner, owner_role="customer", document_type="project_booking_application",
+        storage_path=f"imported://t/{plot}", status="imported", project_id="suraksha-enclave",
+        form_data={"projectId": "suraksha-enclave", "project_name": SURAKSHA, "unitNo": plot,
+                   "applicantName": "Mr. Vikas Rao", "coApplicantName": "Mrs. Meena Rao",
+                   "coApplicant2Name": "Mr. Ajay Rao",
+                   "source": "offline_import"})
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE divine_project_inventory SET booked_by = :c WHERE id = :u"),
+                     {"c": owner, "u": unit_id})
+
+    res = client.get("/admin/customers", params={"search": "Asha Verma"}, headers=_admin())
+    item = next(i for i in res.json()["items"] if i["id"] == owner)
+    applicants = {p["unit_number"]: p["applicant_name"] for p in item["plot_plans"]}
+    assert applicants == {B["asha"]["plot"]: "Mrs. Asha Verma", plot: "Mr. Vikas Rao"}
+
+    plots = {p["unit_number"]: p for p in _detail(B["asha"])["plots"]}
+    assert plots[plot]["applicant_name"] == "Mr. Vikas Rao"
+    assert plots[plot]["co_applicant_names"] == ["Mrs. Meena Rao", "Mr. Ajay Rao"]   # both co-applicants
+    assert plots[B["asha"]["plot"]]["applicant_name"] == "Mrs. Asha Verma"
+
+
+# ---- review fixes: which record is a plot's, and the list's plot order ----------
+def _plot_for(owner, project, plot, status="sold"):
+    unit_id = persistenceInventory().upsert_unit(
+        id=str(uuid.uuid4()), project_name=project, city="Ganaur", unit_number=plot,
+        area_sqmt=99.86, area_sqyd=119.43, status=status).id
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE divine_project_inventory SET booked_by = :c WHERE id = :u"),
+                     {"c": owner, "u": unit_id})
+    return unit_id
+
+
+def _record(owner, form, status="imported", project_id=None, payment_id=None, created=None):
+    doc_id = str(uuid.uuid4())
+    persistenceDocument().create_document(
+        id=doc_id, owner_id=owner, owner_role="customer", document_type="project_booking_application",
+        storage_path=f"t://{doc_id}", status=status, project_id=project_id, payment_id=payment_id, form_data=form)
+    if created:
+        with engine.begin() as conn:
+            conn.execute(text("UPDATE divine_documents SET created_date = :d WHERE id = :i"), {"d": created, "i": doc_id})
+    return doc_id
+
+
+def _list_item(owner, search):
+    res = client.get("/admin/customers", params={"search": search}, headers=_admin())
+    return next(i for i in res.json()["items"] if i["id"] == owner)
+
+
+def test_website_booking_without_a_linked_buyer_keeps_its_plan_in_the_list():
+    owner = persistenceCustomer().create_user(username=f"w_{uuid.uuid4().hex[:8]}", password_hash="x",
+                                              first_name="Web", last_name=f"Repair{T}").id
+    plot = f"G1{T}"
+    unit_id = persistenceInventory().upsert_unit(          # booked, but booked_by never set
+        id=str(uuid.uuid4()), project_name=SURAKSHA, city="Ganaur", unit_number=plot,
+        area_sqmt=99.86, area_sqyd=119.43, status="booked").id
+    pay = f"pay-{uuid.uuid4().hex[:8]}"
+    with engine.begin() as conn:
+        conn.execute(text("INSERT INTO divine_bookings(id, payment_id, inventory_id, customer_id, project_name, "
+                          "unit_number, status, kyc_status, version) VALUES (:id, :p, :u, :c, :proj, :plot, "
+                          "'booked', 'verified', 1)"),
+                     {"id": f"BKG-{T}-1", "p": pay, "u": unit_id, "c": owner, "proj": SURAKSHA, "plot": plot})
+    _record(owner, {"unitNo": plot, "projectId": "suraksha-enclave", "applicantName": "Web Buyer",
+                    "payment_plan": {"code": "PP2/FPP/10-90", "short_code": "PP2"}},
+            status="generated", payment_id=pay)
+    item = _list_item(owner, f"Repair{T}")
+    assert item["plot_plans"] == [{"project_name": SURAKSHA, "unit_number": plot, "payment_plan": "PP2",
+                                   "applicant_name": "Web Buyer"}]
+    assert item["payment_plans"] == ["PP2"]
+
+
+def test_a_released_website_booking_is_not_listed():
+    owner = persistenceCustomer().create_user(username=f"w_{uuid.uuid4().hex[:8]}", password_hash="x",
+                                              first_name="Web", last_name=f"Released{T}").id
+    pay = f"pay-{uuid.uuid4().hex[:8]}"
+    with engine.begin() as conn:
+        conn.execute(text("INSERT INTO divine_bookings(id, payment_id, inventory_id, customer_id, project_name, "
+                          "unit_number, status, kyc_status, version) VALUES (:id, :p, 'x', :c, :proj, 'G2', "
+                          "'cancelled', 'verified', 1)"),
+                     {"id": f"BKG-{T}-2", "p": pay, "c": owner, "proj": SURAKSHA})
+    _record(owner, {"unitNo": "G2", "payment_plan": {"code": "PP2/FPP/10-90", "short_code": "PP2"}},
+            status="generated", payment_id=pay)
+    item = _list_item(owner, f"Released{T}")
+    assert item["plot_plans"] == [] and item["payment_plans"] == []
+
+
+def test_the_sheet_and_the_list_use_the_same_newest_record():
+    owner = persistenceCustomer().create_user(username=f"o_{uuid.uuid4().hex[:8]}", password_hash="x",
+                                              first_name="Dup", last_name=f"Records{T}", phone="9000000201").id
+    plot = f"H1{T}"
+    _plot_for(owner, SURAKSHA, plot)
+    base = {"projectId": "suraksha-enclave", "project_name": SURAKSHA, "unitNo": plot,
+            "applicantName": "Mr. Dup", "phone": "9000000201", "source": "offline_import"}
+    _record(owner, base, project_id="suraksha-enclave", created=datetime(2026, 1, 1))
+    newest = _record(owner, {**base, "payment_plan": {"code": PP1, "short_code": "PP1"}, "payment_plan_code": PP1},
+                     project_id="suraksha-enclave", created=datetime(2026, 2, 1))
+    sheet = [["Plot No", "Payment Plan", "Client Name", "Phone", "Booking Date"],
+             [plot, "PL-50-25-15-10", "Mr. Dup", "9000000201", "01-04-2026"]]
+    report = servicePlotPaymentTerms().link_from_sheet(sheet, SURAKSHA, apply=True)
+    assert report.errors == [], report.render()
+    assert _list_item(owner, f"Records{T}")["plot_plans"][0]["payment_plan"] == "PP3"
+    with engine.connect() as conn:
+        code = conn.execute(text("SELECT form_data FROM divine_documents WHERE id = :i"), {"i": newest}).scalar()
+    assert "PP3/FPP/50-25-15-10" in code                    # the sheet wrote to the newest record
+
+
+def test_same_plot_number_in_two_projects_keeps_each_plan_on_its_own_plot():
+    owner = persistenceCustomer().create_user(username=f"o_{uuid.uuid4().hex[:8]}", password_hash="x",
+                                              first_name="Two", last_name=f"Projects{T}").id
+    plot = f"K1{T}"
+    _plot_for(owner, SURAKSHA, plot)
+    _plot_for(owner, OPS, plot)
+    # The OPS record names its project only in projectId (no project_name, no document project_id).
+    _record(owner, {"unitNo": plot, "projectId": "ops-divine-greens", "applicantName": "OPS Buyer",
+                    "payment_plan": {"code": "PP9", "short_code": "PP9"}})
+    _record(owner, {"unitNo": plot, "project_name": SURAKSHA, "applicantName": "Suraksha Buyer",
+                    "payment_plan": {"code": PP1, "short_code": "PP1"}}, project_id="suraksha-enclave")
+    plots = {p["project_name"]: p for p in _list_item(owner, f"Projects{T}")["plot_plans"]}
+    assert (plots[SURAKSHA]["payment_plan"], plots[SURAKSHA]["applicant_name"]) == ("PP1", "Suraksha Buyer")
+    assert (plots[OPS]["payment_plan"], plots[OPS]["applicant_name"]) == ("PP9", "OPS Buyer")
+
+
+def test_list_plots_are_in_natural_plot_order():
+    owner = persistenceCustomer().create_user(username=f"o_{uuid.uuid4().hex[:8]}", password_hash="x",
+                                              first_name="Many", last_name=f"Plots{T}").id
+    for plot in ("D7", "C100", "C16"):
+        _plot_for(owner, f"Natural Order {T}", plot)
+    order = [p["unit_number"] for p in _list_item(owner, f"Plots{T}")["plot_plans"]]
+    assert order == ["C16", "C100", "D7"]
+
+
+def test_plot_value_is_taken_in_whole_rupees_so_the_total_matches():
+    service = servicePlotPaymentTerms()
+    rec = {"plot_value": "10,00,000.50", "plc": "1,000.40"}
+    price = service._sale_price_from_plot_value(rec, {"plc": "1,000.40"})
+    assert price == "999001"                                # 10,00,001 - 1,000 (each rounded first)
+    from DivineService.service_payment_plans import compute_schedule, load_plan_file
+    pp1 = next(p for p in load_plan_file() if p["code"] == PP1)
+    assert compute_schedule(pp1, price, plc=rec["plc"])["total"] == 1000001

@@ -25,7 +25,19 @@ A plot moves through three states (`terms_status`):
 { "id": "C00123", "full_name": "Rohit Mehra", "...": "...", "payment_plans": ["PP1"] }
 ```
 
-`payment_plans` holds the short codes of the plans on the customer's plots, in booking order and each listed once. It's `[]` when no plot has a plan yet.
+It also has `plot_plans`, one entry per plot the customer holds now, in plot-number order:
+
+```json
+"plot_plans": [
+  { "project_name": "Suraksha Enclave", "unit_number": "D7", "payment_plan": "PP1", "applicant_name": "Mr. Rohit Mehra" },
+  { "project_name": "Suraksha Enclave", "unit_number": "D8", "payment_plan": "PP3", "applicant_name": "Mr. Vikas Rao" },
+  { "project_name": "Suraksha Enclave", "unit_number": "D9", "payment_plan": null, "applicant_name": "Mr. Rohit Mehra" }
+]
+```
+
+- **One account per email.** Buyers who share an email share one login account, but **each plot keeps its own applicant**. Show `applicant_name` per plot (it can differ from the account's `full_name`). Each plot's demand letter is addressed to that plot's applicant.
+- `plot_plans` tells you **which plot is on which plan**. Show it as e.g. "D7 · PP1, D8 · PP3, D9 · —". `payment_plan` is `null` while no plan is linked to that plot.
+- `payment_plans` holds the distinct short codes across those plots (`["PP1", "PP3"]`). It's `[]` when no plot has a plan yet.
 
 ## 2. Customer page
 
@@ -39,6 +51,7 @@ A plot moves through three states (`terms_status`):
     "document_id": "5b0c…",              // use in the URLs below
     "record_type": "offline",            // offline | website
     "project_name": "Suraksha Enclave", "unit_number": "D8", "applicant_name": "Mr. Rohit Mehra",
+    "co_applicant_names": [],             // the plot's first and second co-applicant, when given
     "payment_plan": { "code": "PP1/FPP/10-15-25-25-15-10", "short_code": "PP1",
                       "name": "Flexible Payment Plan 10-15-25-25-15-10", "version": 1 },
     "booking_date": "2026-04-18",

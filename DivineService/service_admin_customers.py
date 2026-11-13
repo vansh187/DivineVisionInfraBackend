@@ -54,25 +54,26 @@ class serviceAdminCustomers:
             # only reached for a genuinely empty result or a page past the last one.
             total_items = self._persistence.count_customers(search=search, source=source, status=status)
         total_pages = (total_items + page_size - 1) // page_size
-        plans = self._payment_plans([r.id for r in rows])
+        plans = self._plot_plans([r.id for r in rows])
+        none = {"plot_plans": [], "payment_plans": []}
         return {
-            "items": [{**_as_item(r), "payment_plans": plans.get(r.id, [])} for r in rows],
+            "items": [{**_as_item(r), **plans.get(r.id, none)} for r in rows],
             "pagination": {
                 "page": page, "page_size": page_size,
                 "total_items": total_items, "total_pages": total_pages,
             },
         }
 
-    def _payment_plans(self, customer_ids) -> dict:
-        """customer id -> plan short codes of their plots. Best effort: the list
-        still loads (with no plans shown) if this lookup fails."""
+    def _plot_plans(self, customer_ids) -> dict:
+        """customer id -> {"plot_plans", "payment_plans"}. Best effort: the
+        list still loads (with no plans shown) if this lookup fails."""
         if not customer_ids:
             return {}
         try:
             if self._plot_terms is None:
                 from DivineService.service_plot_payment_terms import servicePlotPaymentTerms
                 self._plot_terms = servicePlotPaymentTerms()
-            return self._plot_terms.plan_labels_for_customers(customer_ids)
+            return self._plot_terms.plot_plans_for_customers(customer_ids)
         except Exception:
             logger.exception("admin_customers_payment_plans_lookup_failed")
             return {}

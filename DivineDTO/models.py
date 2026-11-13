@@ -208,9 +208,20 @@ class CustomerListItemDTO(BaseModel):
     status: Literal["ACTIVE", "BOOKED"]
     created_at: Optional[datetime]
     last_activity_at: Optional[datetime]
-    # Short codes of the payment plans on the customer's plots ("PP1"), in
-    # booking order; empty when no plot has a plan yet.
+    # Short codes of the payment plans on the customer's plots ("PP1"), each
+    # once; empty when no plot has a plan yet.
     payment_plans: List[str] = []
+    # Every plot the customer holds, with its own plan (null = none linked yet).
+    plot_plans: List["CustomerPlotPlanRefDTO"] = []
+
+
+class CustomerPlotPlanRefDTO(BaseModel):
+    project_name: Optional[str] = None
+    unit_number: Optional[str] = None
+    payment_plan: Optional[str] = None      # short code, e.g. "PP1"
+    # The plot's own applicant - may differ from the account holder when
+    # buyers share an email (one account per email).
+    applicant_name: Optional[str] = None
 
 
 class PaginationDTO(BaseModel):
@@ -250,6 +261,7 @@ class CustomerPlotDTO(BaseModel):
     project_name: Optional[str] = None
     unit_number: Optional[str] = None
     applicant_name: Optional[str] = None
+    co_applicant_names: List[str] = []       # first and second co-applicant, when given
     payment_plan: Optional[CustomerPlotPlanDTO] = None
     booking_date: Optional[str] = None       # YYYY-MM-DD
     sale_price: Optional[float] = None
