@@ -9,10 +9,13 @@ from DivineService.service_admin_customers import serviceAdminCustomers
 from DivineDTO.models import CustomerCreateDTO
 
 
-def _service():
+def _service(plans=None):
     persistence = MagicMock()
     customer_persistence = MagicMock()
-    return serviceAdminCustomers(persistence, customer_persistence), persistence, customer_persistence
+    plot_terms = MagicMock()
+    plot_terms.plan_labels_for_customers.return_value = plans or {}
+    return (serviceAdminCustomers(persistence, customer_persistence, plot_terms=plot_terms),
+            persistence, customer_persistence)
 
 
 def _row(total_count, **overrides):
@@ -66,7 +69,21 @@ def test_list_customers_formats_rows_into_plain_dicts_without_total_count():
     assert result["items"] == [{
         "id": "X1", "full_name": "A B", "email": "a@b.com", "phone": "123",
         "source": "WEBSITE", "status": "ACTIVE", "created_at": "2026-01-01", "last_activity_at": "2026-01-01",
+        "payment_plans": [],
     }]
+
+
+def test_list_customers_carries_each_customers_payment_plans():
+    svc, persistence, _ = _service(plans={"X1": ["PP1", "PP3"]})
+    persistence.list_customers.return_value = [_row(total_count=1)]
+    assert svc.list_customers()["items"][0]["payment_plans"] == ["PP1", "PP3"]
+
+
+def test_list_customers_still_loads_when_the_plan_lookup_fails():
+    svc, persistence, _ = _service()
+    svc._plot_terms.plan_labels_for_customers.side_effect = RuntimeError("db down")
+    persistence.list_customers.return_value = [_row(total_count=1)]
+    assert svc.list_customers()["items"][0]["payment_plans"] == []
 
 
 def test_create_customer_rejects_email_already_used_as_username():

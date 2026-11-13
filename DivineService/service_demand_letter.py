@@ -298,9 +298,14 @@ def demand_letter_figures(form: dict, issued: date) -> dict:
         received = sum((_num(r.get("amount")) or 0) for r in rows if _is_paid(r))
     outstanding = max(0, total_plot - received)
 
+    # An offline buyer's amount received that stops partway through an
+    # instalment (service_plot_payment_terms stores it as received_unallocated):
+    # credited against the oldest unpaid dues below. Nothing else sets it.
+    credit = 0
     if any(_s(r.get("status")) for r in rows):
         # Per-row statuses (live milestones / the derived plan) are authoritative.
         unpaid = [r for r in rows if not _is_paid(r)]
+        credit = max(0, _num(form.get("received_unallocated")) or 0)
     else:
         # Older snapshots carry no status: treat instalments as settled in due
         # order for as long as the received amount fully covers them.
@@ -312,9 +317,10 @@ def demand_letter_figures(form: dict, issued: date) -> dict:
             else:
                 covered = -1          # stop settling once one instalment isn't covered
                 unpaid.append(r)
-    overdue = sum((_num(r.get("amount")) or 0) for r in unpaid
-                  if (_to_date(r.get("due_date")) or issued) < issued)
-    overdue = min(overdue, outstanding)
+    overdue_rows = sum((_num(r.get("amount")) or 0) for r in unpaid
+                       if (_to_date(r.get("due_date")) or issued) < issued)
+    overdue = min(max(0, overdue_rows - credit), outstanding)
+    credit = max(0, credit - overdue_rows)        # what's left of it for the next instalment
 
     # What we ask for: everything overdue, payable within a week; with nothing
     # overdue yet, the next unpaid instalment by its own due date. An instalment
@@ -325,7 +331,7 @@ def demand_letter_figures(form: dict, issued: date) -> dict:
         demand, payable_by = overdue, issued + timedelta(days=PAYABLE_WITHIN_DAYS)
     elif demandable:
         nxt = min(demandable, key=lambda r: _to_date(r.get("due_date")) or date.max)
-        demand = min(_num(nxt.get("amount")) or 0, outstanding)
+        demand = min(max(0, (_num(nxt.get("amount")) or 0) - credit), outstanding)
         payable_by = _to_date(nxt.get("due_date")) or issued + timedelta(days=PAYABLE_WITHIN_DAYS)
     elif awaiting_possession:
         demand, payable_by = 0, issued + timedelta(days=PAYABLE_WITHIN_DAYS)

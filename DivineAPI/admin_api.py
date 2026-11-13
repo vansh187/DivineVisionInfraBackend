@@ -2,7 +2,7 @@ import os
 import time
 import logging
 from typing import Optional, Literal
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile
 from sqlalchemy.exc import IntegrityError
 
 from DivineDTO.models import (
@@ -10,6 +10,7 @@ from DivineDTO.models import (
     AdminVerifySignupDTO, AdminResendSignupOtpDTO,
     AdminApprovalItemDTO, AdminApprovalListResponseDTO, AdminApprovalDecisionDTO,
     CustomerListResponseDTO, CustomerListItemDTO, CustomerCreateDTO, BrokerListResponseDTO,
+    CustomerDetailDTO, CustomerPlotDTO, CustomerPlotTermsDTO,
     AdminVisitListResponseDTO, AdminVisitListItemDTO,
     ForgotPasswordDTO, ResetPasswordDTO, MessageDTO,
 )
@@ -28,6 +29,25 @@ _password_reset_service = servicePasswordReset(role="admin", user_persistence=pe
 _admin_customers_service = serviceAdminCustomers()
 _admin_brokers_service = serviceAdminBrokers()
 _admin_visits_service = serviceAdminVisits()
+_plot_terms_service = None
+
+
+def _plot_terms():
+    global _plot_terms_service
+    if _plot_terms_service is None:
+        from DivineService.service_plot_payment_terms import servicePlotPaymentTerms
+        _plot_terms_service = servicePlotPaymentTerms()
+    return _plot_terms_service
+
+
+# Plot payment-terms error code -> HTTP status (anything else is a 400).
+_PLOT_TERMS_STATUS = {
+    "not_found": 404,
+    "plot_not_found": 404,
+    "terms_from_website_booking": 409,
+    "schedule_has_payments": 409,
+    "payment_details_pending": 409,
+}
 
 
 @router.post("/signup", response_model=AdminOutDTO)
@@ -301,6 +321,68 @@ def create_customer(dto: CustomerCreateDTO, current_admin: dict = Depends(get_cu
         raise HTTPException(status_code=500, detail="internal_error")
     finally:
         logger.debug("admin_create_customer_latency_ms=%.2f", (time.monotonic() - start) * 1000)
+
+
+@router.get("/customers/{customer_id}", response_model=CustomerDetailDTO)
+def get_customer(customer_id: str, current_admin: dict = Depends(get_current_admin)):
+    """One customer with each of their plots: its payment plan, booking date,
+    prices, amount received, schedule, and whether a demand letter can be
+    issued. Covers website bookings and offline buyers' plots."""
+    start = time.monotonic()
+    try:
+        return _plot_terms().customer_detail(customer_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="not_found")
+    except Exception:
+        logger.exception("admin_get_customer_failed customer_id=%s", customer_id)
+        raise HTTPException(status_code=500, detail="internal_error")
+    finally:
+        logger.debug("admin_get_customer_latency_ms=%.2f", (time.monotonic() - start) * 1000)
+
+
+@router.put("/customers/{customer_id}/plots/{document_id}/payment-terms", response_model=CustomerPlotDTO)
+def set_customer_plot_payment_terms(customer_id: str, document_id: str, dto: CustomerPlotTermsDTO,
+                                    current_admin: dict = Depends(get_current_admin)):
+    """Link a payment plan and booking date to an offline buyer's plot, and its
+    prices and amount received to date once known (they turn on the demand
+    letter). Sent again, it replaces the plot's terms. 409
+    terms_from_website_booking for a website booking; 409 schedule_has_payments
+    once an instalment was paid in the app; 400 with a code for bad input."""
+    start = time.monotonic()
+    try:
+        return _plot_terms().set_terms(
+            customer_id, document_id, payment_plan=dto.payment_plan, booking_date=dto.booking_date,
+            sale_price=dto.sale_price, plc=dto.plc, ifms=dto.ifms, cam=dto.cam,
+            amount_received=dto.amount_received, set_by=f"admin:{current_admin.get('sub')}",
+        )
+    except ValueError as e:
+        code = str(e)
+        raise HTTPException(status_code=_PLOT_TERMS_STATUS.get(code, 400), detail=code)
+    except Exception:
+        logger.exception("admin_set_plot_terms_failed customer_id=%s document_id=%s", customer_id, document_id)
+        raise HTTPException(status_code=500, detail="internal_error")
+    finally:
+        logger.debug("admin_set_plot_terms_latency_ms=%.2f", (time.monotonic() - start) * 1000)
+
+
+@router.get("/customers/{customer_id}/plots/{document_id}/demand-letter")
+def get_customer_plot_demand_letter(customer_id: str, document_id: str,
+                                    current_admin: dict = Depends(get_current_admin)):
+    """The plot's Demand Letter PDF - the same letter the customer downloads.
+    409 payment_details_pending until the plot has prices."""
+    start = time.monotonic()
+    try:
+        pdf_bytes, filename = _plot_terms().demand_letter(customer_id, document_id)
+        return Response(content=pdf_bytes, media_type="application/pdf",
+                        headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+    except ValueError as e:
+        code = str(e)
+        raise HTTPException(status_code=_PLOT_TERMS_STATUS.get(code, 400), detail=code)
+    except Exception:
+        logger.exception("admin_plot_demand_letter_failed customer_id=%s document_id=%s", customer_id, document_id)
+        raise HTTPException(status_code=500, detail="internal_error")
+    finally:
+        logger.debug("admin_plot_demand_letter_latency_ms=%.2f", (time.monotonic() - start) * 1000)
 
 
 @router.get("/brokers", response_model=BrokerListResponseDTO)
