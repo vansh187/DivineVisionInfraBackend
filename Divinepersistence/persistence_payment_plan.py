@@ -101,6 +101,7 @@ _DEFAULT_QUERIES = {
         "ORDER BY sort_order ASC, code ASC, version DESC;"
     ),
     "list_versions": "SELECT * FROM divine_payment_plans WHERE code = :code ORDER BY version DESC;",
+    "list_plan_codes": "SELECT code, short_code, is_active FROM divine_payment_plans;",
     "set_active": (
         "UPDATE divine_payment_plans SET is_active = :active, last_updated_date = :now "
         "WHERE code = :code AND version = :version;"
@@ -210,6 +211,11 @@ class persistencePaymentPlan:
                 out.append(plan)
             return out
 
+    def list_plan_codes(self) -> list:
+        """code / short_code / is_active of every plan version - no instalments."""
+        with self._session_factory() as db:
+            return [dict(r) for r in db.execute(text(self._queries["list_plan_codes"])).mappings().all()]
+
     def list_versions(self, code: str) -> list:
         """All versions of one plan code, newest first (no instalments)."""
         with self._session_factory() as db:
@@ -293,40 +299,47 @@ class persistencePaymentPlan:
         Returns 'created' | 'updated'."""
         with self._session_factory() as db:
             try:
-                now = datetime.now(timezone.utc)
-                version = int(plan.get("version") or 1)
-                existing = db.execute(text(self._queries["get_plan_by_code_version"]),
-                                      {"code": plan["code"], "version": version}).mappings().first()
-                meta = {
-                    "short_code": plan["short_code"], "name": plan["name"],
-                    "description": plan.get("description"), "project_id": plan.get("project_id"),
-                    "is_active": bool(plan.get("is_active", True)),
-                    "sort_order": int(plan.get("sort_order") or 0), "now": now,
-                }
-                if existing:
-                    db.execute(text(self._queries["update_plan_meta"]), {**meta, "id": existing["id"]})
-                    result = "updated"
-                else:
-                    plan_id = str(uuid.uuid4())
-                    db.execute(text(self._queries["insert_plan"]),
-                               {**meta, "id": plan_id, "code": plan["code"], "version": version})
-                    for row in plan["instalments"]:
-                        db.execute(text(self._queries["insert_instalment"]), {
-                            "id": str(uuid.uuid4()), "plan_id": plan_id, "seq": int(row["seq"]),
-                            "label": row["label"], "percent": float(row["percent"]),
-                            "due_trigger": row.get("due_trigger") or "booking",
-                            "due_days": row.get("due_days"), "charge_head": row.get("charge_head"),
-                            "due_from": row.get("due_from") if row.get("due_trigger") == "custom" else None,
-                        })
-                    result = "created"
-                if meta["is_active"]:
-                    db.execute(text(self._queries["deactivate_other_versions"]),
-                               {"inactive": False, "now": now, "code": plan["code"], "version": version})
+                result = self.write_plan(db, plan)
                 db.commit()
                 return result
             except Exception:
                 db.rollback()
                 raise
+
+    def write_plan(self, db, plan: dict) -> str:
+        """upsert_plan's writes inside the caller's open session - never commits,
+        so a caller can save several plans in one transaction (the admin CSV
+        import, which must write all of its plans or none)."""
+        now = datetime.now(timezone.utc)
+        version = int(plan.get("version") or 1)
+        existing = db.execute(text(self._queries["get_plan_by_code_version"]),
+                              {"code": plan["code"], "version": version}).mappings().first()
+        meta = {
+            "short_code": plan["short_code"], "name": plan["name"],
+            "description": plan.get("description"), "project_id": plan.get("project_id"),
+            "is_active": bool(plan.get("is_active", True)),
+            "sort_order": int(plan.get("sort_order") or 0), "now": now,
+        }
+        if existing:
+            db.execute(text(self._queries["update_plan_meta"]), {**meta, "id": existing["id"]})
+            result = "updated"
+        else:
+            plan_id = str(uuid.uuid4())
+            db.execute(text(self._queries["insert_plan"]),
+                       {**meta, "id": plan_id, "code": plan["code"], "version": version})
+            for row in plan["instalments"]:
+                db.execute(text(self._queries["insert_instalment"]), {
+                    "id": str(uuid.uuid4()), "plan_id": plan_id, "seq": int(row["seq"]),
+                    "label": row["label"], "percent": float(row["percent"]),
+                    "due_trigger": row.get("due_trigger") or "booking",
+                    "due_days": row.get("due_days"), "charge_head": row.get("charge_head"),
+                    "due_from": row.get("due_from") if row.get("due_trigger") == "custom" else None,
+                })
+            result = "created"
+        if meta["is_active"]:
+            db.execute(text(self._queries["deactivate_other_versions"]),
+                       {"inactive": False, "now": now, "code": plan["code"], "version": version})
+        return result
 
     def set_possession_date(self, project_id: str, possession_date, updated_by: str):
         with self._session_factory() as db:

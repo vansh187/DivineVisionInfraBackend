@@ -118,6 +118,44 @@ class PersistenceDB:
             return False
 
 
+# The account tables whose ids are "<prefix>NNNNN" - "C01234", "B01234",
+# "A01234". Only these names ever reach new_user_ids' SQL text.
+_USER_ID_TABLES = {"C": "divine_customer_users", "B": "divine_broker_users", "A": "divine_admin_users"}
+
+
+def new_user_ids(db, prefix: str, count: int = 1) -> list:
+    """``count`` unused account ids in the "<prefix> + 5 digits" format, unique
+    against the table and each other. Only the candidates are looked up (one
+    IN query per round), never the whole table. ``db`` is a Session or
+    Connection, so a caller's open transaction sees its own uncommitted rows.
+    A concurrent insert can still take an id before commit: the primary key
+    is the backstop, and the caller retries on IntegrityError."""
+    import random
+    from sqlalchemy import bindparam
+
+    table = _USER_ID_TABLES[prefix]
+    query = text(f"SELECT id FROM {table} WHERE id IN :ids").bindparams(bindparam("ids", expanding=True))
+    picked = []
+    chosen = set()
+    for _ in range(50):
+        need = count - len(picked)
+        if need <= 0:
+            return picked
+        candidates = set()
+        while len(candidates) < min(need * 2 + 5, 500):
+            candidate = prefix + str(random.randint(0, 99999)).zfill(5)
+            if candidate not in chosen:
+                candidates.add(candidate)
+        taken = {r[0] for r in db.execute(query, {"ids": list(candidates)}).all()}
+        for candidate in candidates - taken:
+            if len(picked) < count:
+                picked.append(candidate)
+                chosen.add(candidate)
+    if len(picked) == count:
+        return picked
+    raise RuntimeError(f"Failed to generate unique {table} id")
+
+
 class RowWrapper:
     def __init__(self, mapping):
         if mapping:

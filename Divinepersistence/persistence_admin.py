@@ -1,9 +1,8 @@
-import random
 from sqlalchemy import Column, String, DateTime, Boolean, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from datetime import datetime, timezone
-from .persistence_db import Base, SessionLocal, engine, RowWrapper, load_queries
+from .persistence_db import Base, SessionLocal, engine, RowWrapper, load_queries, new_user_ids
 
 
 class AdminModel(Base):
@@ -76,11 +75,7 @@ class persistenceAdmin:
         self._engine = engine
 
     def _generate_unique_id(self, db: Session) -> str:
-        for _ in range(50):
-            candidate = "A" + str(random.randint(0, 99999)).zfill(5)
-            if not db.query(AdminModel).filter_by(id=candidate).first():
-                return candidate
-        raise RuntimeError("Failed to generate unique admin id")
+        return new_user_ids(db, "A")[0]
 
     def create_user(self, full_name: str, employee_id: str, email: str, password_hash: str, created_by: str = None) -> AdminModel:
         with self._session_factory() as db:
