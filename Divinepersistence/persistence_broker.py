@@ -1,9 +1,8 @@
-import random
 from sqlalchemy import Column, String, DateTime, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from datetime import datetime, timezone
-from .persistence_db import Base, SessionLocal, engine, RowWrapper, load_queries
+from .persistence_db import Base, SessionLocal, engine, RowWrapper, load_queries, new_user_ids
 
 
 class BrokerModel(Base):
@@ -41,11 +40,7 @@ class persistenceBroker:
         self._engine = engine
 
     def _generate_unique_id(self, db: Session) -> str:
-        for _ in range(50):
-            candidate = "B" + str(random.randint(0, 99999)).zfill(5)
-            if not db.query(BrokerModel).filter_by(id=candidate).first():
-                return candidate
-        raise RuntimeError("Failed to generate unique broker id")
+        return new_user_ids(db, "B")[0]
 
     def create_user(self, username: str, password_hash: str, created_by: str = None, email: str = None, phone: str = None, first_name: str = None, last_name: str = None, project: str = None) -> BrokerModel:
         with self._session_factory() as db:

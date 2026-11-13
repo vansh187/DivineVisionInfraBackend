@@ -35,6 +35,7 @@ from DivineAPI.admin_payments_api import router as admin_payments_router
 from DivineAPI.admin_refunds_api import router as admin_refunds_router
 from DivineAPI.admin_help_support_api import router as admin_help_support_router
 from DivineAPI.payment_plan_api import router as payment_plan_router, admin_router as admin_payment_plan_router, admin_plans_router as admin_payment_plans_router
+from DivineAPI.admin_imports_api import router as admin_imports_router
 from DivineService import serviceHealth
 # Anonymous callers only - logged-in ones are keyed by verified user id.
 from DivineService.client_ip import client_ip
@@ -192,3 +193,4 @@ app.include_router(admin_help_support_router)
 app.include_router(payment_plan_router)
 app.include_router(admin_payment_plan_router)
 app.include_router(admin_payment_plans_router)
+app.include_router(admin_imports_router)

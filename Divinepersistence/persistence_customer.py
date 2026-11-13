@@ -1,9 +1,8 @@
-import random
 from sqlalchemy import Boolean, Column, String, DateTime, bindparam, false, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from datetime import datetime, timezone
-from .persistence_db import Base, SessionLocal, engine, RowWrapper, load_queries
+from .persistence_db import Base, SessionLocal, engine, RowWrapper, load_queries, new_user_ids
 
 
 class CustomerModel(Base):
@@ -49,11 +48,7 @@ class persistenceCustomer:
         self._engine = engine
 
     def _generate_unique_id(self, db: Session) -> str:
-        for _ in range(50):
-            candidate = "C" + str(random.randint(0, 99999)).zfill(5)
-            if not db.query(CustomerModel).filter_by(id=candidate).first():
-                return candidate
-        raise RuntimeError("Failed to generate unique customer id")
+        return new_user_ids(db, "C")[0]
 
     def create_user(self, username: str, password_hash: str, created_by: str = None, email: str = None, phone: str = None, first_name: str = None, last_name: str = None) -> CustomerModel:
         with self._session_factory() as db:

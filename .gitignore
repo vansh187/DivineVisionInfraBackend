@@ -219,3 +219,7 @@ __marimo__/
 
 # Prod data migration reports/backups (contain customer personal data)
 migration_reports/
+
+# Local review scratch files
+.diff_review.txt
+.uncommitted_diff.txt

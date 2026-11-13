@@ -27,7 +27,6 @@ module-level so tests can exercise them without a database.
 import csv
 import json
 import logging
-import random
 import re
 import secrets
 import string
@@ -852,13 +851,8 @@ class OfflineBuyerImport:
         return report
 
     def _create_customer(self, conn, kind, ident, first, members, source):
-        for _ in range(100):
-            candidate = "C" + str(random.randint(0, 99999)).zfill(5)
-            if not conn.execute(text("SELECT 1 FROM divine_customer_users WHERE id = :id"),
-                                {"id": candidate}).first():
-                break
-        else:  # pragma: no cover
-            raise RuntimeError("could not allocate a customer id")
+        from Divinepersistence.persistence_db import new_user_ids
+        candidate = new_user_ids(conn, "C")[0]
         parts = (first.applicant or "").split(" ", 1)
         now = _now()
         # Unusable until the invite step sets a real temporary password.
